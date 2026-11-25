@@ -18,13 +18,14 @@ import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 import { choiceAnswer, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { PREFETCH_SCENARIOS, buildPrefetchScript } from './egdesk-prefetch-real-engine-scripts.mjs'
+import { buildMemoryFirstScript, NOT_SETTLED_WORDS } from './egdesk-memory-first-real-engine-scripts.mjs'
 import { checkRecording, recordingFacts, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-write-v2', buildMemoryWriteV2Script], ['memory-write-v3', buildMemoryWriteV3Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-write-v2', buildMemoryWriteV2Script], ['memory-write-v3', buildMemoryWriteV3Script], ['memory-first', buildMemoryFirstScript], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -562,4 +563,51 @@ test('prefetch compare script: pairs the -off and -on records and prints the sav
   for (const [id, ms, calls] of [['notes-off', 12400, 2], ['notes-on', 4600, 0], ['code-off', 11800, 2], ['code-on', 5000, 0], ['ledger-off', 13100, 3], ['ledger-on', 4900, 0]]) records.push(rec(id, ms, calls))
   const out = compare(records).lines.join('\n')
   assert.match(out, /\| notes \| saving \| \| 2 calls \| 7\.8/); assert.match(out, /mean saving over 3 pairs: 7\.6 s per turn/); assert.match(out, /\| ledger \| off \| ok \| 3 \(egdesk_read_source/)
+})
+
+// ---- c38: memory first through the check's composition ----
+const firstJudge = () => { const inner = writeJudge({ realSource: true }); return async wire => {
+  if (wire.questions.some(q => q.name === 'cf_differs')) { const message = /message:\n([\s\S]*)$/i.exec(wire.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n\n'))?.[1] ?? ''
+    return [{ name: 'cf_differs', type: 'predicate', probability: /확정했어|정했대/.test(message) ? 0.95 : 0.03 }] }
+  return inner(wire) } }
+const firstFinals = ['알겠어요.', '네. 회의 일정은 다음 주 화요일로 계획됐다고 적어 둘게요.', '네. 회의 일정은 다음 주 화요일로 계획됐다고 적어 둘게요.', '네.']
+test('memory-first-v1 through the check (fake engine): the settlement is the product\'s own (stored before the engine, told to it, conflict marked), the confirmation works one turn earlier, the baseline is write-v3\'s own-confirm unchanged', async t => {
+  const script = buildMemoryFirstScript()
+  assert.deepEqual(script.conversations.map(c => c.id), ['own-confirm-off', 'own-confirm-first', 'control-first', 'hedged-first', 'relayed-first'])
+  const v3 = buildMemoryWriteV3Script()
+  assert.deepEqual(script.conversations[0].turns, v3.conversations[0].turns, 'the baseline is write-v3\'s own-confirm, none loosened')
+  assert.deepEqual(script.conversations.slice(3).map(c => c.turns), [v3.conversations[1].turns.slice(0, 2), v3.conversations[2].turns.slice(0, 2)], 'hedged and relayed keep v3\'s expectations')
+  assert.ok(script.conversations.slice(1).every(c => c.flags.EGDESK_TURN_MEMORY_WRITE_FIRST === 'on') && !('EGDESK_TURN_MEMORY_WRITE_FIRST' in script.conversations[0].flags))
+  const w = persistedRoom(world(t, { turns: firstFinals.map(final => ({ steps: [], final })) }, { decide: firstJudge() }))
+  const result = await runCheck(w.options, asScripts(script), w.deps)
+  assert.equal(result.records.length, 5)
+  for (const rec of result.records) { assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, `${rec.id}: ${JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok)))}`) }
+  const first = result.records.find(r => r.id === 'own-confirm-first'), seen = i => first.turns[i].recording.seeded['schedule/product-review']
+  assert.deepEqual(seen(1).readings.map(r => [r.state, r.status]), [['pending', 'plan']]); assert.equal(seen(1).status, 'unknown')
+  assert.deepEqual([first.turns[1].recording.settled.inTime, first.turns[1].recording.settled.sent, first.turns[1].recording.settled.conflict, first.turns[1].recording.settled.kind], [true, true, 'yes', 'pending_reading'])
+  assert.equal(seen(2).readings[0].state, 'accepted', 'confirmed at turn 3'); assert.equal(first.turns.length, 3)
+  const off = result.records.find(r => r.id === 'own-confirm-off'); assert.equal(off.turns.length, 4); assert.equal(off.turns[1].recording.settled, undefined, 'no settlement without the flag')
+  assert.equal(result.records.find(r => r.id === 'control-first').turns[1].recording.settled?.conflict ?? null, null)
+  // the words an answer must not use are the ones of check-27mw
+  assert.ok(NOT_SETTLED_WORDS.includes('확정됐') && first.turns[1].expectations.some(e => e.check === 'answerExcludes' && e.ok))
+})
+
+test('memory-first: settled / conflict expectations are accepted only in a conversation with the flag, and are strict booleans', () => {
+  const script = buildMemoryFirstScript()
+  assert.deepEqual(validateEngineScript(script), { ok: true, errors: [] })
+  const noFlag = structuredClone(script); delete noFlag.conversations[1].flags.EGDESK_TURN_MEMORY_WRITE_FIRST
+  assert.ok(validateEngineScript(noFlag).errors.some(e => /settled.*needs the flag EGDESK_TURN_MEMORY_WRITE_FIRST/.test(e)), JSON.stringify(validateEngineScript(noFlag).errors))
+  const odd = structuredClone(script); odd.conversations[1].turns[1].expect.recording.conflict = 'yes'
+  assert.ok(validateEngineScript(odd).errors.some(e => /conflict: true or false/.test(e)))
+})
+
+test('memory-first compare script: prints per turn the engine seconds, the settlement and the answer, and the turn-2 comparison', async () => {
+  const { compare } = await import('../scripts/egdesk-memory-first-compare.mjs')
+  const turn = (ms, say, settled = null, ok = true) => ({ subTurns: [{ latencyMs: ms }], posted: [say], expectations: [{ check: 'posted', ok }], recording: settled ? { settled } : {} })
+  const out = compare([{ set: 'real-engine-memory-first-v1', id: 'own-confirm-off', ok: true, turns: [turn(6000, 'a'), turn(7900, '그럼 확정됐군요.'), turn(8000, 'b'), turn(8000, 'c')] },
+    { set: 'real-engine-memory-first-v1', id: 'own-confirm-first', ok: true, turns: [turn(6000, 'a'), turn(8300, '확인 전인 보고로 적어 뒀어요.', { inTime: true, sent: true, kind: 'pending_reading', ms: 640, conflict: 'yes' }), turn(7000, '네')] }, { set: 'other', id: 'x', ok: false }])
+  assert.equal(out.ok, true); const text = out.lines.join('\n')
+  assert.match(text, /\| own-confirm-first \| 2 \| ok \| 8\.3 \| yes \(pending_reading, 640 ms, conflict yes\) \| 확인 전인 보고로 적어 뒀어요\./)
+  assert.match(text, /turn 2 \(the statement\): engine 7\.9 s without the flag, 8\.3 s with it; the person's "응 맞아" confirms at turn 3 with the flag \(turn 4 without it\)/)
+  assert.equal(compare([{ set: 'real-engine-memory-first-v1', id: 'x', ok: false, turns: [] }]).ok, false)
 })

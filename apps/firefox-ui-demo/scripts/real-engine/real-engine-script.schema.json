@@ -1254,6 +1254,9 @@
                         "confirmed": {
                           "type": "boolean"
                         },
+                        "conflict": {
+                          "type": "boolean"
+                        },
                         "newPages": {
                           "maximum": 20,
                           "minimum": 0,
@@ -1287,6 +1290,9 @@
                           "maximum": 20,
                           "minimum": 0,
                           "type": "integer"
+                        },
+                        "settled": {
+                          "type": "boolean"
                         },
                         "status": {
                           "items": {

@@ -9,7 +9,9 @@
 //                              "pageStatus": ["unknown", "plan", "done"]          the record's status now (a promoted reading changes it, a pending one never does)
 //                              "confirmed": true | false             the latest reading carries the person's confirmation (confirmedAt)
 //                              "readings": n                         readings on that record in all (pending, accepted, rejected)
-//                              "newPages": n }                       utterance pages the write path stored in this conversation's scope
+//                              "newPages": n,                      utterance pages the write path stored in this conversation's scope
+//                              "settled": true | false             the write was settled before the engine and the engine was told the settled state (flag EGDESK_TURN_MEMORY_WRITE_FIRST=on, L7 c38)
+//                              "conflict": true | false }          the settlement marked the message as differing from the record it is about (flag as above)
 // The confirmation step reads the previous reply, which is a past utterance of the DM: the product allows that only for an Agent DM whose person opted in to reuse of the DM's utterances
 // (MemoryEvidenceStore.enableSpeech, the opt-in the memory settings offer). A conversation says so with "speechConsent": true (it also needs "agentProfile", so --persisted-with-cleanup):
 // after the FIRST turn (the DM then exists) the hook composes a memory-evidence store for this conversation's own temporary folder and makes that opt-in through the product's API, the
@@ -25,11 +27,11 @@ import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 export const RECORDING_READING = Object.freeze(['none', 'pending', 'accepted', 'rejected', 'pending_or_none'])
 const STATUSES = Object.freeze(['plan', 'done', 'superseded']), PAGE_STATUSES = Object.freeze(['unknown', 'plan', 'done'])
 const BASES = Object.freeze(['self_reported_observation', 'attributed_report', 'inference', 'record_based', 'unspecified', null])
-export const RECORDING_KEYS = Object.freeze(['page', 'reading', 'status', 'basis', 'pageStatus', 'confirmed', 'readings', 'newPages'])
+export const RECORDING_KEYS = Object.freeze(['page', 'reading', 'status', 'basis', 'pageStatus', 'confirmed', 'readings', 'newPages', 'settled', 'conflict'])
 const listOf = items => ({ type: 'array', minItems: 1, maxItems: 8, items })
 export const RECORDING_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, required: ['page'], properties: {
   page: { type: 'string' }, reading: { enum: [...RECORDING_READING] }, status: listOf({ enum: [...STATUSES] }), basis: listOf({ enum: [...BASES] }), pageStatus: listOf({ enum: [...PAGE_STATUSES] }),
-  confirmed: { type: 'boolean' }, readings: { type: 'integer', minimum: 0, maximum: 20 }, newPages: { type: 'integer', minimum: 0, maximum: 20 } } })
+  confirmed: { type: 'boolean' }, readings: { type: 'integer', minimum: 0, maximum: 20 }, newPages: { type: 'integer', minimum: 0, maximum: 20 }, settled: { type: 'boolean' }, conflict: { type: 'boolean' } } })
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 
 /** validateRecordingExpect(expect, conversation, where) → ['<where>.<key>: <reason>'] */
@@ -44,6 +46,11 @@ export function validateRecordingExpect(expect, conv, where = '$.expect.recordin
   const oneOf = (key, allowed) => { if (expect[key] === undefined) return; if (!Array.isArray(expect[key]) || !expect[key].length || expect[key].some(v => !allowed.includes(v))) bad(`${where}.${key}`, `a list of ${allowed.map(String).join(' / ')}`) }
   oneOf('status', STATUSES); oneOf('basis', BASES); oneOf('pageStatus', PAGE_STATUSES)
   if (expect.confirmed !== undefined && typeof expect.confirmed !== 'boolean') bad(`${where}.confirmed`, 'true or false')
+  for (const k of ['settled', 'conflict']) {
+    if (expect[k] === undefined) continue
+    if (typeof expect[k] !== 'boolean') bad(`${where}.${k}`, 'true or false')
+    else if (conv?.flags?.EGDESK_TURN_MEMORY_WRITE_FIRST !== 'on') bad(`${where}.${k}`, 'needs the flag EGDESK_TURN_MEMORY_WRITE_FIRST "on" in this conversation')
+  }
   for (const k of ['readings', 'newPages']) if (expect[k] !== undefined && !(Number.isSafeInteger(expect[k]) && expect[k] >= 0 && expect[k] <= 20)) bad(`${where}.${k}`, 'an integer 0-20')
   if (['status', 'basis', 'confirmed'].some(k => expect[k] !== undefined) && (expect.reading === 'none')) bad(where, 'status, basis and confirmed describe a reading, but reading is "none"')
   return errors
@@ -89,6 +96,8 @@ export function checkRecording(expect, facts) {
   if (expect.confirmed !== undefined) put('confirmed', (latest?.confirmedAt != null) === expect.confirmed, { wanted: expect.confirmed, confirmedAt: latest?.confirmedAt ?? null })
   if (expect.readings !== undefined) put('readings', readings.length === expect.readings, { wanted: expect.readings, readings: readings.length })
   if (expect.newPages !== undefined) put('newPages', facts.written.length === expect.newPages, { wanted: expect.newPages, written: facts.written })
+  if (expect.settled !== undefined) put('settled', (facts.settled?.inTime === true && facts.settled?.sent === true) === expect.settled, { wanted: expect.settled, settled: facts.settled ?? null })
+  if (expect.conflict !== undefined) put('conflict', (facts.settled?.conflict === 'yes') === expect.conflict, { wanted: expect.conflict, conflict: facts.settled?.conflict ?? null, p: facts.settled?.conflictP ?? null })
   return out
 }
 
@@ -124,6 +133,8 @@ export function createRecordingHook(conversation) {
         const clientThreadId = ctx.state().clientThreadId
         const wiki = await chat.decisionContext.turnMemory.wiki({ body: {}, context: { clientThreadId }, sources: null })
         facts = recordingFacts(wiki, { seededIds, clientThreadId })
+        // write first (flag): what the settlement was for this turn, from the product's own receipt of the turn's write (closed words and numbers only)
+        try { const last = [...chat.runs.values()].at(-1), wf = chat.turnMemoryWriteReceipts.get(last)?.writeFirst; if (wf) facts.settled = { settled: wf.settled, inTime: wf.inTime, sent: wf.sent, ms: wf.ms, kind: wf.kind, conflict: wf.conflict, conflictP: wf.conflictP } } catch { /* no receipt */ }
       } catch (e) { error = String(e?.message ?? e).slice(0, 120); facts = { seeded: {}, written: [] } }
       const expectations = ctx.expect?.recording !== undefined ? (error ? [{ check: 'recording.read', ok: false, detail: { error } }] : checkRecording(ctx.expect.recording, facts)) : []
       return { record: { ...facts, ...(consent ? { speechConsent: { granted, ...(consentError ? { error: consentError } : {}) } } : {}), ...(error ? { error } : {}) }, expectations }
