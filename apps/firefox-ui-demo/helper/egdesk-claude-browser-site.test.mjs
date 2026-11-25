@@ -111,3 +111,33 @@ test('u11, the screen: while the site question is open the Card\'s body-capture 
   const finish = surface.slice(surface.indexOf('const finish = (answer) => {', surface.indexOf('const browserToolAskSite')), surface.indexOf('const button = (label, answer'))
   assert.match(finish, /card\.classList\.remove\('egd-site-ask-open'\);[\s\S]*resolve\(answer\)/, 'every way out (answer or the timer) goes through finish')
 })
+
+test('u12: right after the site is allowed the link is found again on a NEW observation and followed once: also when the page re-numbers its refs meanwhile, and when the first move is refused as stale (one more observation, then once); the same site is then answered at once', async t => {
+  // refs renumbered while the person decides: same address and words, other ref
+  let w
+  w = google(t, async () => { const el = w.pw.state.pages['/'].elements.find(e => e.ref === 'about'); el.ref = 'about-2'; w.pw.state.cur = { ...w.pw.state.cur, revision: w.pw.state.cur.revision + 1 }; return 'allowed' }, { realTransport: true })
+  const sent = await start(w); await callTool(w, 'egdesk_card_read', { mode: 'structure' })
+  const out = await callTool(w, 'egdesk_card_press', { ref: 'about' })
+  assert.deepEqual([out.status, out.via], ['pressed', 'site'], JSON.stringify(out))
+  assert.equal(navigations(w).length, 1)
+  w.transports.at(-1).finish(); await w.settled(sent)
+  // the first move is refused as stale (the page moved under it): one more new observation, then the move
+  const s = google(t, 'allowed', { realTransport: true, staleSwap: { from: '/', to: '/' } })
+  const sentS = await start(s); await callTool(s, 'egdesk_card_read', { mode: 'structure' })
+  const second = await callTool(s, 'egdesk_card_press', { ref: 'about' })
+  assert.deepEqual([second.status, second.via], ['pressed', 'site'], JSON.stringify(second))
+  assert.deepEqual(s.pw.state.acts.filter(act => act.type === 'navigate').map(act => act.rejected === true), [true, false], 'the stale one was refused, the retry went')
+  s.transports.at(-1).finish(); await s.settled(sentS)
+})
+
+test('u12, when the link is no longer the same (another address or other words after the answer) nothing moves: refused as before', async t => {
+  for (const change of [el => { el.href = 'https://about.google/other' }, el => { el.label = 'Google 개인정보' }]) {
+    let w
+    w = google(t, async () => { change(w.pw.state.pages['/'].elements.find(e => e.ref === 'about')); w.pw.state.cur = { ...w.pw.state.cur, revision: w.pw.state.cur.revision + 1 }; return 'allowed' }, { realTransport: true })
+    const sent = await start(w); await callTool(w, 'egdesk_card_read', { mode: 'structure' })
+    const out = await callTool(w, 'egdesk_card_press', { ref: 'about' })
+    assert.deepEqual([out.status, out.code], ['refused', 'PAGE_REF_UNKNOWN'], JSON.stringify(out))
+    assert.deepEqual(navigations(w), [])
+    w.transports.at(-1).finish(); await w.settled(sent)
+  }
+})

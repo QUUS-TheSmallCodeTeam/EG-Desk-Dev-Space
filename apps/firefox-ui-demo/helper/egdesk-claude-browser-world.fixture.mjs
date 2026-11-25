@@ -36,7 +36,7 @@ const PAGES = () => ({ '/home': { text: ['쇼핑몰'], elements: [{ ref: 'q', ro
  * world(t, { harness, pageTools, codexReady, oldReadiness }): the bridge's wiring in miniature. harness / pageTools: the two flags (EGDESK_CLAUDE_HARNESS, EGDESK_PAGE_TOOLS).
  * codexReady: the Codex slot's own answer (qaReady), false = no Codex app-server (the real-window case). oldReadiness: the Browser provider's readiness as u4 left it (the Codex slot's, for every engine).
  */
-export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null, realTransport = false, siteUnreflected = false } = {}) {
+export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null, realTransport = false, siteUnreflected = false, staleSwap = null } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-claude-route-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const root = path.join(base, 'project'); fs.mkdirSync(root); const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
   const transports = [], events = [], ran = [], decisionBodies = [], receiveErrors = []
@@ -77,7 +77,7 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   const spawn = (file, args) => { const command = String(args.at(-1)); ran.push(command); const child = new EventEmitter(); Object.assign(child, { pid: 7000 + ran.length, stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true }); setImmediate(() => { child.stdout.write('ok\n'); setTimeout(() => child.emit('close', 0, null), 5) }); return child }
   const decisionFlags = decisions ? { EGDESK_DECISION_FIRST: 'on', EGDESK_DECISION_FIRST_APPROVALS: 'on', ...(decisions.openItems ? { EGDESK_OPEN_ITEMS: 'on' } : {}) } : {}
   const wiring = createOwnToolsWiring({ env: { EGDESK_OWN_TOOLS: 'on', ...(harness ? { EGDESK_CLAUDE_HARNESS: 'on' } : {}), ...decisionFlags, PATH: '/usr/bin:/bin', HOME: '/home/synthetic' }, dataDir, spawn, getChat: () => chat, home: '/home/synthetic', gitStatus: async () => '' })
-  const pw = pageWorld('x', host, 'card', { pages: pages() }); pw.go(start)
+  const pw = pageWorld('x', host, 'card', { pages: pages(), ...(staleSwap ? { staleSwap } : {}) }); pw.go(start)
   const send0 = pw.transport.sendToUi.bind(pw.transport)
   pw.transport.sendToUi = async request => { if (request.kind === 'act' && request.action.type === 'fill') { const page = pw.state.pages[pw.state.cur.path]; const target = page.elements.find(e => e.ref === request.action.ref); if (target) { target.value = request.action.text; pw.state.cur = { ...pw.state.cur, revision: pw.state.cur.revision + 1 } } } return send0(request) }
   // the Card's site question as the overlay answers it (browserToolCardRequest 'allow-site'): the person's answer ('allowed' | 'refused' | 'pending') decides; an allowed site joins the conversation's set
