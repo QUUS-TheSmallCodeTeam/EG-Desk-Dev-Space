@@ -1,0 +1,338 @@
+{
+ "set": "browser-open-item-v3",
+ "description": "LIVE, c41 (Decisions only): the same 12 replies, asked with the c41 reading rules and one wording clause, pre-registered BEFORE the change from the v2 measurement (sent c59 on 6187635: 8 correct, 2 acceptable, 2 safe_miss, 0 wrong; predicted 8 correct (6 to 10), 0 wrong). Only two replies are expected to change from their v2 outcome: ack (\"했어\": continue .95, retry .70, ask_page .20 was not settled; the rules now ignore retry when continue is the decided yes and read an option at or below 0.25 as no) and change (change 1.0, ask_page .74: the ask_page wording now excludes a request for something different). The other ten are predicted to repeat their v2 outcome. Sent once, if at all.",
+ "task": {
+  "goal": "내 다음 공연 예매 내역 알려줘",
+  "pause": {
+   "kind": "cannot_proceed",
+   "code": "login_required"
+  },
+  "steps": 1,
+  "question": "예매 내역은 로그인이 필요해서 제가 볼 수 없었어요. 직접 로그인해 주시면 이어서 확인할게요.",
+  "change": true
+ },
+ "maxRequests": 12,
+ "tokenCeiling": 4000,
+ "passRule": "No reply is WRONG (hard). Correct and safe-miss counts are reported; a safe miss never fails the plan. Stops at the first failed request, the request limit or the token ceiling. Replies that did not run count as not run.",
+ "dropOrder": [
+  "offtopic",
+  "compound",
+  "stop",
+  "change",
+  "page",
+  "typo",
+  "okok",
+  "stop2",
+  "again2",
+  "ack",
+  "notyet",
+  "again"
+ ],
+ "replies": [
+  {
+   "id": "ack",
+   "message": "했어",
+   "want": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "continue": 0.85,
+    "uncertain": 0.12,
+    "wrong": 0.03
+   },
+   "note": "the commonest reply: \"done\". The 29bl question says what was asked (log in), so continue should be decided. Risk: the model reads a bare 했어 as too short and leaves it undecided. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "continue": 0.8,
+    "uncertain": 0.15,
+    "wrong": 0.05
+   },
+   "predictedV2Wording": {
+    "continue": 0.85,
+    "uncertain": 0.12,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "typo",
+   "message": "로그인햇어",
+   "want": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "continue": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "a spelling slip (햇 for 했). Predicted decided, slightly less sure than the clean form. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "continue": 0.75,
+    "uncertain": 0.2,
+    "wrong": 0.05
+   },
+   "predictedV2Wording": {
+    "continue": 0.8,
+    "uncertain": 0.17,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "okok",
+   "message": "ㅇㅇ",
+   "want": "none",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "none": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "an acknowledgement, not a statement that the step is done: no option is the right one; settling continue is tolerated, settling anything else is wrong. Predicted mostly not settled. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "uncertain": 0.55,
+    "continue": 0.3,
+    "none": 0.1,
+    "wrong": 0.05
+   },
+   "predictedV2Wording": {
+    "uncertain": 0.45,
+    "none": 0.35,
+    "continue": 0.15,
+    "wrong": 0.05
+   }
+  },
+  {
+   "id": "again",
+   "message": "다시 해줘",
+   "want": "retry",
+   "acceptable": [
+    "retry",
+    "continue"
+   ],
+   "predicted": {
+    "retry": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "the measured worry (c37 heads-up): \"again\" reads as a retry but also as go on; the retry predicate and the continue predicate may both be yes (-> uncertain). | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "uncertain": 0.45,
+    "retry": 0.35,
+    "continue": 0.2
+   },
+   "predictedV2Wording": {
+    "retry": 0.85,
+    "uncertain": 0.12,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "again2",
+   "message": "다시 시도해봐",
+   "want": "retry",
+   "acceptable": [
+    "retry",
+    "continue"
+   ],
+   "predicted": {
+    "retry": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "the explicit \"try again\": a clearer retry than 다시 해줘. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "retry": 0.45,
+    "uncertain": 0.4,
+    "continue": 0.15
+   },
+   "predictedV2Wording": {
+    "retry": 0.85,
+    "uncertain": 0.12,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "stop",
+   "message": "그만해",
+   "want": "abandon",
+   "acceptable": [
+    "abandon"
+   ],
+   "predicted": {
+    "abandon": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "unambiguous stop. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "abandon": 0.9,
+    "uncertain": 0.08,
+    "wrong": 0.02
+   },
+   "predictedV2Wording": {
+    "abandon": 0.75,
+    "uncertain": 0.24,
+    "wrong": 0.01
+   }
+  },
+  {
+   "id": "stop2",
+   "message": "됐어 안 할래",
+   "want": "abandon",
+   "acceptable": [
+    "abandon"
+   ],
+   "predicted": {
+    "abandon": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "됐어 can read as \"done\" (continue): the risk is continue being yes too. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "abandon": 0.8,
+    "uncertain": 0.15,
+    "wrong": 0.05
+   },
+   "predictedV2Wording": {
+    "abandon": 0.75,
+    "uncertain": 0.24,
+    "wrong": 0.01
+   }
+  },
+  {
+   "id": "page",
+   "message": "그 페이지에 뭐 있어?",
+   "want": "ask_page",
+   "acceptable": [
+    "ask_page"
+   ],
+   "predicted": {
+    "ask_page": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "a question about the page. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "ask_page": 0.8,
+    "uncertain": 0.15,
+    "wrong": 0.05
+   },
+   "predictedV2Wording": {
+    "ask_page": 0.75,
+    "uncertain": 0.24,
+    "wrong": 0.01
+   }
+  },
+  {
+   "id": "notyet",
+   "message": "아직",
+   "want": "none",
+   "acceptable": [],
+   "predicted": {
+    "wrong": 0.02,
+    "uncertain": 0.98
+   },
+   "note": "the person says the step is NOT done yet: nothing to settle. Settling continue on it would be the unsafe error this plan exists to catch. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "none": 0.6,
+    "uncertain": 0.3,
+    "wrong": 0.1
+   },
+   "predictedV2Wording": {
+    "none": 0.45,
+    "uncertain": 0.5,
+    "wrong": 0.05
+   }
+  },
+  {
+   "id": "offtopic",
+   "message": "오늘 날씨 어때?",
+   "want": "none",
+   "acceptable": [],
+   "predicted": {
+    "none": 0.88,
+    "uncertain": 0.1,
+    "wrong": 0.02
+   },
+   "note": "unrelated: every predicate no. | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "none": 0.9,
+    "uncertain": 0.1
+   },
+   "predictedV2Wording": {
+    "none": 0.6,
+    "uncertain": 0.38,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "change",
+   "message": "아 그거 말고 지난달 공연으로 알려줘",
+   "want": "change",
+   "acceptable": [
+    "change"
+   ],
+   "predicted": {
+    "change": 0.45,
+    "uncertain": 0.53,
+    "wrong": 0.02
+   },
+   "note": "replaces the request (the fifth predicate, asked because in-run messages are on). | v1 result (c57, sent 19:08): see the c40 report.",
+   "predictedV1Wording": {
+    "change": 0.7,
+    "uncertain": 0.25,
+    "wrong": 0.05
+   },
+   "predictedV2Wording": {
+    "change": 0.6,
+    "uncertain": 0.38,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "compound",
+   "message": "로그인했어, 근데 지금 화면 뭐야?",
+   "want": "continue",
+   "acceptable": [
+    "continue",
+    "ask_page"
+   ],
+   "predicted": {
+    "wrong": 0.02,
+    "uncertain": 0.98
+   },
+   "note": "two options at once: not settled is the right outcome (R5); either is tolerated. | v1 result (c57, sent 19:08): see the c40 report.",
+   "uncertainOk": true,
+   "predictedV1Wording": {
+    "uncertain": 0.6,
+    "continue": 0.25,
+    "ask_page": 0.15
+   },
+   "predictedV2Wording": {
+    "uncertain": 0.7,
+    "continue": 0.15,
+    "ask_page": 0.1,
+    "wrong": 0.05
+   }
+  }
+ ],
+ "prediction": {
+  "correct": "9 of 12 (range 8 to 10); 10 with probability 0.3",
+  "wrong": "0 wrong with probability 0.90",
+  "changedFromV2": [
+   "ack",
+   "change"
+  ],
+  "v2Result": {
+   "correct": 8,
+   "acceptable": 2,
+   "safeMiss": 2,
+   "wrong": 0,
+   "expectedBefore": "8 of 12 correct (6 to 10); actual 8"
+  }
+ },
+ "preRegistrationNote": "Written before the c41 change. For the ten replies that are not expected to change, the prediction is that the v2 outcome repeats (0.88, the rest on uncertain or wrong): the variance of a repeat is itself what this run measures.",
+ "dropOrderNote": "Fixed before any dry run, from the typed estimator (134.8 tokens per predicate + 0.198 per byte): one reply is a request of five predicates, about 1,010 estimated tokens, so 12 replies are about 12k, not 4k. Under a budget the replies are dropped in this order (first dropped first) until the estimate fits: at 4,000 the three that stay are again (the retry/continue overlap the c37 heads-up worried about), notyet (the unsafe error: continue settled on \"아직\") and ack (the baseline). --budget 13000 runs all twelve. Nothing is dropped silently: the run records what was dropped."
+}
