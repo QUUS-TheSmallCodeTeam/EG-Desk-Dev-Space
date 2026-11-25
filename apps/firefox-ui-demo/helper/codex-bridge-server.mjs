@@ -505,6 +505,7 @@ const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMIN
 // A message typed while a run works is accepted into that run and handed to the session heartbeat (codex-chat-runtime.mjs, "Messages while a
 // run works"). Developer flag, default off: without it the composer waits for the turn and the runtime refuses such a message, as before.
 const IN_RUN_MESSAGES_ENABLED = process.env.EGDESK_INRUN_MESSAGES === 'on'
+const engineStall = stallConfigFromEnv(process.env) // developer flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS, default off (L5 c33): { firstEventMs } or null
 const agentReloadReuse = process.env.EGDESK_AGENT_RELOAD_REUSE === 'on' // developer flag, default off (L7 c27)
 const chat = new CodexChatRuntime({
   localCapacity,
@@ -517,7 +518,7 @@ const chat = new CodexChatRuntime({
   // developer flag, default off (L7 c27): an Agent-profile turn on a loaded thread skips the per-turn detach + resume while its resume parameters are unchanged
   ...(agentReloadReuse ? { agentReloadReuse: true } : {}),
   // developer flag, default off (L5 c33): a turn the engine accepted and then stayed silent on (no event for it within the flag's milliseconds) is interrupted and started once more
-  ...(stallConfigFromEnv(process.env) ? { engineStall: stallConfigFromEnv(process.env) } : {}),
+  ...(engineStall ? { engineStall } : {}),
   // L1 c21 (owner decision, provisional): a room keeps its account; an explicit switch continues the same room. Off unless EGDESK_ROOM_ACCOUNT=on.
   roomAccount: { mode: () => (process.env.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') },
   store: chatStore,
