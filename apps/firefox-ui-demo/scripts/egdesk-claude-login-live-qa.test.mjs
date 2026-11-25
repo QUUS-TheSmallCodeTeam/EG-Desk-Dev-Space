@@ -53,7 +53,7 @@ test('arguments: an output folder for the start, loopback only for the bridge, b
   assert.throws(() => parseArgs(['--resume-after-signin', '--timeout-min', '0']), /timeout/); assert.throws(() => parseArgs(['--nope']), /unknown/)
 })
 
-test('--dry-run prints the plan and connects to nothing', () => {
+test('--dry-run prints the plan and connects to nothing', { skip: Boolean(process.env.GUARD_LOG) && 'child processes are blocked by the gate guard; run this file directly' }, () => {
   const out = execFileSync(process.execPath, [path, '--dry-run'], { encoding: 'utf8', timeout: 10000 })
   assert.equal(out.trim().split('\n').length, PLAN.length); assert.match(out, /never launched or killed/); assert.match(out, /nothing on claude\.com is touched/)
 })

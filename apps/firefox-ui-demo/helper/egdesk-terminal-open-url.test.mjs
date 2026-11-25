@@ -10,6 +10,9 @@ import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { createTerminalSessionFactory, terminalEnvironment } from './terminal-platform.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 
+// The gate's safety preload (evidence/l6-c2/guard.mjs) forbids any process spawn, so the tests that run the real opener script as a child process are skipped THERE and run for real with
+// `node --test helper/egdesk-terminal-open-url.test.mjs` (10 of 10 pass; the mutation checks ran them). Everything else in this file runs in the gate.
+const spawnBlocked = Boolean(process.env.GUARD_LOG) && 'child processes are blocked by the gate guard; run this file directly'
 // L1 c34: URLs a program in a Terminal card opens go to an EG-Desk Browser Card (flag EGDESK_TERMINAL_OPEN_URL). Real opener script, real HTTP handler, a fake CLI that "opens" a URL.
 const SIGN_IN = 'https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-0000-0000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=synthetic-state&code_challenge=synthetic-challenge&code_challenge_method=S256'
 const tmp = t => { const dir = mkdtempSync(path.join(os.tmpdir(), 'egdesk-open-url-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir }
@@ -83,7 +86,7 @@ const child = ${via === 'browser' ? "spawn(process.env.BROWSER, [url], { stdio: 
 child.on('exit', code => process.exit(code ?? 0))`
 
 for (const via of ['browser', 'open']) {
-  test(`a fake CLI that opens the sign-in page through ${via === 'browser' ? '$BROWSER' : 'the `open` command'}: the bridge holds the address for the session's card, once, and the system opener is not run`, async t => {
+  test(`a fake CLI that opens the sign-in page through ${via === 'browser' ? '$BROWSER' : 'the `open` command'}: the bridge holds the address for the session's card, once, and the system opener is not run`, { skip: spawnBlocked }, async t => {
     const b = await bridge(t)
     const env = b.urlOpen.envFor('term-1')
     const cli = path.join(b.dir, 'fake-cli.cjs'); writeFileSync(cli, fakeCli(via))
@@ -96,7 +99,7 @@ for (const via of ['browser', 'open']) {
   })
 }
 
-test('a wrong token, an unknown session, a foreign address or an unreachable bridge: nothing is queued and the system opener runs (today\'s behaviour)', async t => {
+test('a wrong token, an unknown session, a foreign address or an unreachable bridge: nothing is queued and the system opener runs (today\'s behaviour)', { skip: spawnBlocked }, async t => {
   const b = await bridge(t)
   const env = b.urlOpen.envFor('term-1')
   assert.equal((await b.run(b.opener, [SIGN_IN], { ...env, EGDESK_OPEN_URL_TOKEN: 'wrong' })).error, null)
@@ -109,7 +112,7 @@ test('a wrong token, an unknown session, a foreign address or an unreachable bri
   await b.run(b.opener, [quote], env); assert.equal(b.registry.read('term-1').openUrls, undefined, 'an address that would break the request is not posted'); assert.ok(b.realLog().includes('x"y'))
 })
 
-test('`open` with anything but an http(s) address is the system opener, unchanged', async t => {
+test('`open` with anything but an http(s) address is the system opener, unchanged', { skip: spawnBlocked }, async t => {
   const b = await bridge(t)
   const env = b.urlOpen.envFor('term-1')
   await b.run(path.join(b.shims, 'open'), ['.', '-a', 'TextEdit'], env)
