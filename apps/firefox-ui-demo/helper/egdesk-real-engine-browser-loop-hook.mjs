@@ -1,4 +1,4 @@
-// L8 c34: the whole browser loop on the REAL engine, with fixture pages (registered in helper/egdesk-real-engine-registrations.mjs, slot L8).
+// L8 c34: the whole browser loop on the REAL engine, with fixture pages (registered in helper/real-engine-registrations/L8.mjs).
 //
 // One scripted turn = the person's message. BEFORE it is sent (the product does its entry before the native turn too) the hook runs the product's own turn-start entry
 // (createDirectBrowserEntry): the entry judgement is asked of the REAL Decision model (the check's own client, `--decisions`), it picks the card, the product's objective loop

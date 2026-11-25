@@ -1,4 +1,4 @@
-// c32 + c34 (U13): the real-engine check of the decision-first command path (registered in helper/egdesk-real-engine-registrations.mjs, slot L5). A conversation sets
+// c32 + c34 (U13): the real-engine check of the decision-first command path (registered in helper/real-engine-registrations/L5.mjs). A conversation sets
 // flags { EGDESK_DECISION_FIRST: 'on' | 'card' } and asks to run something; the record says which way the turn went and what it cost, by code:
 // turn.expect.decisionFirst { path: 'action' | 'fast' | 'engine', reason?: closed word, engineTurns: integer, maxDecisionMs?: integer }
 //   path action (value on, the default): the Decision model picked, EG-Desk's runner ran it, then ONE engine round with the result as context and no tool call; the engine talks (owner correction U13: the decision
