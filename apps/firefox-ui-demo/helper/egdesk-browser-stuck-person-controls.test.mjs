@@ -105,7 +105,7 @@ test('c36: the person-target follow-up asks about the withheld BUTTONS too (page
   // the real run: only the agreement box decided yes (the button was never asked about): its note named only the box. Now the button is asked, and named when decided
   const both = await run(() => base2({ person_target_1: P(0.93), person_target_2: P(0.97) }))
   const follow = asks.find(r => r.questions.some(q => q.name.startsWith('person_target')))
-  assert.deepEqual(follow.questions.map(q => q.instructions), ['대관 시간', '이용 약관에 동의합니다', '신청서 제출'].map(label => `Is this control, "${label}" (${label === '신청서 제출' ? 'button' : label === '대관 시간' ? 'combobox' : 'checkbox'}${label === '대관 시간' ? ', now "14:00"' : ''}), the one this request asks to change?`))
+  assert.deepEqual(follow.questions.map(q => q.instructions), ['Is this control, "대관 시간" (combobox, now "14:00"), the one this request asks to change?', 'Is this control, "이용 약관에 동의합니다" (checkbox), the one this request asks to change?', 'Is pressing this control, "신청서 제출" (button), the step that completes what this request asks for?'], 'c37: a pressed control is asked as the step that completes the request, a value-holding one as the one to change')
   assert.deepEqual([both.result.reason, both.result.target, both.result.controls, both.acts], ['human_step', '이용 약관에 동의합니다', ['이용 약관에 동의합니다', '신청서 제출'], []], 'both decided controls are named, page order')
   const onlyButton = await run(() => base2({ person_target_2: P(0.97) }))
   assert.deepEqual([onlyButton.result.target, onlyButton.result.controls], ['신청서 제출', ['신청서 제출']])
@@ -118,4 +118,26 @@ test('c36: the person-target follow-up asks about the withheld BUTTONS too (page
   // a toggle page keeps its one named control (the v1 loop-toggle expectation)
   const toggles = await step(() => base(choice('scroll_more'), { person_target_0: P(0.96), person_target_1: P(0.03) }), snapSettings, '마케팅 알림 꺼줘')
   assert.deepEqual([toggles.result.target, toggles.result.controls], ['마케팅 정보 알림', ['마케팅 정보 알림']])
+})
+
+// ---- c37 (real, check-29bl, loop-form-submit): the question fits the control ----
+test('c37: personTargetAsk: a pressed control (button, link, menu item, tab) is asked as the step that completes the request; a control holding a value keeps "the one this request asks to change"', async () => {
+  const { personTargetAsk } = await import('./egdesk-browser-reflex.mjs')
+  for (const role of ['button', 'link', 'menuitem', 'tab']) assert.equal(personTargetAsk({ label: 'X', role }), `Is pressing this control, "X" (${role}), the step that completes what this request asks for?`)
+  for (const role of ['checkbox', 'combobox', 'switch', 'radio', 'textbox']) assert.equal(personTargetAsk({ label: 'X', role, value: 'v' }), `Is this control, "X" (${role}, now "v"), the one this request asks to change?`)
+})
+
+// the real record (check-29bl): the step was undecided (scroll_more 0.66 against the 0.75 bar) and the three predicates, asked "the one this request asks to change?", were 0.07 / 0.31 / 0.39.
+// With the fitting question the real model's judgement of the button is what decides; the replay below pins what code does with each outcome (decided: named, undecided: nothing is named and nothing is pressed).
+test('c37: the form page of the real record: a decided submit button is named as the person\'s step and nothing is pressed; the real answers of check-29bl (all below the bar) name nothing, and nothing is pressed either', async () => {
+  const { HARD_PAGES } = await import('./egdesk-browser-live-hard.mjs')
+  const room = HARD_PAGES.room['/rooms/form']
+  const roomSnap = { cardId: 'card', documentId: 'doc1', revision: 1, url: 'https://room.example.test/rooms/form', readyState: 'complete', text: room.text, viewport: { width: 1200, height: 800, devicePixelRatio: 1 }, interactiveElements: room.elements }
+  const goal = '회의실 대관 신청해줘'
+  const run = async targets => step(() => base(choice('scroll_more', 0.66) /* the real step: undecided, under the 0.75 bar */, { person_target_0: P(targets[0]), person_target_1: P(targets[1]), person_target_2: P(targets[2]) }), roomSnap, goal)
+  const decided = await run([0.07, 0.31, 0.93])
+  assert.deepEqual([decided.result.reason, decided.result.target, decided.result.controls, decided.acts], ['human_step', '신청서 제출', ['신청서 제출'], []])
+  const real = await run([0.07, 0.31, 0.39])
+  assert.deepEqual([real.result.target, real.result.controls], [undefined, undefined], 'below the bar nothing is named as the target (' + JSON.stringify(real.result.reason) + ')')
+  assert.deepEqual(real.acts, [], 'and nothing is pressed or typed')
 })

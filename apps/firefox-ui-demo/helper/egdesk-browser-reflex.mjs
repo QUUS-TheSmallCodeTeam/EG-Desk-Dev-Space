@@ -171,7 +171,7 @@ export async function decidePersonTarget({ goal, snapshot, personOnly, today = n
     `Controls on this page that only the person may operate (they are never options here): ${targets.map(quoteControl).join(' / ')}`].join('\n\n')
   const result = await client.decide({
     input: [{ role: 'developer', content: RECORDED_RULES }, { role: 'user', content: evidence }],
-    questions: targets.map((control, index) => predicateQuestion(personTargetName(index), `Is this control, ${quoteControl(control)}, the one this request asks to change?`)),
+    questions: targets.map((control, index) => predicateQuestion(personTargetName(index), personTargetAsk(control))),
     timeoutMs, signal, authorizeDispatch,
   })
   const p = targets.map((_, index) => { const a = result.answers?.[personTargetName(index)]; return a?.type === 'predicate' && Number.isFinite(a.probability) ? a.probability : null })
@@ -182,6 +182,14 @@ export async function decidePersonTarget({ goal, snapshot, personOnly, today = n
   const hits = targets.filter((_, index) => p[index] !== null && p[index] >= thresholds.choice).map(control => control.label)
   return { hit: at >= 0 ? targets[at].label : null, hits, targets: p, usage: result.usage }
 }
+// c37 (real, check-29bl, loop-form-submit): "회의실 대관 신청해줘" on the form page. With the submit BUTTON among the targets (c36) the real model answered 0.07 / 0.31 / 0.39 for the time
+// selector, the agreement box and "신청서 제출": below the 0.75 bar for all three, so nothing was named and the task ended as 'uncertain'. The question was wrong for a button: a
+// request never asks to CHANGE a button, it asks for what pressing it does. A control that is pressed (button, link, menu item, tab) is asked as "the step that completes what
+// this request asks for"; a control that holds a value (box, selector, switch, field) keeps "the one this request asks to change". Same bar, same rule (R1: the question fits the control).
+const PRESSED_ROLES = new Set(['button', 'link', 'menuitem', 'tab'])
+export const personTargetAsk = control => (PRESSED_ROLES.has(String(control.role))
+  ? `Is pressing this control, ${quoteControl(control)}, the step that completes what this request asks for?`
+  : `Is this control, ${quoteControl(control)}, the one this request asks to change?`)
 const quoteControl = control => `"${String(control.label).replace(/"/g, "'")}" (${control.role}${control.value ? `, now "${String(control.value).replace(/"/g, "'")}"` : ''})`
 const SAFE_GET_FIELDS = new Set(['hidden', 'text', 'search', 'select', 'select-one', 'select-multiple', 'radio', 'checkbox', 'number', 'date', 'month', 'week', 'range', 'submit', 'button', 'image', 'reset'])
 export function readOnlyPress(element, snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl } = {}) {
