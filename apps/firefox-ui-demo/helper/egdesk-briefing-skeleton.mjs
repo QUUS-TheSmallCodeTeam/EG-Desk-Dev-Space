@@ -816,7 +816,7 @@ export function answerCited(answer, materials) {
  * Judgment requests: place (1), fit (1), order (0 or 1, only for pairs the record leaves open), fill check (1, plus 1 per rewrite round): 3 or 4 on the usual path, at most 6.
  * Bounds: SKELETON_LIMITS. stats counts requests and fill turns and keeps what the subjective model received.
  */
-export async function runSkeletonFlow({ request = '', answer = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all', coverageCheck = 'facts' } = {}) {
+export async function runSkeletonFlow({ request = '', answer = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all', coverageCheck = 'facts', layers = false } = {}) {
   const checkMode = FILL_CHECK_MODES.includes(fillCheck) ? fillCheck : 'all', coverageMode = COVERAGE_MODES.includes(coverageCheck) ? coverageCheck : 'facts'
   const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, checkSkipped: 0, stages: [], received: [] }
   let relevanceOut = null, gaps = null
@@ -875,9 +875,24 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   // a log). Leaving it out removed one entry from the middle of a sequence and its figure ("269ms") from the board. A decided no still drops it; the rule is one step, not transitive.
   const linked = new Set(relevance.filter(q => { const p = placed.answers[`about_${q.material}`]; return Number.isFinite(p) && !isYes(p) && !isNo(p) && q.covers.some(a => !relevant.has(a)) })
     .flatMap(q => q.covers).filter(a => !relevant.has(a) && scene.materials.some(m => (m.alias === a && m.links.some(l => relevant.has(l.to))) || (relevant.has(m.alias) && m.links.some(l => l.to === a)))))
-  const kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a) || linked.has(a)))
+  // Cycle 44 (check-29br schema-on: about_M12 .26, the 02:31 entry with "1,812", dropped before the fill, so no later check could see the loss; seen before: M10 .11 / .05 / .10 and M12 .23 in four
+  // more of twelve recorded runs, while the other five or six entries of the same log were sure). One judged yes/no per entry is one sample; an entry of a recorded LOG (materials the records chain
+  // as one matter, at least four) that the judge answers NO for stays when at least three other entries of that log are sure and they are at least two thirds of the log's other entries: the
+  // log is the unit the request asks about ("read the ledger"), the entry's own answer is one vote. DELIBERATE CHANGE of the c41 rule "a decided no still drops it": that holds for a
+  // log the other entries do not vote for (and for an entry without a log). Recorded as relevance.voted; the vote never adds an entry a question was not asked about.
+  const voted = new Set()
+  for (const group of materialGroups(scene.materials)) {
+    if (group.length < 4) continue
+    for (const m of group) {
+      const own = relevance.find(q => q.material === m.alias && q.covers.length === 1), p = own ? placed.answers[`about_${m.alias}`] : undefined
+      if (!own || !Number.isFinite(p) || isYes(p) || relevant.has(m.alias) || citedOnly.includes(m.alias) || linked.has(m.alias)) continue
+      const others = group.filter(x => x.alias !== m.alias), sure = others.filter(x => relevant.has(x.alias)).length
+      if (sure >= 3 && sure * 3 >= others.length * 2) voted.add(m.alias)
+    }
+  }
+  const kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a) || linked.has(a) || voted.has(a)))
   const dropped0 = scene.materials.filter(m => !kept.has(m.alias)).map(m => m.alias), versions = pairs.filter(([a, b]) => isYes(placed.answers[`same_${a}_${b}`]))
-  relevanceOut = { kept: [...kept], dropped: dropped0, versions, ...(citedOnly.length ? { cited: citedOnly } : {}), ...(linked.size ? { linked: [...linked] } : {}) }
+  relevanceOut = { kept: [...kept], dropped: dropped0, versions, ...(citedOnly.length ? { cited: citedOnly } : {}), ...(linked.size ? { linked: [...linked] } : {}), ...(voted.size ? { voted: [...voted] } : {}) }
   const place = decidePlace(placed.answers, { relevant: kept.size })
   if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
   if (!kept.size) return done('bubble', { reason: 'not-asked-about', requested: true })
@@ -982,7 +997,10 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
       const judged = await ask('fill_check', questions)
       if (judged.unavailable) return unavailable(judged, true)
       // Supported means a decided yes. A refusal, a missing answer or anything in between is not support.
-      for (const q of questions.slice(0, SKELETON_LIMITS.maxQuestions)) if (!isYes(judged.answers[questionName(q)])) { const f = failing.get(q.part) ?? { problem: 'unsupported', words: [] }; f.words.push(rejectedWord(q)); failing.set(q.part, f) }
+      // Cycle 44 (EGDESK_BRIEFING_LAYERS=on, default off; check-29br schema-off: step_P2 .65 on a sentence with no figure while all six of its rows were sure cost a whole 29.5 s fill turn, and the
+      // rewrite's sentence was no better): the card's own pieces are what the Decision settles; a step sentence that is only UNDECIDED (not a decided no) stays when every piece of its card is sure.
+      const pieceSure = part => questions.every(x => x.part !== part || x.kind === 'step' || isYes(judged.answers[questionName(x)]))
+      for (const q of questions.slice(0, SKELETON_LIMITS.maxQuestions)) if (!isYes(judged.answers[questionName(q)])) { if (layers && q.kind === 'step' && !isNo(judged.answers[questionName(q)]) && Number.isFinite(judged.answers[questionName(q)]) && pieceSure(q.part)) { stats.stepKept = [...(stats.stepKept ?? []), q.part]; continue } const f = failing.get(q.part) ?? { problem: 'unsupported', words: [] }; f.words.push(rejectedWord(q)); failing.set(q.part, f) }
       for (const q of questions.slice(SKELETON_LIMITS.maxQuestions)) failing.set(q.part, failing.get(q.part) ?? { problem: 'unsupported', words: [rejectedWord(q)] })
     }
     if (!failing.size) break

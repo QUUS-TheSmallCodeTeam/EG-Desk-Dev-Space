@@ -122,3 +122,12 @@ export function buildLoopHandedScript(entries = LOOP_ENTRIES) {
   return { set: LOOP_HANDED_SET, description: `${base.description} Version 2 hands the notes to the answering turn (EGDESK_BRIEFING_HAND_MATERIALS=on, default off in every other script) instead of letting the engine read the folder with tool rounds: one conversation, schema on.`,
     conversations: [{ ...on, id: 'realistic-handed-schema-on', flags: { ...on.flags, EGDESK_BRIEFING_HAND_MATERIALS: 'on' } }] }
 }
+
+// ---- v3 of the realistic script (cycle 44, owner direction U13): v2 (notes handed to the answering turn) with EGDESK_BRIEFING_LAYERS=on (default off in every other script): what the Decision
+// model settled before the fill is not reopened by the engine's wording (an undecided step sentence over sure cards stays, so no fill turn is spent on it). One conversation, schema on.
+export const LOOP_LAYERS_SET = 'real-engine-briefing-realistic-v3'
+export function buildLoopLayersScript(entries = LOOP_ENTRIES) {
+  const base = buildLoopHandedScript(entries), on = base.conversations[0]
+  return { set: LOOP_LAYERS_SET, description: `${base.description} Version 3 also sets EGDESK_BRIEFING_LAYERS=on (default off in every other script).`,
+    conversations: [{ ...on, id: 'realistic-layers-schema-on', flags: { ...on.flags, EGDESK_BRIEFING_LAYERS: 'on' } }] }
+}

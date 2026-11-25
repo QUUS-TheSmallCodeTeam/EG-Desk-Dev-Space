@@ -649,6 +649,8 @@ const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credent
     fillCheck: process.env.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all',
     // EGDESK_BRIEFING_COVERAGE=board: the cycle-19 whole-board coverage question, kept for comparison. Developer switch; default one question per fact.
     coverage: process.env.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts',
+    // EGDESK_BRIEFING_LAYERS=on (c44, default off): what the Decision settled before the fill is not reopened by the engine's wording (an undecided step sentence over sure cards stays).
+    layers: process.env.EGDESK_BRIEFING_LAYERS === 'on' ? 'on' : 'off',
     // EGDESK_BRIEFING_OUTPUT_SCHEMA=on: the briefing's fill / design turn is sent with a JSON Schema (Codex outputSchema) built from the render components' accepted shape. Default off.
     outputSchema: process.env.EGDESK_BRIEFING_OUTPUT_SCHEMA === 'on' ? 'on' : 'off' }) })
 // Work-surface placement (egdesk-work-placement.mjs): where an Agent's visible work surface should open, judged at the conversation's heartbeat among options the

@@ -372,3 +372,14 @@ test('c42 hand-materials: with the flag the answering turn\'s message is the per
   const off = world(t, loopFake(loopFaithful)), s2 = buildLoopScript(); s2.conversations.length = 1
   await runCheck(off.options, asScripts(s2), off.deps); assert.equal(textOf(answerStart(off)), LOOP_SAY, 'the person\'s message alone')
 })
+
+// ---- c44: EGDESK_BRIEFING_LAYERS (default off; owner direction U13) ----
+import { LOOP_LAYERS_SET, buildLoopLayersScript } from './egdesk-briefing-real-engine-script.mjs'
+test('c44 layers: off by default in every other script; the v3 realistic script is the v2 conversation with EGDESK_BRIEFING_LAYERS=on, and the flag is a registered briefing flag', () => {
+  assert.ok(BRIEFING_FLAGS.includes('EGDESK_BRIEFING_LAYERS'))
+  for (const c of [...buildLoopScript().conversations, ...buildBoardScript().conversations, ...buildLoopHandedScript().conversations]) assert.equal(c.flags.EGDESK_BRIEFING_LAYERS, undefined, c.id)
+  const v3 = buildLoopLayersScript(), file = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', `${LOOP_LAYERS_SET}.json`), 'utf8'))
+  assert.deepEqual(file, JSON.parse(JSON.stringify(v3))); assert.deepEqual(validateEngineScript(file), { ok: true, errors: [] })
+  assert.deepEqual(v3.conversations.map(c => [c.id, c.flags.EGDESK_BRIEFING_LAYERS, c.flags.EGDESK_BRIEFING_HAND_MATERIALS, c.flags.EGDESK_BRIEFING_OUTPUT_SCHEMA]), [['realistic-layers-schema-on', 'on', 'on', 'on']])
+  assert.deepEqual(v3.conversations[0].turns[0].expect.briefing, buildLoopScript().conversations[0].turns[0].expect.briefing, 'the same expectations')
+})
