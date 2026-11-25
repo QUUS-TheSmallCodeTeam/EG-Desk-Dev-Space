@@ -3,12 +3,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { NUNCHI_CONTROLS, NUNCHI_CHUNK, PRIOR_CLASSES, buildNunchiEvalPlans, loadExamples, nunchiAgreement, priorClassOf, readPriorLabels, readWire, NUNCHI_MERGED_CONTROLS, buildNunchiMergedPlans, nunchiMergedReport, NUNCHI_FRESH_CONTROLS, buildNunchiFreshPlans } from './egdesk-nunchi-plans.mjs'
+import { NUNCHI_CONTROLS, NUNCHI_CHUNK, PRIOR_CLASSES, buildNunchiEvalPlans, loadExamples, nunchiAgreement, priorClassOf, readPriorLabels, readWire, NUNCHI_MERGED_CONTROLS, buildNunchiMergedPlans, nunchiMergedReport, NUNCHI_FRESH_CONTROLS, buildNunchiFreshPlans, NUNCHI_FRESH3_CONTROLS, buildNunchiFresh3Plans } from './egdesk-nunchi-plans.mjs'
 import { createOwnerExclusions } from './egdesk-scenario-exclusion.mjs'
 import { loadPlan } from './egdesk-decision-real-runner.mjs'
 import { nunchiRequest } from './egdesk-nunchi.mjs'
 import { TYPE_NAMES } from './egdesk-conversation-examples.mjs'
-import { choiceAnswer } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { nunchiAnswer } from './egdesk-nunchi.fixture.mjs'
 
 // Synthetic examples and a synthetic exclusion rule: no real conversation, no real excluded name appears in a test.
 const FORBIDDEN = 'zz-forbidden-project'
@@ -63,7 +63,7 @@ test('the prior class of a real example comes from the earlier labelling at its 
 
 test('the agreement report: per prior class how often the installed kind is in the allowed set, disagreements by id (no text), unread under the bar, controls listed', () => {
   const want = { nk_kind: 'correction', nk_about: 'language', nk_strength: 'clear', nk_direction: 'not_applicable', nk_language: 'korean' }
-  const q = nunchiRequest({ message: 'x' }).questions, answerOf = (w, top = 0.95) => q.map(question => ({ name: question.name, ...choiceAnswer(question, w[question.name], top) }))
+  const q = nunchiRequest({ message: 'x' }).questions, answerOf = (w, top = 0.95) => q.map(question => ({ name: question.name, ...nunchiAnswer(question, w, top) }))
   const pre = [{ id: 'control-language', control: true, turn: 'x', expect: [] },
     { id: 'ex-1', priorClass: 'correction', allow: ['correction', 'instruction_change', 'complaint'] }, { id: 'ex-2', priorClass: 'correction', allow: ['correction', 'instruction_change', 'complaint'] },
     { id: 'ex-3', priorClass: 'approval', allow: ['short_approval'] }, { id: 'ex-4', priorClass: 'praise', allow: ['praise'] }, { id: 'ex-5', priorClass: 'praise', allow: ['praise'] }]
@@ -121,4 +121,24 @@ test('u3: the second fresh set has sixteen turns nobody tuned on, none of them w
   assert.deepEqual(NUNCHI_FRESH_CONTROLS.filter(c => earlier.has(c.user)).map(c => c.id), ['f-too-long-from-now'].filter(id => earlier.has('너무 길어. 앞으로는 짧게 말해')), 'only the real-window sentence repeats an earlier turn (there it had an assistant message before it; here it has none)')
   for (const c of chunks) for (const f of c.files) assert.ok(JSON.parse(f.bytes).input[1].content.includes('There is no assistant message before the turn'), f.file)
   assert.deepEqual(chunks.flatMap(c => c.plan.requests.map(r => r.id)), NUNCHI_FRESH_CONTROLS.map(c => c.id)); assert.ok(chunks.every(c => c.plan.set.startsWith('nunchi-merge-v2-')))
+})
+
+test('u4: the third fresh set: sixteen new turns (none seen in an earlier set), no assistant message, five subjects spread (length, language, format, repeated question, speed + scope), chunks of 6, 6 and 4, six questions per request, ceiling at most 12,000', () => {
+  const chunks = buildNunchiFresh3Plans()
+  assert.deepEqual(chunks.map(c => c.plan.requests.length), [6, 6, 4]); assert.ok(chunks.every(c => c.plan.tokenCeiling <= NUNCHI_CHUNK.tokenCeiling && c.estInputTokens * 1.1 <= c.plan.tokenCeiling && c.plan.set.startsWith('nunchi-merge-v3-')), 'the estimate plus 10% of real use stays under the ceiling')
+  const seen = new Set([...NUNCHI_CONTROLS, ...NUNCHI_MERGED_CONTROLS, ...NUNCHI_FRESH_CONTROLS].map(c => c.user)); assert.deepEqual(NUNCHI_FRESH3_CONTROLS.filter(c => seen.has(c.user)).map(c => c.id), [], 'no turn of an earlier set')
+  assert.equal(new Set(NUNCHI_FRESH3_CONTROLS.map(c => c.user)).size, 16)
+  const pos = NUNCHI_FRESH3_CONTROLS.filter(c => c.expect.change === true); assert.equal(pos.length, 10); assert.equal(NUNCHI_FRESH3_CONTROLS.length - pos.length, 6)
+  const count = about => pos.filter(c => c.expect.about === about).length; assert.deepEqual(['length', 'language', 'format', 'repeated_question', 'speed', 'scope'].map(count), [2, 2, 2, 2, 1, 1])
+  for (const c of chunks) for (const f of c.files) { const b = JSON.parse(f.bytes); assert.equal(b.questions.length, 6); assert.equal(b.questions.at(-1).name, 'nk_manner'); assert.ok(b.input[1].content.includes('There is no assistant message before the turn'), f.file) }
+  assert.deepEqual(chunks.flatMap(c => c.plan.requests.map(r => r.id)), NUNCHI_FRESH3_CONTROLS.map(c => c.id))
+})
+test('u4: the merged report counts the strength as the product does (not decidedly mild passes) and marks an inferred subject', () => {
+  const q = nunchiRequest({ message: 'x' }).questions
+  const wire = want => q.map(question => ({ name: question.name, ...nunchiAnswer(question, want) }))
+  const dist = { nk_kind: { none: 0.8, instruction_change: 0.2 }, nk_about: { length: 0.49, no_particular: 0.47, language: 0.04 }, nk_strength: { clear: 0.67, mild: 0.33 }, nk_direction: { less: 0.98, more: 0.02 }, nk_language: { none: 0.9, korean: 0.1 } }
+  const pre = [{ id: 'g-simpler', merged: true, expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } }]
+  const r = nunchiMergedReport({ results: { 'g-simpler': { answers: wire({ dist, manner: 0.95 }) } } }, pre)
+  assert.deepEqual([r.hard.passed, r.rows[0].reading.forceful, r.rows[0].reading.inferred], [1, null, ['about']]); assert.match(r.text, /length \(inferred\)/); assert.match(r.text, /manner 0\.95/)
+  const quiet = nunchiMergedReport({ results: { 'g-simpler': { answers: wire({ dist: { ...dist, nk_strength: { mild: 0.9, clear: 0.1 } }, manner: 0.95 }) } } }, pre); assert.equal(quiet.hard.passed, 0); assert.match(quiet.rows[0].misses.join(';'), /forceful false/)
 })

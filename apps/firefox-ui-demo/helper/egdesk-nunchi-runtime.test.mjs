@@ -13,6 +13,7 @@ import { claudeTurnContent } from './claude-engine-adapter.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { createUserGuidanceStore } from './egdesk-user-guidance.mjs'
 import { choiceAnswer, createFakeClock, deferred, until } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { nunchiAnswer } from './egdesk-nunchi.fixture.mjs'
 
 // The nunchi through the real runtime (flag EGDESK_NUNCHI, default off): the person's reaction to the assistant's last message is read by the decision model at the start of a turn and
 // the guidance reaches the engine in the same turn (inside the cap) or the next one (late). Real: the runtime, the chat store, the guidance record. Synthetic: the native engine (it
@@ -58,7 +59,7 @@ async function world({ nunchi = true, readings = {}, hold = null, store = true, 
           const want = w.readings[message] ?? NONE, top = want.top ?? 0.95
           const dist = (q, d) => { const rows = q.choices.map(c => ({ value: c.value, probability: d[c.value] ?? 0 })).sort((a, b) => b.probability - a.probability), n = q.choices.length
             return { type: 'choice', choice: rows[0].value, confidence: Math.max(0, (rows[0].probability - 1 / n) / (1 - 1 / n)), probabilities: rows } }
-          return { answers: Object.fromEntries(req.questions.map(q => [q.name, want.dist?.[q.name] ? dist(q, want.dist[q.name]) : choiceAnswer(q, want[q.name], top)])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 }
+          return { answers: Object.fromEntries(req.questions.map(q => [q.name, nunchiAnswer(q, want, top)])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 }
         }
         w.requests.push({ turn: w.asked, kind: 'other', names })
         const answers = {}
@@ -201,7 +202,7 @@ function claudeWorld({ readings }) {
     decisionContext: { mode: () => 'on', settingsGeneration: () => 0, configured: () => true, budgetMs: 5000, nunchi: { enabled: () => true, store: null },
       client: { model: 'syn', async decide(req) { seen.push(req); const names = req.questions.map(q => q.name)
         if (!names.includes('nk_kind')) return { answers: Object.fromEntries(req.questions.map(q => [q.name, q.type !== 'choice' ? { type: 'predicate', probability: 0.02 } : { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: q.choices.map((c, i) => ({ value: c.value, probability: i === 0 ? 0.9 : 0.1 / (q.choices.length - 1) })) }])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 }
-        return { answers: Object.fromEntries(req.questions.map(q => [q.name, choiceAnswer(q, readings[q.name], 0.95)])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 } } },
+        return { answers: Object.fromEntries(req.questions.map(q => [q.name, nunchiAnswer(q, readings, 0.95)])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 } } },
       collect: async () => [] } })
   chat.setConnection('claude', true)
   return { chat, calls, seen }
@@ -239,7 +240,7 @@ async function roomWorld({ readings, mode = 'on', enabled = true }) {
     if (!names.includes('nk_kind')) return { answers: Object.fromEntries(req.questions.map(q => [q.name, q.type !== 'choice' ? { type: 'predicate', probability: 0.02 } : { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: q.choices.map((c, i) => ({ value: c.value, probability: i === 0 ? 0.9 : 0.1 / (q.choices.length - 1) })) }])), model: 'syn', usage: {}, latencyMs: 1 }
     asked++
     const want = readings[/The person's turn \(quoted data\):\n"""\n([\s\S]*?)\n"""/.exec(req.input.map(m => m.content).join('\n'))?.[1] ?? ''] ?? NONE
-    return { answers: Object.fromEntries(req.questions.map(q => [q.name, want.dist?.[q.name] ? dist(q, want.dist[q.name]) : choiceAnswer(q, want[q.name], 0.95)])), model: 'syn', usage: {}, latencyMs: 1 } }
+    return { answers: Object.fromEntries(req.questions.map(q => [q.name, nunchiAnswer(q, want, 0.95)])), model: 'syn', usage: {}, latencyMs: 1 } }
   const chat = new CodexChatRuntime({ engines: [codex, claude], store, requireStore: true, profiles, getOwnerKey: () => OWNER, resolveProjectWorkspace: async () => null, emit: () => {},
     decisionContext: { mode: () => mode, settingsGeneration: () => 0, configured: () => true, budgetMs: 5000, ...(enabled ? { nunchi: { enabled: () => true, store: guidance } } : {}), client: { model: 'syn', decide }, collect: async () => [] } })
   chat.setConnection('claude', true)
@@ -295,4 +296,28 @@ test('u3: GET /v1/user-guidance/receipts?recent=n: off (404) unless the flag, lo
   assert.equal((await call('POST', `${USER_GUIDANCE_PATH}/receipts`)).code, 405); assert.equal((await call('GET', `${USER_GUIDANCE_PATH}/receipts?recent=abc`)).body.receipts.length, 1)
   const bare = createUserGuidanceHttpHandler({ store: w.guidance, enabled: () => true, guard: () => true, send: (res, code, body) => { res.code = code; res.body = body } }); const res = { destroyed: false, writableEnded: false, setHeader() {} }; await bare({ method: 'GET' }, res, new URL(`http://x${USER_GUIDANCE_PATH}/receipts`)); assert.equal(res.code, 404, 'no receipts source: off')
   w.close()
+})
+
+// ---- u4: the real 04:02 receipt (Claude, plain project room, no assistant message before the turn): change .92 / forceful .96 / strength clear / direction less / about null -> no directive, no candidate ----
+// These are the REAL answers the Decision model gave to "너무 길어. 앞으로는 짧게 말해" (nunchi-merge-v2-001, no previous message): kind instruction_change .70 / complaint .20, about length .49 / no_particular .47,
+// strength clear .95, direction less .98. manner .5: the question did not exist then, so it is "unsure" and the kinds alone carry the change (as in the real receipt).
+const REAL_0402 = { manner: 0.5, dist: { nk_kind: { instruction_change: 0.70, complaint: 0.20, none: 0.06, praise: 0.01 }, nk_about: { length: 0.49, no_particular: 0.47, language: 0.02, format: 0.01 }, nk_strength: { clear: 0.95, mild: 0.04, strong: 0.01 }, nk_direction: { less: 0.98, more: 0.01 }, nk_language: { none: 0.48, korean: 0.47 } } }
+const PLAIN_KOREAN = { manner: 0.95, dist: { nk_kind: { none: 0.81, instruction_change: 0.15, praise: 0.01 }, nk_about: { language: 0.51, no_particular: 0.42, length: 0.02, format: 0.01 }, nk_strength: { clear: 0.67, mild: 0.33 }, nk_direction: { not_applicable: 0.66, less: 0.25 }, nk_language: { korean: 1 } } }
+test('u4 replay: the real 04:02 reading (change .92, direction less, about under the bar) in a plain Claude room: about reads length, ONE candidate length/less, the line reaches Claude, the receipt says it was inferred', async () => {
+  const w = await roomWorld({ readings: { '너무 길어. 앞으로는 짧게 말해': REAL_0402 } })
+  await w.sendPlain('너무 길어. 앞으로는 짧게 말해')
+  const [r] = w.chat.nunchiRecent(5)
+  assert.deepEqual([r.started, r.withPrevious, r.reading.change, r.reading.changeMass, r.reading.forceful, r.reading.strength, r.reading.direction, r.reading.about, r.reading.inferred], [true, false, true, 0.9, true, 'clear', 'less', 'length', ['about']])
+  assert.deepEqual([r.directive, r.candidate.status, r.lineSent], [{ guidance: 'length', value: 'less' }, 'candidate', true])
+  assert.equal(w.guidance.size(), 1); const [c] = w.guidance.list(); assert.deepEqual([c.guidance, c.value, c.status, c.seen], ['length', 'less', 'candidate', 1])
+  assert.match(w.calls[0].additionalContext?.[NUNCHI_KEY]?.value ?? '', /Keep replies short for the rest of this conversation/)
+  // the same sentence again in the same conversation: still one candidate (seen counts up, no second entry)
+  await w.sendPlain('너무 길어. 앞으로는 짧게 말해', { requestId: 'again', conversationId: 'claude-1' }); await until(() => w.guidance.list()[0].seen === 2); assert.equal(w.guidance.size(), 1)
+  w.close()
+})
+test('u4 replay: a plain instruction the model read as "none" without a previous message ("영어 말고 한국어로 답해줘": kinds .15) becomes a language/korean candidate once nk_manner says yes (stand-in answer: a fresh plan reads the real one)', async () => {
+  const w = await roomWorld({ readings: { '영어 말고 한국어로 답해줘': PLAIN_KOREAN } })
+  await w.sendPlain('영어 말고 한국어로 답해줘')
+  const [r] = w.chat.nunchiRecent(5); assert.deepEqual([r.reading.change, r.reading.mannerMass, r.reading.about, r.reading.language, r.directive, r.candidate.status], [true, 0.95, 'language', 'korean', { guidance: 'language', value: 'korean' }, 'candidate'])
+  assert.deepEqual(w.guidance.list().map(e => `${e.guidance}:${e.value}`), ['language:korean']); w.close()
 })

@@ -65,7 +65,7 @@ const tagOf = thread => createHash('sha256').update(String(thread ?? '')).digest
 const remember = (rt, entry) => { const list = recentOf(rt); list.push(entry); while (list.length > NUNCHI_RECENT.max) list.shift() }
 /** The closed form of a receipt (what the route returns). */
 const closed = r => ({ at: r.at, conversation: r.conversation, engine: r.engine, position: r.position, started: r.started, reason: r.reason ?? null, status: r.status ?? null, inTime: r.inTime ?? null, late: r.late ?? null, withPrevious: r.withPrevious ?? null, ms: r.ms ?? null,
-  reading: r.reading ? Object.fromEntries(['kind', 'change', 'changeMass', 'forceful', 'forceMass', 'about', 'strength', 'direction', 'language'].map(k => [k, r.reading[k] ?? null])) : null,
+  reading: r.reading ? Object.fromEntries(['kind', 'change', 'changeMass', 'mannerMass', 'forceful', 'forceMass', 'about', 'strength', 'direction', 'language', 'inferred'].map(k => [k, r.reading[k] ?? null])) : null,
   directive: r.directive ?? null, candidate: r.candidate ?? null, lineSent: r.lineSent ?? null })
 export const nunchiRecent = (rt, n = 5) => Object.freeze(recentOf(rt).slice(-Math.max(1, Math.min(NUNCHI_RECENT.max, Number.isSafeInteger(n) ? n : 5))).map(r => Object.freeze(closed(r))))
 
