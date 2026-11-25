@@ -31,6 +31,7 @@ export const BROWSER_LOOP_EXPECT_SCHEMA = Object.freeze({ type: 'object', additi
   noteStatus: { enum: ['done', 'cannot_proceed', 'need_context'] },
   noteCode: str(40),
   noteCandidates: { type: 'array', maxItems: 3, items: str(100) },
+  noteNames: { type: 'array', maxItems: 3, items: str(100) }, // c36: the note's candidates include every one of these (the exact list depends on which controls the model decided)
   noteIncludes: { type: 'array', maxItems: 4, items: str(200) },
   mentionsDates: { type: 'array', maxItems: 4, items: str(10, { pattern: '^\\d{4}-\\d{2}-\\d{2}$' }) },
   noInventedDates: { const: true }, noInventedAmounts: { const: true },
@@ -69,7 +70,7 @@ export function validateBrowserLoopExpect(value, turn, path = 'expect.browserLoo
   if (value.fast !== undefined && !(isObject(value.fast) && ['show', 'engine', 'none'].includes(value.fast.kind) && Object.keys(value.fast).every(k => ['kind', 'line', 'fasterThanEngine'].includes(k)) && (value.fast.line === undefined || typeof value.fast.line === 'string') && (value.fast.fasterThanEngine === undefined || value.fast.fasterThanEngine === true))) bad.push(`${path}.fast: { kind: show|engine|none, line?, fasterThanEngine? }`)
   if (value.fast !== undefined && turn?.browserLoop?.fast !== true) bad.push(`${path}.fast: needs browserLoop.fast on the same turn`)
   for (const key of ['entered', 'noActs', 'noInventedDates', 'noInventedAmounts', 'noFills', 'staleSeen']) if (value[key] !== undefined && value[key] !== true) bad.push(`${path}.${key}: true`)
-  for (const [key, max, chars] of [['navigatedTo', 4, 120], ['noteCandidates', 3, 100], ['noteIncludes', 4, 200], ['namesAnyOf', 6, 100], ['clickedOnly', 4, 40], ['afterStaleSees', 3, 120], ['noteExcludes', 4, 120]]) if (value[key] !== undefined && !textList(value[key], max, chars)) bad.push(`${path}.${key}: up to ${max} strings`)
+  for (const [key, max, chars] of [['navigatedTo', 4, 120], ['noteCandidates', 3, 100], ['noteNames', 3, 100], ['noteIncludes', 4, 200], ['namesAnyOf', 6, 100], ['clickedOnly', 4, 40], ['afterStaleSees', 3, 120], ['noteExcludes', 4, 120]]) if (value[key] !== undefined && !textList(value[key], max, chars)) bad.push(`${path}.${key}: up to ${max} strings`)
   if (value.mentionsDates !== undefined && !(Array.isArray(value.mentionsDates) && value.mentionsDates.length <= 4 && value.mentionsDates.every(d => /^\d{4}-\d{2}-\d{2}$/.test(d)))) bad.push(`${path}.mentionsDates: YYYY-MM-DD`)
   if (value.noteStatus !== undefined && !['done', 'cannot_proceed', 'need_context'].includes(value.noteStatus)) bad.push(`${path}.noteStatus: done, cannot_proceed or need_context`)
   return bad
@@ -87,6 +88,7 @@ export function checkBrowserLoop(expect, record) {
   if (expect.noteStatus) add('note_status', note?.status === expect.noteStatus, `status ${note?.status}`)
   if (expect.noteCode) add('note_code', note?.code === expect.noteCode, `code ${note?.code}`)
   if (expect.noteCandidates) add('note_candidates', JSON.stringify(note?.candidates) === JSON.stringify(expect.noteCandidates), `candidates ${JSON.stringify(note?.candidates)}`)
+  if (expect.noteNames) add('note_names', expect.noteNames.every(name => (note?.candidates || []).includes(name)), `candidates ${JSON.stringify(note?.candidates)}`)
   if (expect.noteIncludes) { const lines = [...(note?.found || []), ...(note?.page || [])]; add('note_includes', expect.noteIncludes.every(text => lines.some(line => line.includes(text))), `note lines ${JSON.stringify(lines)}`) }
   const accepted = (record.acts || []).filter(a => !a.rejected)
   if (expect.noFills) add('no_fills', (record.acts || []).every(a => a.type !== 'fill'), `acts ${JSON.stringify((record.acts || []).map(a => [a.type, a.ref]))}`)
@@ -105,7 +107,7 @@ export function checkBrowserLoop(expect, record) {
     if (f?.kind === 'show') { const lines = [...(note?.found || []), ...(note?.page || [])]; add('fast_line_grounded', lines.includes(f.line), 'the shown line is one of the note\'s own lines, verbatim') }
     if (expect.fast.fasterThanEngine) add('fast_faster_than_engine', Number.isFinite(f?.ms) && Number.isFinite(record.engineMs) && f.ms < record.engineMs, `fast decision ${f?.ms} ms, engine turn ${record.engineMs} ms`)
   }
-  const { entered, navigatedTo, noActs, noteStatus, noteCode, noteCandidates, noteIncludes, noFills, clickedOnly, staleSeen, afterStaleSees, noteExcludes, fast: _fast, ...replyExpect } = expect
+  const { entered, navigatedTo, noActs, noteStatus, noteCode, noteCandidates, noteNames, noteIncludes, noFills, clickedOnly, staleSeen, afterStaleSees, noteExcludes, fast: _fast, ...replyExpect } = expect
   out.push(...checkBrowserAnswer(replyExpect, record))
   return out
 }

@@ -130,9 +130,7 @@
               "clickedOnly": [],
               "noteStatus": "cannot_proceed",
               "noteCode": "human_step",
-              "noteCandidates": [
-                "대관 시간",
-                "이용 약관에 동의합니다",
+              "noteNames": [
                 "신청서 제출"
               ],
               "namesAnyOf": [

@@ -176,7 +176,11 @@ export async function decidePersonTarget({ goal, snapshot, personOnly, today = n
   })
   const p = targets.map((_, index) => { const a = result.answers?.[personTargetName(index)]; return a?.type === 'predicate' && Number.isFinite(a.probability) ? a.probability : null })
   const at = p.findIndex(value => value !== null && value >= thresholds.choice)
-  return { hit: at >= 0 ? targets[at].label : null, targets: p, usage: result.usage }
+  // c36 (real, check-26bl, loop-form-submit): "회의실 대관 신청해줘" on the form page. The only decided control was the agreement checkbox (the submit BUTTON was not among the targets: only controls
+  // with no action were), so the note named that one box and dropped 신청서 제출, the very step the request is about, and the reply named only the box. Every control decided yes is the
+  // person's step and is named (page order); the first stays `hit` for callers that want one.
+  const hits = targets.filter((_, index) => p[index] !== null && p[index] >= thresholds.choice).map(control => control.label)
+  return { hit: at >= 0 ? targets[at].label : null, hits, targets: p, usage: result.usage }
 }
 const quoteControl = control => `"${String(control.label).replace(/"/g, "'")}" (${control.role}${control.value ? `, now "${String(control.value).replace(/"/g, "'")}"` : ''})`
 const SAFE_GET_FIELDS = new Set(['hidden', 'text', 'search', 'select', 'select-one', 'select-multiple', 'radio', 'checkbox', 'number', 'date', 'month', 'week', 'range', 'submit', 'button', 'image', 'reset'])
@@ -620,12 +624,14 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     // asks whether the request is about one of them (a decided yes is the person's step, whatever the options were). Never for a decided step.
     if (personOnly.length && ['uncertain', 'scroll', 'blocked'].includes(decision.kind)) {
       let check = null
-      try { check = await decidePersonTarget({ goal, snapshot, personOnly, today, client, thresholds, timeoutMs: timeoutMs ?? undefined, signal, authorizeDispatch }) }
+      // c36: the targets are the controls withheld as the person's own, buttons included (page order, at most three), not only those with no action
+      const personTargets = withheld.map(control => personOnly.find(item => item.label === control.label) ?? { label: control.label, role: control.role, value: '' })
+      try { check = await decidePersonTarget({ goal, snapshot, personOnly: personTargets, today, client, thresholds, timeoutMs: timeoutMs ?? undefined, signal, authorizeDispatch }) }
       catch { check = null } // a failed follow-up leaves the first decision as it was; nothing is concluded on a guess
       if (signal?.aborted) return finish('aborted')
       if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
       if (check) { entry.decision.targets = check.targets; entry.followUp = true }
-      if (check?.hit) { entry.rule = 'person_target'; return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, target: check.hit }) }
+      if (check?.hit) { entry.rule = 'person_target'; return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, target: check.hit, controls: check.hits?.length ? check.hits : [check.hit] }) }
     }
     // c26 (owner decision, c25; real: the c24 fee-and-verification page read as ordinary content, next_step scroll_more 0.91, and the task ended with
     // nothing said): the page's offered options do not move toward the goal (next_step decided to be scroll_more or blocked, on an ordinary content
