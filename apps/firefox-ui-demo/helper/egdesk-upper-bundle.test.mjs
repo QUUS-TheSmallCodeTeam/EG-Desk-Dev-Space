@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { NOT_IN_BUNDLE, TURN_STAGES, UPPER_BUNDLE, applyUpperBundle, describeUpperBundle, markStage, modeGatedClient, stagesOf, upperBundleFlags } from './egdesk-upper-bundle.mjs'
+import { HUD_ROUTING_CAPABILITIES, NOT_IN_BUNDLE, TURN_STAGES, UPPER_BUNDLE, hudRoutingCapability, applyUpperBundle, describeUpperBundle, markStage, modeGatedClient, stagesOf, upperBundleFlags } from './egdesk-upper-bundle.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
@@ -30,7 +30,7 @@ test('bundle on: every flag of the bundle is filled with its value; the input of
   assert.equal(out.flags.UNRELATED, 'x')
   const env = { EGDESK_UPPER: 'on' }, applied = applyUpperBundle(env)
   assert.equal(applied.applied.length, NAMES.length); for (const row of UPPER_BUNDLE) assert.equal(env[row.flag], row.value)
-  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 13)
+  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 14)
 })
 
 test('any single flag stays overridable: an explicit value (including off, none, advisory, empty is NOT explicit) wins over the bundle, the rest are filled', () => {
@@ -42,7 +42,7 @@ test('any single flag stays overridable: an explicit value (including off, none,
 
 test('bundle contents are consistent: each flag is read by product code, requires point inside the bundle, the excluded list is disjoint and every dormant flag names its feature', () => {
   const product = ['codex-bridge-server.mjs', 'egdesk-own-tools-wiring.mjs', 'egdesk-turn-memory-wiring.mjs', 'egdesk-prefetch.mjs', 'egdesk-decision-first-approvals.mjs', 'egdesk-open-items.mjs', 'egdesk-open-proposals.mjs', 'codex-chat-runtime.mjs'].map(read).join('\n')
-  for (const row of UPPER_BUNDLE) { assert.ok(row.lands || product.includes(row.flag), `${row.flag} is read by product code (or its lane has not merged: lands)`); assert.ok(['prerequisite', 'turn', 'tool', 'dormant'].includes(row.role)); assert.ok(row.why.length > 20, row.flag) }
+  for (const row of UPPER_BUNDLE) { assert.ok(row.lands || product.includes(row.flag), `${row.flag} is read by product code (or its lane has not merged: lands)`); assert.ok(['prerequisite', 'turn', 'tool', 'surface', 'dormant'].includes(row.role)); assert.ok(row.why.length > 20, row.flag) }
   for (const row of UPPER_BUNDLE) for (const need of row.requires ?? []) assert.ok(NAMES.includes(need), `${row.flag} requires ${need}`)
   for (const flag of Object.keys(NOT_IN_BUNDLE)) assert.ok(!NAMES.includes(flag), `${flag} is excluded and not in the bundle`)
   assert.equal(new Set(NAMES).size, NAMES.length); assert.ok(!NAMES.includes('EGDESK_UPPER'))
@@ -165,4 +165,20 @@ test('stages hook through the dispatcher: records the marked order for the turn\
   assert.deepEqual((await run({}, true)).expectations, [], 'nothing expected: records only')
   assert.deepEqual(judgeStages({ order: ['memory'] }, [{ stage: 'memory', at: 5 }, { stage: 'engine', at: 4 }]).map(e => [e.check, e.ok]), [['stages.order', false], ['stages.inTimeOrder', false]])
   assert.equal(validateStagesExpect({ order: ['engine'], includes: ['engine'] }).length, 1); assert.equal(validateStagesExpect({ order: ['engine'] }).length, 0)
+})
+
+// ---- the Desk search field's routing (lane L1's window): the bundle turns it on and the bridge tells the window ----
+test('HUD routing through the bundle: the bridge\'s per-request enabled check reads the bundle\'s value from process.env, and chatCapabilities carries the word the window reads', () => {
+  assert.deepEqual(HUD_ROUTING_CAPABILITIES, { advisory: 'hud-routing-advisory', on: 'hud-routing-on' }, 'the words lane L1\'s window reads (HUD_ROUTING_CAPABILITIES)')
+  assert.deepEqual([undefined, 'off', 'bogus', 'advisory', 'on'].map(v => hudRoutingCapability(v === undefined ? {} : { EGDESK_HUD_ROUTING: v })), [null, null, null, 'hud-routing-advisory', 'hud-routing-on']); assert.equal(hudRoutingCapability(null), null)
+  const env = { EGDESK_UPPER: 'on' }; applyUpperBundle(env)
+  assert.equal(env.EGDESK_HUD_ROUTING, 'advisory'); assert.equal(hudRoutingCapability(env), 'hud-routing-advisory')
+  const own = { EGDESK_UPPER: 'on', EGDESK_HUD_ROUTING: 'off' }; applyUpperBundle(own)
+  assert.equal(hudRoutingCapability(own), null, 'a person who set it off keeps it off, and then the window is not told')
+  const bridge = read('codex-bridge-server.mjs')
+  assert.match(bridge, /const hudRoutingEnabled = \(\) => \['advisory', 'on'\]\.includes\(process\.env\.EGDESK_HUD_ROUTING\)/, 'read per request, so the value the bundle set is seen')
+  assert.match(bridge, /\.\.\.\(hudRoutingCapability\(process\.env\) \? \[hudRoutingCapability\(process\.env\)\] : \[\]\)/)
+  assert.ok(bridge.indexOf('applyUpperBundle(process.env)') < bridge.indexOf('const hudRoutingEnabled'))
+  const hud = read('egdesk-hud-routing.mjs')
+  assert.match(hud, /hud_text/, 'the typed text is its own egress kind'); assert.match(hud, /every gate REFUSES today/, 'nothing leaves until the owner decides D1')
 })

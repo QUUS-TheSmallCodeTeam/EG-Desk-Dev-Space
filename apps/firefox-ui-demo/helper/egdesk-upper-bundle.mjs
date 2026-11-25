@@ -9,7 +9,7 @@
 // The order of a turn (U13 "끼릭끼릭 탁탁"): memory and action layers settle first (turn context, record write first, the open item the reply settles, a command the person asked for), then
 // the engine speaks ONCE, then the answer is checked before it is posted. markStage / stagesOf record that order per run (state only).
 
-/** role: 'prerequisite' = a flag another flag needs in order to do anything; 'turn' = a turn-judgment flag; 'tool' = tools the conversation engine may call; 'dormant' = a safe-direction setting that only matters when its feature is on.
+/** role: 'surface' = a window feature the bridge answers for (the bridge announces it in chatCapabilities). 'prerequisite' = a flag another flag needs in order to do anything; 'turn' = a turn-judgment flag; 'tool' = tools the conversation engine may call; 'dormant' = a safe-direction setting that only matters when its feature is on.
  *  lands: the flag's code is on another lane's branch that is not merged yet (the value is set anyway and is inert until it merges). */
 export const UPPER_BUNDLE = Object.freeze([
   Object.freeze({ flag: 'EGDESK_OWN_TOOLS', value: 'on', role: 'prerequisite', lane: 'L5', why: 'EG-Desk runs the engine\'s commands and file edits itself; decision-first (commands, approvals) acts only on a run that has these tools (Codex)' }),
@@ -22,6 +22,7 @@ export const UPPER_BUNDLE = Object.freeze([
   Object.freeze({ flag: 'EGDESK_TURN_MEMORY_PREFETCH', value: 'files', role: 'turn', lane: 'L7', why: 'the working folder\'s text files are context candidates, read by code when the Decision model picks them' }),
   Object.freeze({ flag: 'EGDESK_TERMINAL_OPEN_URL', value: 'on', role: 'prerequisite', lane: 'L8', why: 'an address a program in a Terminal card asks the system to open opens in an EG-Desk Browser Card; the page tools\' AI-service sign-in opacity relies on it' }),
   Object.freeze({ flag: 'EGDESK_PAGE_TOOLS', value: 'on', role: 'tool', lane: 'L8', requires: ['EGDESK_OWN_TOOLS', 'EGDESK_TERMINAL_OPEN_URL'], lands: 'lane/u1-browser-tools', why: 'the browser as EG-Desk tools for Claude and Codex (egdesk_card_*), offered only in a run bound to a Card the person granted; code decides what needs approval, the approval ledger of the own tools carries it; no Decision model is involved' }),
+  Object.freeze({ flag: 'EGDESK_HUD_ROUTING', value: 'advisory', role: 'surface', lane: 'L1', why: 'the Desk search field asks where typed text should go: the bridge answers /decision/hud-routing and tells the window (chatCapabilities hud-routing-advisory); the typed text is its own egress kind (hud_text) that every gate refuses today, so nothing leaves until the owner decides D1, and the window\'s code rules (an address, an exact name) work; cards are never moved' }),
   Object.freeze({ flag: 'EGDESK_DRAFT_CHECK', value: 'on', role: 'turn', lane: 'L6', why: 'the answer is checked before it is posted (held answer mode)' }),
   Object.freeze({ flag: 'EGDESK_FLOW_NOTE_WORDING', value: 'waiting', role: 'dormant', lane: 'L3', why: 'the concrete progress-note question; only matters when EGDESK_CONVERSATION_FLOW is on (not part of the bundle)' }),
   Object.freeze({ flag: 'EGDESK_FLOW_STALLED_COPY', value: 'none', role: 'dormant', lane: 'L3', why: 'no fixed sentence is posted when the engine stalls (owner option (다)); only matters when EGDESK_CONVERSATION_FLOW is on' }),
@@ -89,3 +90,10 @@ export function markStage(marks, run, stage, now = Date.now) {
   list.push({ stage, at: now() }); marks.set(run, list); return true
 }
 export const stagesOf = (marks, run) => (marks.get(run) ?? []).map(row => ({ ...row }))
+
+/**
+ * The chatCapabilities word the bridge announces for the Desk search field's routing (lane L1's window reads it: HUD_ROUTING_CAPABILITIES in EGDeskHudRouting.sys.mjs): 'hud-routing-advisory'
+ * or 'hud-routing-on' while EGDESK_HUD_ROUTING says so (set by the person or by the bundle), none otherwise. The window's own pref egdesk.hudRouting still wins when the person set it.
+ */
+export const HUD_ROUTING_CAPABILITIES = Object.freeze({ advisory: 'hud-routing-advisory', on: 'hud-routing-on' })
+export const hudRoutingCapability = env => HUD_ROUTING_CAPABILITIES[env?.EGDESK_HUD_ROUTING] ?? null

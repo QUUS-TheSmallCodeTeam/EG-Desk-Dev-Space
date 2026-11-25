@@ -44,7 +44,7 @@ import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } fr
 import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
-import { applyUpperBundle, describeUpperBundle, modeGatedClient } from './egdesk-upper-bundle.mjs'
+import { applyUpperBundle, describeUpperBundle, hudRoutingCapability, modeGatedClient } from './egdesk-upper-bundle.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
@@ -1256,7 +1256,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(IN_RUN_MESSAGES_ENABLED ? ['in-run-messages'] : []), ...(process.env.EGDESK_TERMINAL_OPEN_URL === 'on' ? ['terminal-open-url'] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(IN_RUN_MESSAGES_ENABLED ? ['in-run-messages'] : []), ...(process.env.EGDESK_TERMINAL_OPEN_URL === 'on' ? ['terminal-open-url'] : []), ...(hudRoutingCapability(process.env) ? [hudRoutingCapability(process.env)] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
