@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
+import { browserNavigationPolicy } from '../overlay/resources/EGDeskBrowserGrant.sys.mjs'
 import path from 'node:path'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
@@ -34,7 +35,7 @@ const PAGES = () => ({ '/home': { text: ['쇼핑몰'], elements: [{ ref: 'q', ro
  * world(t, { harness, pageTools, codexReady, oldReadiness }): the bridge's wiring in miniature. harness / pageTools: the two flags (EGDESK_CLAUDE_HARNESS, EGDESK_PAGE_TOOLS).
  * codexReady: the Codex slot's own answer (qaReady), false = no Codex app-server (the real-window case). oldReadiness: the Browser provider's readiness as u4 left it (the Codex slot's, for every engine).
  */
-export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null } = {}) {
+export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-claude-route-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const root = path.join(base, 'project'); fs.mkdirSync(root); const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
   const transports = [], events = [], ran = [], decisionBodies = []
@@ -78,6 +79,20 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   const pw = pageWorld('x', host, 'card', { pages: pages() }); pw.go(start)
   const send0 = pw.transport.sendToUi.bind(pw.transport)
   pw.transport.sendToUi = async request => { if (request.kind === 'act' && request.action.type === 'fill') { const page = pw.state.pages[pw.state.cur.path]; const target = page.elements.find(e => e.ref === request.action.ref); if (target) { target.value = request.action.text; pw.state.cur = { ...pw.state.cur, revision: pw.state.cur.revision + 1 } } } return send0(request) }
+  // the Card's site question as the overlay answers it (browserToolCardRequest 'allow-site'): the person's answer ('allowed' | 'refused' | 'pending') decides; an allowed site joins the conversation's set
+  const sites = new Set(), siteQuestions = []
+  const send1 = pw.transport.sendToUi.bind(pw.transport)
+  pw.transport.sendToUi = async request => {
+    if (request.kind === 'allow-site') {
+      if (sites.has(request.site)) return { requestId: request.requestId, status: 'site-allowed', site: request.site, navigationPolicy: browserNavigationPolicy([...sites]), timing: {} } // the overlay answers a site the conversation already allowed at once
+      siteQuestions.push(request.site)
+      const answer = typeof siteAnswer === 'function' ? await siteAnswer(request.site) : siteAnswer
+      if (answer === 'allowed') sites.add(request.site)
+      return { requestId: request.requestId, status: answer === 'allowed' ? 'site-allowed' : answer === 'refused' ? 'site-refused' : 'site-pending', site: request.site, navigationPolicy: browserNavigationPolicy([...sites]), timing: {} }
+    }
+    if (request.kind === 'act' && request.action.type === 'navigate' && typeof request.action.url === 'string' && new URL(request.action.url).host !== host) pw.state.pages[`offsite:${request.action.url}`] ||= { text: ['외부 사이트'], elements: [] } // another site's page, so the move can be observed
+    return send1(request)
+  }
   const readiness = oldReadiness ? route => codexReady : browserSchemaReady({ claudeLive: () => chat.claudeBrowserLive() === true, claudeReady: () => claude.isReady() && claude.capabilities().has('boundedQa'), codexReady: () => codexReady })
   const browser = createCodexBrowserToolProvider({ transport: pw.transport, getOwnerKey: () => OWNER, schemaReady: readiness })
   const page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => browser.dispatch(run, event) }, ledger: wiring.ledger })
@@ -101,7 +116,7 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   const browserSend = (message, extra = {}) => send(message, { executionPolicy: { mode: 'browserBounded' }, selectedSources: selected(), ...extra })
   const runOf = sent => chat.runs.get(`${sent.conversationId}/${sent.runId}`)
   const settled = async sent => { await until(() => ['completed', 'failed', 'interrupted'].includes(runOf(sent)?.status)); await drain(); return runOf(sent) }
-  return { chat, claude, transports, events, root, send, browserSend, runOf, settled, drain, pw, ran, decisionBodies, wiring }
+  return { chat, claude, transports, events, root, send, browserSend, runOf, settled, drain, pw, ran, decisionBodies, wiring, siteQuestions, sites }
 }
 export const refusal = async promise => { try { await promise; return null } catch (error) { return { code: error.code, status: error.httpStatus } } }
 
@@ -152,7 +167,11 @@ export const GOOGLE_PAGES = () => ({
     gel('btnI', 'button', 'I’m Feeling Lucky', { tag: 'input', nav: facts.btnI }),
     gel('sel', 'combobox', '언어', { tag: 'select' }),
     gel('fav', 'button', '즐겨찾기에 추가', { tag: 'button', view: '/fav' }),
+    gel('about', 'link', 'Google 정보', { href: 'https://about.google/?fg=1&utm_source=hp' }),
+    gel('store', 'link', 'Google 스토어', { href: 'https://store.google.com/' }),
+    gel('news', 'link', '뉴스', { href: `https://${GOOGLE_HOST}/news` }),
   ] },
+  '/news': { text: ['뉴스'], elements: [] },
   '/fav': { text: ['Google', '즐겨찾기에 추가됨'], elements: [] },
   '/search': { text: ['우산 - Google 검색', '검색결과 약 1억 개'], elements: [gel('back', 'link', '홈', { href: `https://${GOOGLE_HOST}/` })] },
 })

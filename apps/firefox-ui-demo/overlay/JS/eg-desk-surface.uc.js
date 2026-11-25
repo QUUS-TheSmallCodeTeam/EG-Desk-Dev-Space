@@ -24858,6 +24858,8 @@
       if (!site || site.length > 253 || !/^[\p{L}\p{N}.:\[\]-]+$/u.test(site)) throw new Error('Invalid Browser site request');
       if (browserToolThreadSiteSet(clientThreadId).has(site)) return { requestId, status: 'site-allowed', site, navigationPolicy: policy(), timing: timing() };
       const activity = browserToolActivityStart(card, activityRequest);
+      // u9 (D25): the question is on THIS Card; a Card the Agent opened, or one out of the person's sight, left it unseen for its whole 55 s. Bring the Card forward and into view first.
+      try { if (!isCardFullscreen(card)) card.style.zIndex = String(++cardZ); revealOpenCanvasCard(card, { kind: 'browser' }); } catch {}
       const answer = await card._browserControls.toolAskSite?.({ site, deadlineMs: request.deadlineMs });
       if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during the site question');
       if (answer === 'allowed') {
