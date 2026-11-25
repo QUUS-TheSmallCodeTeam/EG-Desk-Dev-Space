@@ -271,7 +271,7 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
     fn => frames.push(fn), class { constructor(fn) { observer = this; this.callback = fn; } observe() {} disconnect() { this.disconnected = true; } },
     timeouts?.set || setTimeout, timeouts?.clear || clearTimeout, fn => { intervals.set(++intervalId, fn); return intervalId; }, id => intervals.delete(id),
     AbortController, URLSearchParams, { warn: (...args) => warnings.push(args) });
-  const h = { elements, requests, messages, term, window, intervals, warnings, observer, hostEventKey,
+  const h = { elements, requests, messages, get term() { return term; }, window, intervals, warnings, observer, hostEventKey,
     api: window.terminalAPI, fetch, boot: async () => { await frames.shift()(); await settle(); },
     event: (type, event = {}) => windowListeners.get(type)?.(event) };
   return h;
@@ -988,4 +988,14 @@ test('c35: the terminal reports how long it has been quiet (null until it printe
   assert.equal(h.api.outputIdleMs(), null)
   await h.boot(); await settle()
   assert.ok(Number.isFinite(h.api.outputIdleMs()) && h.api.outputIdleMs() >= 0)
+})
+
+test('u1: the terminal reports whether the shell\'s line editor is up (xterm bracketed paste mode); null when it cannot tell', async () => {
+  const h = await darwinFixture()
+  await h.boot(); await settle()
+  assert.equal(h.api.lineEditorReady(), null, 'a terminal without modes cannot tell')
+  h.term.modes = { bracketedPasteMode: false }; assert.equal(h.api.lineEditorReady(), false, 'start-up files still running')
+  h.term.modes = { bracketedPasteMode: true }; assert.equal(h.api.lineEditorReady(), true, 'the editor switched bracketed paste on at its prompt')
+  h.term.modes = { bracketedPasteMode: 'yes' }; assert.equal(h.api.lineEditorReady(), null)
+  h.term.modes = { get bracketedPasteMode() { throw new Error('gone'); } }; assert.equal(h.api.lineEditorReady(), null)
 })

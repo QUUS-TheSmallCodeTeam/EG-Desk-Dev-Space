@@ -322,15 +322,18 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
     if (card.isConnected === false || !wait) break;
     try { await wait(50); } catch { break; }
   }
-  // c35: a line typed before the shell printed its prompt is echoed twice. Wait (bounded) until the session has printed something and been quiet for a moment; a terminal API that
-  // does not report output timing is typed to at once, as before.
-  if (api && typeof api.outputIdleMs === 'function' && wait) {
+  // c35 / u1: a line typed before the shell's line editor is up is echoed twice (by the tty, then again by the editor). c35 waited for 400 ms of silence after the first output; a real shell
+  // proved that wrong: the first output is often a start-up file's warning (e.g. nvm's), followed by silence while the rest of the start-up runs, and the line went in too early.
+  // The signal is the editor itself: it switches bracketed paste on when it starts reading a line (see shellReadyToType). Bounded by readyTimeoutMs; a terminal API that reports neither
+  // output timing nor the editor is typed to at once, as before.
+  if (api && (typeof api.outputIdleMs === 'function' || typeof api.lineEditorReady === 'function') && wait) {
     const readyStarted = now();
     while (now() - readyStarted < readyTimeoutMs) {
       if (!isCurrent()) return changed();
-      let idle = null;
-      try { idle = api.outputIdleMs(); } catch { idle = null; }
-      if (idle !== null && idle >= quietMs) break;
+      let idle = null, editor = null;
+      try { idle = api.outputIdleMs?.() ?? null; } catch { idle = null; }
+      try { editor = api.lineEditorReady?.() ?? null; } catch { editor = null; }
+      if (shellReadyToType({ idleMs: idle, editorReady: editor }, { quietMs })) break;
       if (card.isConnected === false) break;
       try { await wait(50); } catch { break; }
     }
@@ -559,16 +562,30 @@ export const CLAUDE_LOGIN_ENDED_TEXT = 'Claude 상태를 바꾸지 못했습니�
 export async function watchClaudeLogin({ refresh, isSignedIn, sessionEnded, isCurrent = () => true, wait, now = Date.now, pollMs = CLAUDE_LOGIN_WATCH.pollMs, boundMs = CLAUDE_LOGIN_WATCH.boundMs } = {}) {
   const started = now();
   while (now() - started < boundMs) {
-    if (!isCurrent()) return 'changed';
     try { await refresh(); } catch { /* a failed check is tried again at the next poll */ }
-    if (!isCurrent()) return 'changed';
+    // u1: signed in is checked first: once the login worked, the Settings row no longer offers a login (isCurrent turns false) and that is not "the account changed"
     let signed = false;
     try { signed = isSignedIn() === true; } catch { signed = false; }
     if (signed) return 'signedIn';
+    if (!isCurrent()) return 'changed';
     let ended = false;
     try { ended = sessionEnded() === true; } catch { ended = false; }
     if (ended) return 'ended';
     try { await wait(pollMs); } catch { return 'changed'; }
   }
   return 'timeout';
+}
+
+// u1: may a login line be typed now? `editorReady` is the terminal's report of the shell's line editor (true while it reads a line; false before; null when unknown), `idleMs` the time since
+// the shell last printed (null: nothing yet).
+//  - editor up (true): yes, once the prompt has settled (PROMPT_SETTLE_MS) - the exact moment, however long the start-up files took.
+//  - editor not up (false): the shell may be a slow start-up (wait on) or a shell without bracketed paste (bash 3.2: the editor never reports); only a long silence (NO_EDITOR_IDLE_MS) says it is
+//    at its prompt. A start-up silent for longer than that is typed into early, as c35 did for every shell; the caller's bound ends the wait.
+//  - unknown (null): c35's rule: some output, then `quietMs` of silence.
+export const PROMPT_SETTLE_MS = 120;
+export const NO_EDITOR_IDLE_MS = 2500;
+export function shellReadyToType({ idleMs = null, editorReady = null } = {}, { quietMs = 400, settleMs = PROMPT_SETTLE_MS, noEditorIdleMs = NO_EDITOR_IDLE_MS } = {}) {
+  if (editorReady === true) return idleMs === null || idleMs >= settleMs;
+  if (editorReady === false) return idleMs !== null && idleMs >= noEditorIdleMs;
+  return idleMs !== null && idleMs >= quietMs;
 }

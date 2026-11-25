@@ -174,11 +174,13 @@ export function createTerminalZone(deps) {
         if (last !== undefined && at - last < 5000) continue;
         openedUrls.set(url.href, at);
         try {
-          const opened = spawnBrowserCard(url.href, { openMode: 'new', opener: card, background: true });
+          const opened = spawnBrowserCard(url.href, { openMode: 'new', opener: card, background: true, besideOpener: card, revealBackground: true });
           if (opened && typeof opened === 'object') {
             opened._signinSessionId = typeof sessionId === 'string' && sessionId ? sessionId : 'terminal';
             try { opened.dataset.egdSigninSession = opened._signinSessionId; } catch {}
             linkedCards.add(opened);
+            // u1: a Claude sign-in card closes by itself when the engine's state says the login worked (the surface's watch); other addresses are not watched
+            try { state.watchClaudeSignedIn?.(card, url.href)?.then(result => { if (result === 'signedIn') closeLinkedCards(); }).catch(() => {}); } catch {}
           }
         } catch (error) { console.warn(TAG, 'terminal address could not be opened in a Browser Card:', error?.message || error); }
       }

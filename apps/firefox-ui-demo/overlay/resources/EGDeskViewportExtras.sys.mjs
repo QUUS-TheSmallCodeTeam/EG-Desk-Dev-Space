@@ -257,3 +257,52 @@ export function edgeDotsBesideDock(dots = [], { dock = null, viewport = null, st
   const out = new Map(bottom.map(dot => [dot, { ...dot, x: Math.min(Math.max(place.get(dot), margin), viewport.width - margin), y }]));
   return list.map(dot => out.get(dot) ?? dot);
 }
+
+// u1 (item 5): c35 moved only the BOTTOM dots (beside the dock). The dots of the other sides, and a bottom dot beside a dock that a card reaches, still sat on whatever card (or card text) was under
+// them at the edge. No dot may cover a card: each is slid along its own edge to the nearest spot whose hit box (the 22 px button, wider for a "+N" dot) touches no card; when the whole edge is
+// covered it goes to the outer gutter (a few px from the window's edge) and, failing that, to the spot that covers the least card area. Dots keep `gap` px apart and keep their order.
+// `cards`: client rects ({left, top, right, bottom}) of the Views on screen. Pure; dots that already touch no card are returned unchanged.
+export function edgeDotsAvoidCards(dots = [], { cards = [], viewport = null, gutter = 8, step = 6, gap = 26 } = {}) {
+  const list = Array.isArray(dots) ? dots : [];
+  if (!viewport || !(viewport.width > 0) || !(viewport.height > 0) || !list.length) return list;
+  const boxes = (Array.isArray(cards) ? cards : []).filter(c => c && [c.left, c.top, c.right, c.bottom].every(Number.isFinite) && c.right > c.left && c.bottom > c.top);
+  if (!boxes.length) return list;
+  const half = dot => ({ w: dot.type === 'more' || dot.count > 1 ? 22 : 12, h: 12 });
+  const area = (dot, x, y) => {
+    const { w, h } = half(dot);
+    let sum = 0;
+    for (const c of boxes) {
+      const ox = Math.min(x + w, c.right) - Math.max(x - w, c.left), oy = Math.min(y + h, c.bottom) - Math.max(y - h, c.top);
+      if (ox > 0 && oy > 0) sum += ox * oy;
+    }
+    return sum;
+  };
+  const vertical = dot => dot.side === 'left' || dot.side === 'right';
+  const placed = [];
+  const out = new Map();
+  const order = [...list].sort((a, b) => (vertical(a) ? a.y : a.x) - (vertical(b) ? b.y : b.x));
+  for (const dot of order) {
+    const along = vertical(dot) ? 'y' : 'x', across = vertical(dot) ? 'x' : 'y';
+    const low = gutter + (along === 'x' ? half(dot).w : half(dot).h), high = (along === 'x' ? viewport.width : viewport.height) - low;
+    const apart = value => placed.every(other => other.side !== dot.side || Math.abs(other[along] - value) >= gap);
+    const acrossHome = dot[across];
+    const acrossGutter = across === 'x' ? (dot.side === 'left' ? gutter + half(dot).w : viewport.width - gutter - half(dot).w) : (dot.side === 'top' ? gutter + half(dot).h : viewport.height - gutter - half(dot).h);
+    const candidates = [];
+    for (const perp of [...new Set([acrossHome, acrossGutter])]) {
+      for (let delta = 0; delta <= Math.max(viewport.width, viewport.height); delta += step) {
+        for (const sign of delta === 0 ? [1] : [1, -1]) {
+          const value = dot[along] + sign * delta;
+          if (value < low || value > high) continue;
+          candidates.push({ [along]: value, [across]: perp, delta: delta + (perp === acrossHome ? 0 : 1) });
+        }
+      }
+    }
+    const scored = candidates.filter(c => apart(c[along])).map(c => ({ ...c, covered: area(dot, c.x, c.y) }));
+    let best = scored.filter(c => c.covered === 0).sort((a, b) => a.delta - b.delta)[0];
+    if (!best) best = scored.sort((a, b) => a.covered - b.covered || a.delta - b.delta)[0];
+    const moved = best && (best.x !== dot.x || best.y !== dot.y) && area(dot, dot.x, dot.y) > 0 ? { ...dot, x: best.x, y: best.y } : dot;
+    placed.push(moved);
+    out.set(dot, moved);
+  }
+  return list.map(dot => out.get(dot) ?? dot);
+}

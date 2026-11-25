@@ -2685,11 +2685,16 @@ function quotaErrorForRateLimit(rateLimit, error) {
     retryAt: rateLimit.resetsAt };
 }
 
+// u1: the Claude CLI reports status "allowed_warning" early (recorded events: 42.5% of the 5-hour window, 44% of the week), long before a limit is near; "가까워졌습니다" at 44% was wrong. The warning
+// level (and its wording) now needs the reported percent to reach this bar (the same 70 % the real-engine usage guard stops at); below it the same report reads as the plain "사용량을 확인했습니다" with the
+// same window and percent. A warning with no reported percent stays a warning (nothing says it is far from the limit).
+export const RATE_LIMIT_WARN_FROM_PERCENT = 70;
 /** A reported quota observation, never availability proof or a resend action. */
 export function runRateLimitNotice(run, now = Date.now()) {
   const rateLimit = publicRunRateLimit(run?.rateLimit, run);
   if (!rateLimit) return null;
-  const level = rateLimit.status === 'rejected' || rateLimit.creditsRequired ? 'limit' : rateLimit.status === 'allowed_warning' ? 'warn' : 'ok';
+  const level = rateLimit.status === 'rejected' || rateLimit.creditsRequired ? 'limit'
+    : rateLimit.status === 'allowed_warning' && (rateLimit.usedPercent === null || rateLimit.usedPercent >= RATE_LIMIT_WARN_FROM_PERCENT) ? 'warn' : 'ok';
   const windowLabel = RUN_RATE_LIMIT_WINDOWS.find(([name]) => name === rateLimit.window)?.[1] || null;
   const at = Number.isFinite(now) && Number.isFinite(new Date(now).getTime()) ? now : Date.now();
   const clock = formatResetClock(rateLimit.resetsAt, at);
@@ -2747,12 +2752,38 @@ export function chatSessionKind(thread) {
   return null;
 }
 
+// u1: a new DM room is named "Codex N" (peer "Codex") whatever engine will answer. Choosing another engine before the first send renames a room that still has that default name ("Claude N",
+// peer "Claude"); a name the person changed is never touched. Returns { title, from, to } (the peer's old and new name) or null. `engineLabel` is the chosen engine's own label.
+export function relabelDefaultRoom(thread, engineLabel, selfName = '나') {
+  const label = typeof engineLabel === 'string' ? engineLabel.trim().slice(0, 40) : '';
+  const match = /^(Codex|Claude)(?: (\d{1,6}))?$/.exec(typeof thread?.title === 'string' ? thread.title : '');
+  if (!label || !match || thread.type !== 'dm' || chatThreadEngineLocked(thread)) return null;
+  const title = match[2] ? `${label} ${match[2]}` : label;
+  if (title === thread.title) return null;
+  const peers = Array.isArray(thread.participants) ? thread.participants.filter(name => name !== selfName) : [];
+  const from = peers.length === 1 && (peers[0] === match[1] || peers[0] === thread.title) ? peers[0] : null;
+  return { title, from, to: from ? label : null };
+}
+
 /** The '기록 없이 시작' switch on a new room: shown until the first send; on only when the bridge supports it. */
-export function chatStatelessStartView(thread, capabilities) {
-  const supported = capabilityListed(capabilities, 'stateless');
+// u1: the switch is a Codex thing (its words name Codex) and an engine without the ephemeralThreads capability (Claude: the CLI keeps its own sessions) cannot start one: the send would be refused
+// (STATELESS_UNSUPPORTED). With `codex` (the window's codex state) the room's engine is read from the engines list; an engine that lists capabilities without ephemeralThreads gets no switch
+// (available/on false) and the note below, which is the first sentence of the existing STATELESS_UNSUPPORTED text (a proposal awaiting approval, see the report). Unknown engine or no
+// capability list: as before.
+export const STATELESS_ENGINE_UNSUPPORTED_NOTE = '이 AI 엔진은 기록 없이 시작을 지원하지 않습니다.';
+export function chatStatelessStartView(thread, capabilities, codex = null) {
+  let engineUnsupported = false;
+  if (thread && codex && typeof codex === 'object') {
+    try {
+      const engineId = chatThreadEngineId(thread, codex);
+      const choice = chatEngineChoices(codex.engines, codex.authStatus).find(row => row.id === engineId);
+      engineUnsupported = !!choice && choice.capabilities.length > 0 && !choice.capabilities.includes('ephemeralThreads');
+    } catch { engineUnsupported = false; }
+  }
+  const supported = capabilityListed(capabilities, 'stateless') && !engineUnsupported;
   const open = !!thread && !chatThreadEngineLocked(thread);
   const on = supported && open && thread.startStateless === true;
-  const note = !Array.isArray(capabilities) ? '코덱스 연결을 확인한 뒤 고를 수 있습니다.'
+  const note = engineUnsupported ? STATELESS_ENGINE_UNSUPPORTED_NOTE : !Array.isArray(capabilities) ? '코덱스 연결을 확인한 뒤 고를 수 있습니다.'
     : !supported ? '지금 연결된 브리지는 기록 없이 시작을 지원하지 않습니다.'
       : on ? '코덱스에 대화 기록을 남기지 않습니다. 나중에 이어서 대화하지 못할 수 있고, 분기할 수 없습니다. 이 화면의 대화 내용은 이 기기에 남습니다.'
         : '켜면 코덱스에 기록을 남기지 않는 일회성 대화로 시작합니다.';

@@ -678,3 +678,30 @@ test('c36: the terminal card reports its linked sign-in cards and whether its se
   assert.equal((await run([{ type: 'terminal-disconnected' }])).ended, false, 'a connection that never came up');
   assert.equal((await run([{ type: 'terminal-ready' }, { type: 'terminal-disconnected' }])).ended, true);
 });
+
+// u1 item 1 and 2: the sign-in card opens beside the terminal and in view; it closes when the engine says the login worked
+test('u1: the sign-in card is asked to open beside this terminal and be brought into view (still in the background); a Claude sign-in is watched and its card closes on success only', async () => {
+  const opened = [], closed = [], watched = [];
+  const make = name => { const c = { name, isConnected: true, dataset: {}, _deskWindowShell: { requestClose: () => { closed.push(name); c.isConnected = false; } } }; return c; };
+  let resolveWatch;
+  const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: (url, options) => { opened.push([url, options]); return make(`card-${opened.length}`); } } });
+  try {
+    h.state.watchClaudeSignedIn = (card, href) => { watched.push([card, href]); return /claude\.com/.test(href) ? new Promise(resolve => { resolveWatch = resolve; }) : null; };
+    const CLAUDE = 'https://claude.com/cai/oauth/authorize?code=true&state=synthetic';
+    h.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: [CLAUDE, 'https://example.test/docs'] });
+    assert.equal(opened.length, 2);
+    for (const [, options] of opened) { assert.equal(options.background, true); assert.equal(options.besideOpener, h.card); assert.equal(options.revealBackground, true); assert.equal(options.opener, h.card); }
+    assert.deepEqual(watched.map(([card, href]) => [card, href]), [[h.card, CLAUDE], [h.card, 'https://example.test/docs']], 'the surface is asked for each address and decides which is Claude\'s');
+    resolveWatch('ended'); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(closed, [], 'a watch that ended without success closes nothing here (the session end does)');
+  } finally { h.restore(); }
+  const h2 = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: () => make(`s-${closed.length}`) } });
+  try {
+    closed.length = 0; let resolve2;
+    h2.state.watchClaudeSignedIn = () => new Promise(resolve => { resolve2 = resolve; });
+    h2.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=s'] });
+    assert.deepEqual(closed, []); resolve2('signedIn'); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed.length, 1, 'closed once the login worked'); assert.equal(h2.card.isConnected !== false, true, 'the terminal card stays');
+    const h3 = h2; h3.state.watchClaudeSignedIn = () => Promise.reject(new Error('bridge')); h3.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=t'] }); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed.length, 1, 'a failing watch closes nothing and throws nothing');
+  } finally { h2.restore(); }
+});
