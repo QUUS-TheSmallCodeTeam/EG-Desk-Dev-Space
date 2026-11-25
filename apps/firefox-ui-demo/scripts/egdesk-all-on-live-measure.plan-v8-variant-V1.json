@@ -5,7 +5,7 @@
  "basedOn": {
   "file": "egdesk-all-on-live-measure.plan-v8.json",
   "sha256": "33740f2ec5cc230f94be6c5c62b1b4113bbe4ddab469327e64f72502588a34ee",
-  "note": "every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions"
+  "note": "every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions; the briefing step's cap raised for its second fill turn (VARIANT_STEP_CAPS)"
  },
  "world": {
   "env": {
@@ -234,8 +234,8 @@
   {
    "id": "s3-briefing",
    "caps": {
-    "maxRequests": 12,
-    "maxEstTokens": 14000
+    "maxRequests": 14,
+    "maxEstTokens": 21000
    },
    "expect": [
     {
