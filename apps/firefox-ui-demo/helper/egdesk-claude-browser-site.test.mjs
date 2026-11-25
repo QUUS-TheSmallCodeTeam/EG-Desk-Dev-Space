@@ -69,17 +69,18 @@ test('D25, the screen: the Card that asks the site question is brought forward a
   assert.match(before, /card\.style\.zIndex = String\(\+\+cardZ\); revealOpenCanvasCard\(card, \{ kind: 'browser' \}\)/)
 })
 
-test('u10: a site question that does not end allowed says WHY in closed words and numbers: unanswered, or allowed by the person but not held by the run\'s policy (unreflected)', async t => {
+test('u10: a site question that does not end allowed says WHY in closed words and numbers: unanswered; and an allow the Card\'s policy did not list still works (vouched by the Card)', async t => {
   const a = google(t, 'pending', { realTransport: true })
   const sentA = await start(a); await callTool(a, 'egdesk_card_read', { mode: 'structure' })
   const unanswered = await callTool(a, 'egdesk_card_press', { ref: 'about' })
   assert.deepEqual([unanswered.status, unanswered.site, unanswered.pendingBy, Number.isSafeInteger(unanswered.waitedMs)], ['not_done', 'site-pending', 'unanswered', true], JSON.stringify(unanswered))
   a.transports.at(-1).finish(); await a.settled(sentA)
+  // the person allowed it but the policy the Card sent does not list the site: the Card's own 'site-allowed' for exactly that site is vouched for (policySync), and the link is followed once
   const b = google(t, 'allowed', { realTransport: true, siteUnreflected: true })
   const sentB = await start(b); await callTool(b, 'egdesk_card_read', { mode: 'structure' })
   const out = await callTool(b, 'egdesk_card_press', { ref: 'about' })
-  assert.deepEqual([out.status, out.code, out.site, out.pendingBy], ['not_done', 'BROWSER_NAVIGATE_OUT_OF_SCOPE', 'site-pending', 'unreflected'], JSON.stringify(out))
-  assert.deepEqual(b.receiveErrors, []); assert.deepEqual(navigations(b), [])
+  assert.deepEqual([out.status, out.via], ['pressed', 'site'], JSON.stringify(out))
+  assert.deepEqual(b.receiveErrors, []); assert.equal(navigations(b).length, 1)
   b.transports.at(-1).finish(); await b.settled(sentB)
 })
 
