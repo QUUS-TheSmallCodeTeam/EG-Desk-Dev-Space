@@ -140,12 +140,19 @@ export function entryQuestions(cards, { codeCard = null } = {}) {
  * The cards the interruption follow-up is about: the request decided a web task, no card decided yes, and these cards (their lines known)
  * were decided no. [] when the first answers already decide something else (or nothing could be an interruption).
  */
+// c33 (real, browser-live-settings-current, 2026-11-25, the 5th run with 0 passes on the current bytes): on the settings error page ("오류 | 계정": "일시적인 오류가 발생했습니다.")
+// the request "마케팅 알림 꺼줘" got browser_entry 0.14 (the page does not hold what the request is about), browser_entry_answer 0 (it cannot be answered without a page) and the card 0.52:
+// the page predicate decided "no", the code read an answer, and the interruption follow-up (which passed in settings-error-v2 at c28, when one question said 0.90) was never asked,
+// because it ran only for a decided web task. A request that cannot be answered without a page, on an open page that does not hold it, is exactly where an interruption has to be
+// asked about: the follow-up is also asked then, for a card not decided yes (decided no or undecided). A request answerable without a page ("광합성이 뭐야?") never reaches it.
+export const needsPageNotThisOne = entry => Number.isFinite(entry?.answerP) && entry.answerP <= ENTRY_NO && !(Number.isFinite(entry?.web) && entry.web >= ENTRY_YES)
 export function wallCandidates(entry, cards) {
   if (!entry || entry.by !== 'predicates' || entry.kind === 'browser') return []
-  if (!(Number.isFinite(entry.web) && entry.web >= ENTRY_YES)) return []
+  const needsPage = needsPageNotThisOne(entry)
+  if (!(Number.isFinite(entry.web) && entry.web >= ENTRY_YES) && !needsPage) return []
   const p = entry.cardsP || []
   if (p.some(value => Number.isFinite(value) && value >= ENTRY_YES)) return []
-  return cards.slice(0, MAX_ENTRY_CARDS).map((card, index) => (shownLines(card).length && Number.isFinite(p[index]) && p[index] <= ENTRY_NO ? index : -1)).filter(index => index >= 0)
+  return cards.slice(0, MAX_ENTRY_CARDS).map((card, index) => (shownLines(card).length && Number.isFinite(p[index]) && (needsPage ? p[index] < ENTRY_YES : p[index] <= ENTRY_NO) ? index : -1)).filter(index => index >= 0)
 }
 // c24 (real, browser-live-settings-error-v1, 2026-11-25): the follow-up's one predicate came back as a REFUSAL (no probability, 61 input tokens against 419 for
 // the first request). The page it asked about was only inside the question; the evidence it carried was the user message, which the question is not about.
@@ -165,7 +172,7 @@ export async function entryWallFollowUp({ message, cards, entry, client, timeout
   try {
     const result = await client.decide({ input: [{ role: 'developer', content: ENTRY_RULES }, { role: 'user', content: entryWallEvidence(message, cards, indices) }],
       questions: entryWallQuestions(cards, indices), timeoutMs, signal, authorizeDispatch })
-    const merged = { ...(answers ?? {}), browser_entry: { type: 'predicate', probability: entry.web }, ...Object.fromEntries((entry.cardsP || []).map((value, index) => [entryCardName(index), { type: 'predicate', probability: value }]).filter(([, a]) => Number.isFinite(a.probability))), ...result.answers }
+    const merged = { ...(answers ?? {}), browser_entry: { type: 'predicate', probability: entry.web }, ...(Number.isFinite(entry.answerP) ? { [ENTRY_ANSWER]: { type: 'predicate', probability: entry.answerP } } : {}), ...Object.fromEntries((entry.cardsP || []).map((value, index) => [entryCardName(index), { type: 'predicate', probability: value }]).filter(([, a]) => Number.isFinite(a.probability))), ...result.answers }
     return { entry: { ...readBrowserEntry(merged, cards, {}), followUp: true }, usage: result.usage }
   } catch (error) { if (error instanceof DecisionError && error.code === 'evidence_unavailable') throw error; return null }
 }
@@ -194,6 +201,12 @@ export function readBrowserEntry(answers, cards, { codeCard = null } = {}) {
   const wallsP = codeCard ? [] : shown.map((_, index) => p(entryWallName(index)))
   const base = { web, answerP, cardsP, wallsP, by: codeCard ? 'code' : 'predicates', confidence: web, margin: null, ranked: cardsP.filter(Number.isFinite) }
   const webNo = answerYes || (web !== null && web <= ENTRY_NO), webYes = !answerYes && web !== null && web >= ENTRY_YES
+  // c33: the request cannot be answered without a page and no card says yes, but exactly one card was decided an interruption (error, sign-in, a check) and every other card no:
+  // that card (the person must see it; the step hands the page over). Before the early "answer" reading: the page predicate said no because the page shows an error.
+  if (!codeCard && !webYes && !answerYes && answerP !== null && answerP <= ENTRY_NO && !cardsP.some(value => value !== null && value >= ENTRY_YES)) {
+    const walls = wallsP.map((value, index) => (value !== null && value >= ENTRY_YES ? index : -1)).filter(index => index >= 0)
+    if (walls.length === 1 && cardsP.every((value, index) => index === walls[0] || (value !== null && value <= ENTRY_NO))) return { kind: 'browser', cardId: shown[walls[0]].cardId, top: null, ...base }
+  }
   if (webNo) return { kind: 'not_browser', top: 'not_browser_task', ...base }
   if (codeCard) return web === null ? { kind: 'uncertain', top: null, ...base } : { kind: 'browser', cardId: codeCard, top: null, ...base }
   const yes = cardsP.map((value, index) => (value !== null && value >= ENTRY_YES ? index : -1)).filter(index => index >= 0)
