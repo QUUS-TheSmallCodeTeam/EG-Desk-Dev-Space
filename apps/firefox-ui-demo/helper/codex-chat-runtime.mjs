@@ -147,6 +147,7 @@ import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsP
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { predicateQuestion, sha256Hex } from './egdesk-decision-questions.mjs'
 import { workspaceCandidates } from './egdesk-prefetch.mjs'
+import { judgeRecordConflict, settledRecordText } from './egdesk-record-settled.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -2877,6 +2878,7 @@ export class CodexChatRuntime {
     if (engine.id === 'codex') this.assertProcessConfiguration(this.threads.get(cid), { model: overrides.model, effort })
     // The only wait turn memory adds: what is left of its cap after preparation. Before the synchronous claim below, never inside it.
     const memoryReady = memoryTurn ? await this.awaitTurnMemory(memoryTurn) : false
+    if (memoryReady && memoryTurn.writeFirst) await this.awaitWriteFirst(memoryTurn)
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
     }
@@ -2989,6 +2991,7 @@ export class CodexChatRuntime {
         : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
+      if (recordRule && memoryTurn?.writeFirst?.inTime === true && recordRule === memoryTurn.writeFirst.text) memoryTurn.writeFirst.sent = true // the settled state went out with this turn
       const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}) } : additionalContext
       // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
       // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
@@ -7333,7 +7336,7 @@ export class CodexChatRuntime {
       const start = clock.now() - t0
       try { return await setup.client.decide(request) } finally {
         const names = request.questions.map(q => q.name)
-        turn.spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : 'fetch', start, end: clock.now() - t0 })
+        turn.spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_') || n.startsWith('cf_')) ? 'write' : 'fetch', start, end: clock.now() - t0 })
       }
     } }
     const threadKey = context.conversationId ?? null
@@ -7350,7 +7353,91 @@ export class CodexChatRuntime {
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
-    Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
+    Object.assign(turn, { wiki, baseScope, scope, result, client, readyMs: clock.now() - t0 })
+    // Write first (flag turnMemory.writeFirst, default off): the write judgment and its pending reading are settled now, behind the loop, not after the answer.
+    if (this.turnMemoryWriteFirstOn()) turn.writeFirst = this.startWriteFirst(turn, body, context)
+  }
+
+  // ---- Write first (flag turnMemory.writeFirst, default off; egdesk-record-settled.mjs) ----
+  turnMemoryWriteFirstOn() {
+    try {
+      const tm = this.decisionContext?.turnMemory, flag = tm?.writeFirst
+      return (typeof flag === 'function' ? flag() : flag) === true && this.turnMemoryMode() === 'on' && tm.ontologyWrite === true && typeof tm.writer === 'function'
+    } catch { return false }
+  }
+
+  // The write judgment of THIS turn, its pending reading and the conflict check of the pair, as one job that starts right behind the loop. It never waits for the engine and never
+  // blocks the turn beyond the loop's cap (awaitWriteFirst); the write path after the answer uses its result instead of asking again.
+  // Stored here: only a pending reading on a record this DM may read (the same writer, operation id and checks as after the answer; replayed there, not stored twice).
+  startWriteFirst(turn, body, context) {
+    const tm = this.decisionContext.turnMemory, clock = turn.clock
+    const wf = { startedAt: clock.now(), settled: false, inTime: false, text: null, judged: null, applied: null, conflict: null, write: null, confirmations: [], sent: false, ms: null, settledAt: null }
+    wf.promise = (async () => {
+      wf.confirmations = (turn.confirm?.actions ?? []).filter(a => a.action !== 'kept').map(a => ({ title: turn.wiki.pages.get(a.pageId)?.title, action: a.action === 'promoted' ? 'promoted' : 'withdrawn', status: a.status })).filter(c => typeof c.title === 'string')
+      const judged = typeof turn.result.judgeWrite === 'function' ? await turn.result.judgeWrite() : null
+      wf.judged = judged
+      const proposal = judged?.proposal
+      let known = judged === null || (proposal && !['judge_failed', 'not_configured'].includes(proposal.reason))
+      if (proposal?.op === 'none') wf.write = ['not_worth_recording', 'judge_failed', 'not_configured'].includes(proposal.reason) ? null : { kind: 'not_recorded' }
+      else if (proposal?.op === 'update_status') {
+        const page = turn.wiki.pages.get(proposal.pageId)
+        if (!page || !memoryAllowsPage(page, turn.scope)) known = false
+        else {
+          const fresh = await tm.wiki({ body, context, sources: turn.sources })
+          wf.applied = fresh?.pages ? tm.writer(fresh, { enabled: true, canWrite: ({ op, page: target }) => op === 'update_status' && !!target && memoryAllowsPage(target, turn.scope) })
+            .apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: turn.baseScope ?? null, operationId: `turn:${context.localMessageId}`, from: context.clientThreadId }) : null
+          if (wf.applied?.status !== 'recorded_pending') known = false
+          else {
+            const correction = proposal.proposedStatus === 'superseded'
+            if (!correction) wf.conflict = await judgeRecordConflict({ message: body.message, page, client: turn.client, askedAt: context.askedAt ?? this.now(), signal: turn.controller.signal })
+            wf.write = { kind: correction ? 'correction' : 'pending_reading', title: page.title, status: proposal.proposedStatus, recordStatus: page.status, recordSlice: page.time?.slice ?? null, conflict: wf.conflict?.conflict?.state === 'yes' }
+          }
+        }
+      } else if (proposal?.op === 'new_page') {
+        let speechOk = false
+        try { speechOk = turn.sources.speech?.allowed?.() === true } catch { speechOk = false }
+        wf.write = speechOk && typeof turn.baseScope?.writeScope === 'string' ? { kind: 'new_record' } : { kind: 'not_recorded' }
+      }
+      wf.text = settledRecordText({ write: wf.write, confirmations: wf.confirmations })
+      wf.settled = known === true || wf.confirmations.length > 0
+      wf.settledAt = clock.now(); wf.ms = wf.settledAt - wf.startedAt
+    })().catch(() => { wf.settled = false })
+    return wf
+  }
+
+  /**
+   * Read-only callables for the open-item resolver (L1) and other system judges; they decide nothing and store nothing.
+   *   openMemoryItems(conversationId) -> frozen [{ kind: 'memory_confirm', pageId, status, offers, told }]: the notes of this conversation that were stated to the person and still await their
+   *     confirmation or refusal (ids and closed words only). Whether the person's message answers one of them stays the confirmation judge's question (rc_*, confirmNotedRecords,
+   *     before the memory loop); this lists them so the resolver can name the kind without a second judge for the same thing.
+   *   memorySettledFor(key) -> frozen { inTime, sent, write: { kind, status, recordStatus, recordSlice, conflict } | null, confirmations: [{ action, status }] } | null: what the write-first job settled for the
+   *     turn (key: the turn's request context or its run); null without the flag, without a turn or before it settled. No titles or text.
+   */
+  openMemoryItems(conversationId) {
+    try {
+      const list = typeof conversationId === 'string' ? this.turnMemoryNoted.get(conversationId) : null
+      return Object.freeze((list ?? []).filter(entry => entry.closed !== true).map(entry => Object.freeze({ kind: 'memory_confirm', pageId: entry.pageId, status: entry.status, offers: entry.offers, told: entry.offered === true })))
+    } catch { return Object.freeze([]) }
+  }
+
+  memorySettledFor(key) {
+    try {
+      const turn = key && typeof key === 'object' ? this.turnMemoryTurns.get(key) : null, wf = turn?.writeFirst
+      if (!wf || wf.settled !== true) return null
+      const w = wf.write
+      return Object.freeze({ inTime: wf.inTime === true, sent: wf.sent === true,
+        write: w ? Object.freeze({ kind: w.kind, ...(w.status ? { status: w.status } : {}), ...(w.recordStatus ? { recordStatus: w.recordStatus } : {}), ...(w.recordSlice ? { recordSlice: w.recordSlice } : {}), conflict: w.conflict === true }) : null,
+        confirmations: Object.freeze(wf.confirmations.map(c => Object.freeze({ action: c.action, status: c.status }))) })
+    } catch { return null }
+  }
+
+  // Waits for the write job until the loop's own cap, no longer (the turn-context budget: warm 2.5 s, cold 4 s). true when it settled before that point.
+  async awaitWriteFirst(turn) {
+    const wf = turn?.writeFirst
+    if (!wf) return false
+    try { await memorySettleBefore(wf.promise, turn.startedAt + turn.capMs, turn.clock) } catch { /* the cap: the turn goes on as it does without the flag */ }
+    wf.inTime = wf.settled === true && Number.isFinite(wf.settledAt) && wf.settledAt < turn.startedAt + turn.capMs
+    return wf.inTime
   }
 
   // The clock and timer of the turn-memory deadlines (injected in tests through turnMemory.clock; otherwise the real ones).
@@ -7514,6 +7601,8 @@ export class CodexChatRuntime {
     try {
       const tm = this.decisionContext?.turnMemory
       if (!turn?.result || this.turnMemoryMode() !== 'on' || tm?.ontologyWrite !== true || typeof tm.writer !== 'function') return null
+      // Write first: when the write judgment settled before the cap, the engine is told the settled state instead of "decided after your reply".
+      if (turn.writeFirst?.inTime === true) return turn.writeFirst.text
       if (typeof turn.result.judgeWrite !== 'function') return null
       if (turn.position?.kind === 'first') return turn.lateTriage && turn.lateTriage.record?.state !== 'yes' ? null : RECORDING_RULE
       return turn.result.triage?.record?.state === 'yes' ? RECORDING_RULE : null
@@ -7528,6 +7617,7 @@ export class CodexChatRuntime {
       if (!turn?.result || !turn.wiki || this.turnMemoryMode() !== 'on') return []
       const items = memoryEvidence(turn.result, turn.wiki, { scope: turn.scope, attached })
       // Where a record may follow, the record state is evidence too: an answer that says it recorded something can then be checked against it.
+      if (turn.writeFirst?.inTime === true && typeof turn.writeFirst.text === 'string') return [...items, { id: 'record-state', kind: 'memory', time: 'present', status: null, source: 'system', text: `EG-Desk record state for this reply, settled before the reply: ${turn.writeFirst.text.split('\n').slice(1, -1).join(' ')}` }]
       if (!this.turnMemoryRuleFor(turn)) return items
       const noted = (this.turnMemoryNoted.get(threadKey) ?? []).map(entry => { const page = turn.wiki.pages.get(entry.pageId)
         return page && memoryAllowsPage(page, turn.scope) ? { title: page.title, status: entry.status } : null }).filter(Boolean)
@@ -7698,7 +7788,9 @@ export class CodexChatRuntime {
     const tm = this.decisionContext?.turnMemory
     let judged = null, applied = null, followUp = null
     try {
-      judged = await turn.result.judgeWrite()
+      // Write first: the judgment (and the pending reading of a status change) was settled at the start of the turn; its result is used, never asked twice.
+      judged = turn.writeFirst ? (await turn.writeFirst.promise, turn.writeFirst.judged) : await turn.result.judgeWrite()
+      if (turn.writeFirst && !judged) judged = { proposal: { op: 'none', reason: 'judge_failed' }, receipt: { reason: 'judge_failed' } }
       // Before anything is stored that points at this utterance: its speech record, with the labels this judgment installed.
       const deferred = this.recordDeferredSpeech(run, judged?.receipt?.spans)
       const proposal = judged?.proposal
@@ -7715,7 +7807,9 @@ export class CodexChatRuntime {
             const labels = judged.receipt?.labels
             turn.sources.speech.record?.(context.localMessageId, 'user', body.message, labels ? [{ start: 0, end: body.message.length, source: labels.source, form: labels.form, time: labels.time }] : [])
           }
-          applied = tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}`, from: run.clientThreadId })
+          // write first: a status change was stored at the start of the turn (a second writer would find the revision moved): the receipt of that is the result
+          applied = proposal.op === 'update_status' && turn.writeFirst?.applied?.status === 'recorded_pending' ? turn.writeFirst.applied
+            : tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}`, from: run.clientThreadId })
           // A correction: the record carries the pending "outdated" reading; the person's own sentence with the new detail becomes a page
           // that supersedes it, only where an utterance page may be stored at all (speech consent).
           if (judged.followUp && speechOk && applied?.status === 'recorded_pending') {
@@ -7725,7 +7819,9 @@ export class CodexChatRuntime {
           if (applied?.status === 'recorded_pending' && proposal.op === 'update_status' && this.turnMemoryConfirmOn() && typeof run.conversationId === 'string' && run.conversationId) {
             const list = (this.turnMemoryNoted.get(run.conversationId) ?? []).filter(entry => entry.pageId !== proposal.pageId)
             // said: the person's own message, kept in memory beside the note so the confirmation question can quote what was reported (L7 c35)
-            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: 0, offered: false, offeredAt: 0, ...(typeof body.message === 'string' && body.message.trim() ? { said: body.message.trim().slice(0, 200) } : {}) })
+            // write first: the settled state already went to the answering model with this turn, so the next message can answer it
+            const told = turn.writeFirst?.sent === true
+            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: told ? 1 : 0, offered: told, offeredAt: told ? Date.parse(new Date(context.askedAt ?? this.now()).toISOString()) : 0, ...(typeof body.message === 'string' && body.message.trim() ? { said: body.message.trim().slice(0, 200) } : {}) })
             this.turnMemoryNoted.delete(run.conversationId); this.turnMemoryNoted.set(run.conversationId, list.slice(-CONFIRM_LIMITS.records))
             while (this.turnMemoryNoted.size > 50) this.turnMemoryNoted.delete(this.turnMemoryNoted.keys().next().value)
           }
@@ -7734,7 +7830,9 @@ export class CodexChatRuntime {
     } catch { applied = { status: 'invalid' } }
     this.recordDeferredSpeech(run, []) // the judgment failed before it could be recorded: still once, unlabelled
     this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null, ...(followUp ? { followUp } : {}),
-      pageId: judged?.proposal?.pageId ?? applied?.pageId ?? null, status: judged?.proposal?.proposedStatus ?? judged?.proposal?.status ?? null })
+      pageId: judged?.proposal?.pageId ?? applied?.pageId ?? null, status: judged?.proposal?.proposedStatus ?? judged?.proposal?.status ?? null,
+      ...(turn.writeFirst ? { writeFirst: { settled: turn.writeFirst.settled === true, inTime: turn.writeFirst.inTime === true, sent: turn.writeFirst.sent === true, ms: turn.writeFirst.ms, kind: turn.writeFirst.write?.kind ?? null,
+        conflict: turn.writeFirst.conflict ? turn.writeFirst.conflict.conflict?.state ?? null : null, conflictP: turn.writeFirst.conflict?.conflict?.p ?? null, confirmations: turn.writeFirst.confirmations.length } } : {}) })
     record(judged)
   }
 
