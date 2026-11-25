@@ -9,6 +9,7 @@ const PLAN = { id: 'doc:calc', kind: 'document', title: '계산기 앱 노트', 
 const FALSE_DEPLOY = 'main 브랜치에 v2.3.1을 배포했습니다.'
 const supAsks = w => w.decisionBodies.filter(b => b.questions.some(q => /^sup_/.test(q.name)))
 const settle = async (w, a) => { await w.settled(a); await new Promise(r => setTimeout(r, 300)); await w.drain() }
+const noteTexts = (w, a) => (w.runOf(a)?.activities ?? []).filter(x => x.kind === 'workNote').map(x => String(x.detail?.text ?? ''))
 const NPM = { command: 'npm test' }
 const ranNpm = (n, ...after) => [toolUse('toolu_1', 'egdesk_run_command', NPM), { tool: { name: 'egdesk_run_command', arguments: NPM } }, userResult('toolu_1'), ...after]
 
@@ -27,11 +28,12 @@ test('plain Claude thread: a sentence the run DOES support is posted as written 
   assert.equal(supAsks(w).length, 1, 'the sentence was judged, and passed')
 })
 
-test('plain Claude thread: narration before a tool call is posted as written and never checked; only the answer after the tools is held and judged', async t => {
+test('plain Claude thread (u8): narration before a tool call is a work note, not a bubble, and never checked; only the answer after the tools is held, judged and posted', async t => {
   const w = harnessWorld(t, { env: { EGDESK_DRAFT_CHECK: 'on' }, judge: { unsupported: /배포/ }, script: n => n === 1
     ? [...text(n, '먼저 배포 상태부터 확인해 보겠습니다.'), ...ranNpm(n, ...text(n + 10, '테스트 5개가 모두 통과했습니다.'), ...result())] : [...text(n, 'x'), ...result()] })
   const a = await w.send('테스트 돌려줘'); await settle(w, a)
-  assert.deepEqual(w.posted().map(p => p[1]), ['먼저 배포 상태부터 확인해 보겠습니다.', '테스트 5개가 모두 통과했습니다.'], 'narration, then the answer, in order, each once')
+  assert.deepEqual(w.posted().map(p => p[1]), ['테스트 5개가 모두 통과했습니다.'], 'one bubble: the answer; the narration is not posted')
+  assert.ok(noteTexts(w, a).some(x => x.includes('확인해 보겠습니다')), 'the narration stays as an activity row (a work note)')
   const judged = JSON.stringify(supAsks(w).map(b => b.input)); assert.match(judged, /통과했습니다/); assert.doesNotMatch(judged, /확인해 보겠습니다/, 'the narration was not sent to the check')
 })
 
@@ -92,21 +94,22 @@ test('other turn judgments on a plain Claude thread (the table of the report): o
   assert.ok(calls.length >= 1, 'Agent room: it does')
 })
 
-test('narration is posted when the tool call starts, not at the end of the turn: while the tool is still going the person already reads it', async t => {
-  let seen = null, w = null
+test('narration is released as a work note when the tool call starts (u8): while the tool is still going no bubble exists, the note is already an activity row, and the answer is still held', async t => {
+  let seen = null, w = null, sentA = null
   w = harnessWorld(t, { env: { EGDESK_DRAFT_CHECK: 'on' }, judge: { unsupported: /배포/ }, script: n => n === 1
-    ? [...text(n, '먼저 테스트부터 돌려 보겠습니다.'), ...ranNpm(n, { check: () => { seen = w.posted().map(p => p[1]) } }, ...text(n + 10, '테스트 5개가 모두 통과했습니다.'), ...result())] : [...text(n, 'x'), ...result()] })
-  const a = await w.send('테스트 돌려줘'); await settle(w, a)
-  assert.deepEqual(seen, ['먼저 테스트부터 돌려 보겠습니다.'], 'after the tool, before the answer: the narration is already posted and the answer is still held')
+    ? [...text(n, '먼저 테스트부터 돌려 보겠습니다.'), ...ranNpm(n, { check: () => { seen = { posted: w.posted().map(p => p[1]), notes: sentA ? noteTexts(w, sentA) : [] } } }, ...text(n + 10, '테스트 5개가 모두 통과했습니다.'), ...result())] : [...text(n, 'x'), ...result()] })
+  const a = await w.send('테스트 돌려줘'); sentA = a; await settle(w, a)
+  assert.deepEqual(seen?.posted, [], 'after the tool, before the answer: no bubble'); assert.ok(seen?.notes.some(x => x.includes('돌려 보겠습니다')), 'the narration is already a work note')
+  assert.deepEqual(w.posted().map(p => p[1]), ['테스트 5개가 모두 통과했습니다.'])
 })
 
-test('two texts in a row without a tool between: the LAST one is the answer and is judged, the earlier one is posted as written; a withheld answer does not take the earlier text with it', async t => {
+test('two texts in a row without a tool between (u8): the LAST one is the answer and is judged, the earlier one is a work note, never a bubble; a withheld answer leaves no bubble', async t => {
   const w = harnessWorld(t, { env: { EGDESK_DRAFT_CHECK: 'on' }, judge: { unsupported: /배포/ }, script: n => [...text(n, '확인해 봤습니다.'), ...text(n + 10, FALSE_DEPLOY), ...result()] })
   const a = await w.send('배포 상태 알려줘'); await settle(w, a)
-  assert.deepEqual(w.posted().map(p => p[1]), ['확인해 봤습니다.']); assert.ok(!JSON.stringify(w.posted()).includes('배포'))
+  assert.deepEqual(w.posted(), [], 'the false answer is withheld and the earlier text is not a bubble'); assert.ok(noteTexts(w, a).includes('확인해 봤습니다.'))
   const ok = harnessWorld(t, { env: { EGDESK_DRAFT_CHECK: 'on' }, judge: { unsupported: /배포/ }, script: n => n === 1 ? [...text(n, FALSE_DEPLOY), ...text(n + 10, '아직 배포하지 않았습니다.'), ...result()] : [...text(n, 'x'), ...result()] })
   const b = await ok.send('배포 상태 알려줘'); await settle(ok, b)
-  assert.deepEqual(ok.posted().map(p => p[1]), [FALSE_DEPLOY, '아직 배포하지 않았습니다.'], 'only the last text is the answer: an earlier text is not judged')
+  assert.deepEqual(ok.posted().map(p => p[1]), ['아직 배포하지 않았습니다.'], 'only the last text is the answer: an earlier text is not judged and not posted'); assert.ok(noteTexts(ok, b).includes(FALSE_DEPLOY))
 })
 
 test('which sends the draft check applies to (draftCheckEligibleFor): an Agent room\'s direct send; a Claude thread under the harness; never a Board send, a stateless one, an unverified binding, a Claude thread outside the harness; a configured `eligible` decides alone', t => {
