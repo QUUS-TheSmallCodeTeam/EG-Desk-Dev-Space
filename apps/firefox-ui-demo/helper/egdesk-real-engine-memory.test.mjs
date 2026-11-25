@@ -14,7 +14,7 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemoryWriteScript, buildMemoryWriteV2Script, WRITE_PAGES, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemoryWriteScript, buildMemoryWriteV2Script, buildMemoryWriteV3Script, WRITE_PAGES, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 import { choiceAnswer, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { checkRecording, recordingFacts, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
@@ -23,7 +23,7 @@ const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-write-v2', buildMemoryWriteV2Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-write-v2', buildMemoryWriteV2Script], ['memory-write-v3', buildMemoryWriteV3Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })

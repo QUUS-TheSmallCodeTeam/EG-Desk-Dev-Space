@@ -491,7 +491,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const decisionContext = {
       settingsGeneration: () => 0, mode: () => (options.decisions ? 'on' : 'off'), configured: () => options.decisions, client,
       budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => warmed || (warmed = decisionCall.some(r => r.status === 200)),
-      ...(FLAG.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}),
+      ...(['action', 'action+status'].includes(FLAG.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: FLAG.EGDESK_CONTEXT_RELEVANCE } : {}),
       ...(warmup ? { warmup } : {}),
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,

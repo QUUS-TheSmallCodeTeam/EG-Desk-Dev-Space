@@ -36,6 +36,15 @@ const usable = records => (Array.isArray(records) ? records : []).filter(r => r 
 // L7 c35: the note a question quotes. With `said` (the person's own earlier message, kept in memory beside the note) the quote carries what was said, because the record's
 // title and a status word alone do not name what the person reported: for "아 그거 다음 주 화요일로 확정했어" the quote was "신제품 리뷰 회의 일정 (noted as done)", the reply said
 // "'다음 주 화요일 확정'은 아직 확인 전인 보고", and the real judge read nothing in common (stated .09, confirms .01, check-20mw). Without `said` the quote is what it was.
+// Wording variants of the quote and of the "stated" question (L7 c36). v1 is c35's. Real result of v1 on the person's own decision (own-statement-v1, c46): confirms .98 but stated .19 for the reply
+// "…방금 말씀하신 ‘다음 주 화요일 확정’은 아직 확인 전인 보고로 덧붙어 있어요.": the quote said "noted as done" while the reply (as the note told it to) said the report is not confirmed, and the question
+// asked whether the reply said it "was recorded". v2 quotes the message as a report kept unconfirmed (no status word) and asks whether the reply MENTIONED the note, in any words, also as unconfirmed;
+// v3 asks only whether the reply refers to the quoted message.
+export const CONFIRM_WORDINGS = Object.freeze(['v1', 'v2', 'v3'])
+const quoteFor = (r, wording) => (wording !== 'v1' && typeof r.said === 'string' && r.said.trim()
+  ? JSON.stringify(`${compactText(r.said, 160)} [the person's earlier message, kept as an unconfirmed report on ${compactText(r.title, 120)}]`) : noteQuote(r))
+const statedQuestion = (quoted, wording) => (wording === 'v2' ? `Note ${quoted}: did the assistant's previous reply mention this note, that is, tell the person that what they said was noted or kept, in any words (also as a report that is not confirmed)?`
+  : wording === 'v3' ? `Note ${quoted}: does the assistant's previous reply refer to the message quoted in this note?` : `Note ${quoted}: did the assistant's previous reply tell the person it was recorded?`)
 export const noteQuote = r => (typeof r.said === 'string' && r.said.trim()
   ? JSON.stringify(`${compactText(r.said, 160)} [the person's earlier message, kept as a report on ${compactText(r.title, 120)}, noted as ${SHORT_STATUS[r.status]}]`)
   : JSON.stringify(`${compactText(r.title, 120)} (noted as ${SHORT_STATUS[r.status]})`))
@@ -69,16 +78,16 @@ export function confirmationAction(stated, confirms, rejects) {
  * verdicts[i]: { stated, confirms, rejects (each { state, p }), action, reason }, in the order of `records`.
  * silent: how many notes were stated and met with a decided "no" to both (reported only; never acted on).
  */
-export async function judgeConfirmation({ message, previousAnswer, records, client, askedAt = null, signal, timeoutMs = CONFIRM_LIMITS.timeoutMs } = {}) {
+export async function judgeConfirmation({ message, previousAnswer, records, client, askedAt = null, signal, timeoutMs = CONFIRM_LIMITS.timeoutMs, wording = 'v1' } = {}) {
   const list = usable(records)
   const unknown = { state: 'unknown', p: null }
   const keep = reason => ({ status: 'fallback', reason, verdicts: list.map(() => ({ stated: unknown, confirms: unknown, rejects: unknown, action: 'keep', reason })), silent: 0, usage: null, questions: 0 })
   if (!client || !list.length || typeof message !== 'string' || !message.trim()) return keep('not_configured')
   if (typeof previousAnswer !== 'string' || !previousAnswer.trim()) return keep('no_previous_answer')
   // Each question quotes its own note (judged alone, as one item), so a second note in the same request cannot be read into it.
-  const quoted = noteQuote
+  const w = CONFIRM_WORDINGS.includes(wording) ? wording : 'v1', quoted = r => quoteFor(r, w)
   const questions = list.flatMap((r, i) => [
-    predicateQuestion(`rc_stated_${i}`, `Note ${quoted(r)}: did the assistant's previous reply tell the person it was recorded?`),
+    predicateQuestion(`rc_stated_${i}`, statedQuestion(quoted(r), w)),
     predicateQuestion(`rc_confirms_${i}`, `Note ${quoted(r)}: is the person's new message confirming it?`),
     predicateQuestion(`rc_rejects_${i}`, `Note ${quoted(r)}: is the person's new message rejecting or correcting it?`)])
   const input = [{ role: 'developer', content: RULES },
