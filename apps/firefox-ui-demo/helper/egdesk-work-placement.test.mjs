@@ -365,7 +365,7 @@ test('consumer, default path: unless the pref is "advisory" or "on" the hook rea
   assert.deepEqual(['advisory', 'on', 'off', 'ON', undefined, 'yes'].map(WP.workPlacementMode), ['advisory', 'on', 'off', 'off', 'off', 'off'])
   const fn = decl('resolveCanvasCardPlacement')
   // L1 c13: the hook may hand back the rule's spot ("on"); anything falsy keeps today's placement
-  assert.match(fn, /const placed = SurfaceState\.placeCanvasView\(\{ size, safe, occupied, anchor, gap: 24 \}\);\n[^\n]*\n[^\n]*\n    if \(options\.workSurface\) return state\.noteWorkSurfacePlacement\?\.\(kind, placed, options\.workSurface\) \|\| placed;\n    return placed;/)
+  assert.match(fn, /const placed = SurfaceState\.placeCanvasView\(\{ size, safe, occupied, anchor, gap: 24 \}\);\n[^\n]*\n[^\n]*\n    if \(options\.workSurface\) return state\.noteWorkSurfacePlacement\?\.\(kind, placed, options\.workSurface\) \|\| placed;\n    // c35: [^\n]*\n    return SurfaceState\.trimToSafeBottom\?\.\(placed, safe\) \?\? placed;/)
   assert.match(surface, /resolveCanvasCardPlacement\('result', options\.restore \? \{\} : \{ workSurface: \{ kind: 'result'/)
   const zone = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8')
   assert.match(zone, /resolveCanvasCardPlacement\('file', runFile \? \{ workSurface: \{ kind: 'file', runId: runFile\.target\?\.runId, conversationId: runFile\.target\?\.conversationId \} \} : \{\}\)/)
