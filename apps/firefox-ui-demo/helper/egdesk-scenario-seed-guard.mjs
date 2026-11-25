@@ -11,11 +11,14 @@
 // whitespace and punctuation removed); a unit shorter than 24 characters (but at least 10) is one fingerprint of its own length. Only the
 // hashes are kept (fingerprints.json next to the manifest), never the text. Seen seed directories: EGDESK_SCENARIO_SEEDS (paths separated
 // by ':') and the extractor's default output directory (defaultSeedDir()).
+// Cycle 43 (owner: material of projects under a private folder is never used in simulation scenarios): a body that contains a term of the LOCAL exclusion file
+// (helper/egdesk-scenario-exclusion.mjs, outside the repository) is refused too, whatever the seeds say, with a text that does not repeat the term.
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { secretsIn } from './egdesk-secret-mask.mjs'
+import { EXCLUDE_ENV, loadOwnerExclusions, noExclusions } from './egdesk-scenario-exclusion.mjs'
 
 export const FINGERPRINT_WINDOW = 24
 export const FINGERPRINT_MIN = 10
@@ -37,7 +40,8 @@ export function seedFingerprints(seed) {
 }
 
 /** loadSeedGuard({ env, home, dirs }) → guard | null when no seed directory with a manifest is visible. */
-export function loadSeedGuard({ env = process.env, home = os.homedir(), dirs = null } = {}) {
+export function loadSeedGuard({ env = process.env, home = os.homedir(), dirs = null, exclusions = null } = {}) {
+  const owner = exclusions ?? loadOwnerExclusions({ env, home })
   const list = dirs ?? [...String(env.EGDESK_SCENARIO_SEEDS ?? '').split(':').filter(Boolean), defaultSeedDir(home)]
   const seeds = []
   for (const dir of [...new Set(list)]) {
@@ -47,11 +51,11 @@ export function loadSeedGuard({ env = process.env, home = os.homedir(), dirs = n
     try { manifest = JSON.parse(readFileSync(m, 'utf8')); prints = existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : {} } catch { throw new Error(`scenario seed manifest unreadable: ${m}`) }
     for (const row of manifest.seeds ?? []) seeds.push({ ...row, dir, prints: prints[`${row.id}|${row.variant}`] ?? null })
   }
-  return seeds.length ? createSeedGuard(seeds) : null
+  return seeds.length || owner.active ? createSeedGuard(seeds, { exclusions: owner }) : null
 }
 
 /** createSeedGuard(seeds: [{ id, variant, privacy, prints }]) → { check(body, declared?) → null | refusal text, seeds } */
-export function createSeedGuard(seeds) {
+export function createSeedGuard(seeds, { exclusions = noExclusions } = {}) {
   const indexed = seeds.map(s => ({ ...s, long: new Set(s.prints?.long ?? []), short: Object.entries(s.prints?.short ?? {}).map(([n, list]) => [Number(n), new Set(list)]) }))
   const lengths = [...new Set(indexed.flatMap(s => s.short.map(([n]) => n)))]
   const strings = value => { const out = []; const walk = v => { if (typeof v === 'string') out.push(v); else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') Object.values(v).forEach(walk) }; walk(value); return out }
@@ -67,6 +71,7 @@ export function createSeedGuard(seeds) {
   return {
     seeds: indexed.map(({ id, variant, privacy }) => ({ id, variant, privacy })),
     check(body, declared = []) {
+      if (exclusions.active && exclusions.textExcluded(String(body))) return 'carries material the owner excluded from simulation scenarios'
       for (const d of declared ?? []) {
         if (d?.privacy !== 'owner-approved') return `declares seed ${d?.id ?? '?'} with privacy ${d?.privacy ?? 'none'} (only owner-approved seeds may be sent)`
         const known = indexed.find(s => s.id === d.id)
@@ -88,7 +93,7 @@ export function createSeedGuard(seeds) {
  */
 let loaded = null
 export function seedRefusal(body, { declared = [], guard } = {}) {
-  const at = `${process.env.EGDESK_SCENARIO_SEEDS ?? ''}|${os.homedir()}`
+  const at = `${process.env.EGDESK_SCENARIO_SEEDS ?? ''}|${process.env[EXCLUDE_ENV] ?? ''}|${os.homedir()}`
   if (guard === undefined && loaded?.at !== at) loaded = { at, guard: loadSeedGuard() }
   const g = guard !== undefined ? guard : loaded.guard
   return (g ?? createSeedGuard([])).check(body, declared)
