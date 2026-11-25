@@ -136,6 +136,7 @@ import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { sha256Hex } from './egdesk-decision-questions.mjs'
+import { workspaceCandidates } from './egdesk-prefetch.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -2594,6 +2595,8 @@ export class CodexChatRuntime {
     // thread preparation below. It is awaited once, capped, just before the turn is claimed. null when off, advisory or not eligible.
     const memoryTurn = !bounded && this.turnMemoryMode() === 'on' ? this.beginTurnMemory(body, context) : null
     // Decision model context setup: 'on' attaches the selected items, 'advisory' only records them.
+    // The folder the engine works in (own tools: the real folder behind the neutral one), for the prefetch candidates (flag turnMemory.prefetch, default off)
+    context.prefetchFolder = bounded ? null : (ownFolder ?? (overrides.cwd && overrides.cwd !== neutralFolder ? overrides.cwd : null))
     const decision = bounded ? null : await this.prepareDecisionContext(body, context)
     // Advisory turn memory (flag decisionContext.turnMemory.mode() === 'advisory', default off): the position is read before the thread is prepared.
     const memoryPosition = !bounded && this.turnMemoryMode() === 'advisory' ? this.turnPosition(context) : null
@@ -4610,6 +4613,8 @@ export class CodexChatRuntime {
       speech = mode === 'on' ? this.directSpeech(body, context, controller.signal) : null
       const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
       const collected = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
+      const prefetch = mode === 'on' ? await this.prefetchCandidates(context) : []
+      if (prefetch.length) collected.push(...prefetch)
       // What code can rule out is not asked (egdesk-context-pruning.mjs): records the model already holds unchanged in this conversation. Only
       // under 'on' and where delivery receipts are trusted: a Codex thread (compaction is reported there and clears them). Advisory records only.
       // Internal flag turnMemory.pruneHeld (bridge EGDESK_TURN_MEMORY_PRUNE_HELD=on), off by default.
@@ -7442,6 +7447,18 @@ export class CodexChatRuntime {
       const { context, oversize } = splitEngineContext(additionalContext, { limit })
       return { context, spilled: new Set(oversize) }
     } catch { return { context: additionalContext, spilled: new Set() } }
+  }
+
+  // Prefetch (flag turnMemory.prefetch === 'files', default off; egdesk-prefetch.mjs): the working folder's files as selection candidates, only where the run may let the decision model read the
+  // folder's listing (egress 'workspace_names': a bound folder, and an Agent whose ceiling does not shut both terminal and files). [] otherwise.
+  async prefetchCandidates(context) {
+    try {
+      if (this.decisionContext?.turnMemory?.prefetch !== 'files' || typeof context?.prefetchFolder !== 'string' || !context.prefetchFolder) return []
+      const ceiling = context.profileRun?.toolCeiling ?? null
+      const gate = createEgressGate(modelDataPermissions({ workspaceRead: !(ceiling && ceiling.terminal === 'none' && ceiling.files === 'none') }))
+      if (!gate.allows('workspace_names')) return []
+      return await workspaceCandidates(context.prefetchFolder)
+    } catch { return [] }
   }
 
   // Pages the dispatched selection carries WORD FOR WORD (its item has the page's whole body): the answering model holds them as much as the ones the memory packet
