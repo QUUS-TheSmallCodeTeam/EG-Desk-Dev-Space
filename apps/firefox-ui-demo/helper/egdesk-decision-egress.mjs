@@ -166,6 +166,8 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-record-confirmation.mjs': ['memory_page', 'speech_history'],
   // c38 (write first): the (record, message) pair of the conflict question: one stored record the run's DM may read; asked of the run's gate by the runtime (the turn memory client) before the call.
   'egdesk-record-settled.mjs': ['memory_page'],
+  // c41: a measurement tool that BUILDS the memory-first requests from the recorded turns with a capturing client and a scripted walk; nothing is sent from it (the runner sends, after approval).
+  'egdesk-c41-replay.mjs': ['memory_page', 'speech_history: measurement tool; public synthetic records and messages only; builds request bodies, sends nothing'],
   'egdesk-wiki-reconstruction.mjs': ['memory_page'],
   // Block previews of an EG-Desk tool result the run's model is about to receive (by output kind), and older session blocks.
   // Called from egdesk-working-memory-wiring.mjs as an advisory judge only; that file sends nothing itself.
