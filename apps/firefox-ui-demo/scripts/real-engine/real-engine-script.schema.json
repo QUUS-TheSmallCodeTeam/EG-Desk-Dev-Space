@@ -1501,6 +1501,36 @@
                       },
                       "type": "object"
                     },
+                    "timing": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "answerMaxMs": {
+                          "maximum": 600000,
+                          "minimum": 100,
+                          "type": "integer"
+                        },
+                        "engineStarted": {
+                          "type": "boolean"
+                        },
+                        "firstVisibleMaxMs": {
+                          "maximum": 600000,
+                          "minimum": 100,
+                          "type": "integer"
+                        },
+                        "layersMaxMs": {
+                          "maximum": 600000,
+                          "minimum": 100,
+                          "type": "integer"
+                        },
+                        "maxEngineRounds": {
+                          "maximum": 30,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "type": "object"
+                    },
                     "toolCalls": {
                       "items": {
                         "pattern": "^[a-z][a-z0-9_]{0,63}$",

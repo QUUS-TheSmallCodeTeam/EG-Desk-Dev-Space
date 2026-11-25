@@ -53,7 +53,9 @@ export const PLAN_FILE_V7 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 export const PLAN_FILE_V8 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v8.json', import.meta.url))
 // Plan v9 (cycle 24): v8 with the wrong s13.fetched withdrawn and two readings of what the draft check was given. The latest plan.
 export const PLAN_FILE_V9 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v9.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V9
+// Plan v10 (cycle 32): v9 plus the switch status-relevance (L7's action+status rule set), its twin of the action expectation, and soft layer-time bounds. The latest plan.
+export const PLAN_FILE_V10 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v10.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V10
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -473,6 +475,12 @@ const CHECKS = {
   messageAvoids: ({ step, args }) => {
     const agent = newMessages(step, step.room).filter(m => m.role === 'assistant' && m.by === 'agent')
     return { pass: agent.length >= 1 && !agent.some(m => args.needles.some(n => m.text.includes(n))), observed: { messages: agent.map(m => m.text) } }
+  },
+  // (cycle 32, U13) The memory and action layers' Decision requests of this step (the families given) took at most maxMs in total, by their recorded elapsed time. A run that recorded no
+  // network time (a dry run, a replay) has nothing to measure: it passes, and says measured false.
+  layersMs: ({ step, args }) => {
+    const rows = step.requests.filter(r => args.families.includes(r.family) && Number.isFinite(r.elapsedMs)), total = rows.reduce((n, r) => n + r.elapsedMs, 0)
+    return { pass: rows.length === 0 || total <= args.maxMs, observed: { measured: rows.length > 0, requests: rows.length, totalMs: rows.length ? total : null, maxMs: args.maxMs } }
   },
   // (cycle 22) The draft check's own record of this step: the calibration log does not record the posting outcome (revised / certain_part / withheld), only the first reading
   // (check), what posting the draft unrevised would have done (ifUnrevised) and whether the posted text differs from the draft (attached). A revision that failed the check again

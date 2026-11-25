@@ -164,8 +164,15 @@ registerFlags({ reproduced: ['EGDESK_ENGINE_STALL_FIRST_EVENT_MS'] })
 registerExpectKeys({ engineStall: { schema: STALL_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateStallExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('engineStall', () => createStallHook())
 
+<<<<<<< HEAD
 // ---- L1 c32: the open-item resolver (flag EGDESK_OPEN_ITEMS; expect.openItems; the hook counts the engine's turn/start and reads the runtime's own record) ----
 import { OPEN_EXPECT_SCHEMA, OPEN_FLAG, createOpenItemsHook, validateOpenExpect } from './egdesk-real-engine-open-items.mjs'
 registerFlags({ reproduced: [OPEN_FLAG], decisionDependent: [OPEN_FLAG] })
 registerExpectKeys({ openItems: { schema: OPEN_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateOpenExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('openItems', conversation => createOpenItemsHook(conversation))
+=======
+// ---- L2 c32: timing expectations (layers before the engine starts, engine rounds, first visible, final answer) ----
+import { TIMING_EXPECT_SCHEMA, createTimingHook, validateTimingExpect } from './egdesk-real-engine-timing-expect.mjs'
+registerExpectKeys({ timing: { schema: TIMING_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateTimingExpect(value, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('timing', () => createTimingHook())
+>>>>>>> lane/c32-journey-u13
