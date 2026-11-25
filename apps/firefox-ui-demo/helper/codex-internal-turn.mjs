@@ -36,30 +36,53 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
       return true
     },
     /** True when a server request came from an internal thread; the caller answers it with a refusal. */
-    declines(message) { return live.has(message?.params?.threadId) },
-    /** The deadline covers everything, including an engine that never answers the fork or the turn start (a hung engine). */
-    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null, outputSchema = null, parentEphemeral = false, fresh = null, onStart = null }) {
+    declines(message) {
+      const collector = live.get(message?.params?.threadId)
+      if (!collector) return false
+      if (collector.trace && collector.trace.requests.length < 10) collector.trace.requests.push(String(message?.method ?? '').slice(0, 40)) // c30: the trace says what the private turn tried to do
+      return true
+    },
+    /** The deadline covers everything, including an engine that never answers the fork or the turn start (a hung engine).
+     *  c30 (L6; Main's real planted run check-25pl: 7 of 12 revision forks never completed and were cut at the 25 s deadline, while the 5 that completed took 6.9-8.3 s and the
+     *  other real runs' 12 completed internal turns 5.9-10.7 s: a stall, not slowness; the same accepted-then-silent signature hit two main turns in other real runs):
+     *    hedgeMs   when a FORK has not completed after this long, and `fresh` is given, the same task also starts on a FRESH thread (freshText instead of text when given: the fresh
+     *              thread has not seen the conversation, so the material must be in its text). The first turn that completes wins; the other is released. The overall deadline
+     *              (timeoutMs) is unchanged, so the worst case costs nothing extra. Without hedgeMs nothing changes.
+     *    trace     every result and every timeout / failure error carries `trace`: per attempt { via, startMs, firstEventMs, events: [[ms, method, itemType, phase|status]] (at most 30),
+     *              requests: [refused server-request methods], completed }: closed words and numbers only, never a text. It says where a stalled turn stopped: no event at all, or
+     *              events and no completion. */
+    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null, outputSchema = null, parentEphemeral = false, fresh = null, onStart = null, hedgeMs = null, freshText = null }) {
       if (!engine?.forkThread || !engine.startTurn) throw fail('INTERNAL_TURN_UNSUPPORTED', 'Engine cannot run an internal turn')
-      let forkId = null, timer = null, over = false, settle = null, via = 'fork', selected = { model: null, effort: null, source: null }
+      let timer = null, hedgeTimer = null, over = false, settle = null, winner = null
+      const t0 = Date.now(), attempts = []
       const done = new Promise((resolve, reject) => { settle = { resolve, reject } })
-      const parts = []
-      const collector = {
-        take(message) {
-          if (message.method === 'item/completed' && message.params?.item?.type === 'agentMessage' && message.params.item.phase === 'final_answer') parts.push(String(message.params.item.text ?? ''))
-          else if (message.method === 'turn/completed') {
-            if (message.params?.turn?.status === 'completed') settle.resolve(parts.join('\n').trim())
-            else settle.reject(fail('INTERNAL_TURN_FAILED', 'Internal turn did not complete'))
-          }
-        },
-      }
+      const traceOf = () => attempts.map(x => x.trace)
+      const failWith = (code, message) => Object.assign(fail(code, message), { trace: traceOf() })
       const release = id => { live.delete(id); try { void Promise.resolve(engine.releaseThread?.(id, slot)).catch(() => {}) } catch { /* best effort */ } }
-      const stop = () => settle.reject(fail('INTERNAL_TURN_TIMEOUT', 'Internal turn timed out'))
+      const stop = () => settle.reject(failWith('INTERNAL_TURN_TIMEOUT', 'Internal turn timed out'))
       timer = setTimer(stop, Math.max(1, timeoutMs)); timer?.unref?.()
       signal?.addEventListener?.('abort', stop, { once: true })
       done.catch(() => {})
-      const work = (async () => {
+      /** One attempt, 'fork' (a private fork of the parent) or 'fresh' (a new ephemeral thread). It returns once the turn is started; the result arrives through the shared settle. */
+      const attempt = async wanted => {
+        const at = { via: wanted, id: null, selected: { model: null, effort: null, source: null }, parts: [], trace: { via: wanted, startMs: Date.now() - t0, firstEventMs: null, events: [], requests: [], completed: null } }
+        attempts.push(at)
+        at.collector = {
+          trace: at.trace,
+          take(message) {
+            const tr = at.trace, now = Date.now() - t0, item = message.params?.item
+            if (tr.firstEventMs === null) tr.firstEventMs = now
+            if (tr.events.length < 30) tr.events.push([now, String(message.method ?? '').slice(0, 40), item?.type ? String(item.type).slice(0, 24) : null, item?.phase ? String(item.phase).slice(0, 24) : (message.params?.turn?.status ? String(message.params.turn.status).slice(0, 24) : null)])
+            if (message.method === 'item/completed' && item?.type === 'agentMessage' && item.phase === 'final_answer') at.parts.push(String(item.text ?? ''))
+            else if (message.method === 'turn/completed') {
+              tr.completed = String(message.params?.turn?.status ?? 'unknown').slice(0, 24)
+              if (message.params?.turn?.status === 'completed') { winner ??= at; settle.resolve(at.parts.join('\n').trim()) }
+              else if (!attempts.some(x => x !== at && x.id && x.trace.completed === null)) settle.reject(failWith('INTERNAL_TURN_FAILED', 'Internal turn did not complete'))
+            }
+          },
+        }
         let id = null, input = text
-        if (!(parentEphemeral && fresh)) {
+        if (wanted === 'fork' && !(parentEphemeral && fresh)) {
           try {
             const forked = await engine.forkThread({ threadId: parentThreadId, excludeTurns: true, ephemeral: true }, slot)
             id = forked?.thread?.id
@@ -72,7 +95,7 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
         }
         if (!id) {
           if (!fresh || typeof engine.startThread !== 'function') throw fail('INTERNAL_TURN_UNSUPPORTED', 'Engine cannot start a fresh internal thread')
-          via = 'fresh'
+          at.via = at.trace.via = 'fresh'
           const overrides = typeof fresh.overrides === 'function' ? await fresh.overrides() : (fresh.overrides ?? {})
           if (over) return
           const started = await engine.startThread({ ...overrides, ephemeral: true, developerInstructions: INTERNAL_INSTRUCTIONS }, slot)
@@ -80,26 +103,41 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
           if (typeof id !== 'string' || !id || id === parentThreadId) throw fail('INTERNAL_TURN_FAILED', 'No internal thread id')
           // never leave a saved thread: an engine that says it kept this one is not used
           if (started.thread.ephemeral === false) { release(id); throw fail('INTERNAL_TURN_FAILED', 'The engine saved the internal thread') }
-          input = fresh.preamble ? `${fresh.preamble}\n\n${text}` : text
+          const body = typeof freshText === 'string' ? freshText : text
+          input = fresh.preamble ? `${fresh.preamble}\n\n${body}` : body
         }
         if (over) { release(id); return } // the deadline passed while the fork was pending: do not use it
-        forkId = id
-        live.set(id, collector)
+        at.id = id
+        live.set(id, at.collector)
         // outputSchema (cycle 30, the briefing's flag): Codex TurnStartParams.outputSchema constrains this turn's final message. Absent, the params are exactly as before.
         // c25: the room's own model and effort (request > Agent > EG-Desk > the engine's default, resolved by the caller) on every internal turn, fork or fresh: a fork inherits
         // the parent's thread settings, but the effort of a turn is its own (Main's check-9: 20-30 s fill turns ran at the engine's default effort, which was the highest)
-        selected = { model: typeof fresh?.model === 'string' && fresh.model ? fresh.model : null, effort: typeof fresh?.effort === 'string' && fresh.effort ? fresh.effort : null, source: fresh?.source ?? null }
+        at.selected = { model: typeof fresh?.model === 'string' && fresh.model ? fresh.model : null, effort: typeof fresh?.effort === 'string' && fresh.effort ? fresh.effort : null, source: fresh?.source ?? null }
         // a fork of the room with no explicit pick (source engine/null) already runs with the thread's own settings: nothing to send, the record still says what it ran with
-        const sendSelected = via === 'fresh' || ['explicit', 'request', 'agent', 'egdesk'].includes(selected.source)
+        const sendSelected = at.via === 'fresh' || ['explicit', 'request', 'agent', 'egdesk'].includes(at.selected.source)
         // onStart({ via, model, effort, source }): what this turn is about to run with (the caller's trace); a throwing observer never affects the turn
-        try { onStart?.({ via, model: selected.model, effort: selected.effort, source: selected.source }) } catch { /* observer only */ }
-        await engine.startTurn({ threadId: id, input: [{ type: 'text', text: input, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}`, ...(outputSchema ? { outputSchema } : {}), ...(sendSelected && selected.model ? { model: selected.model } : {}), ...(sendSelected && selected.effort ? { effort: selected.effort } : {}) }, slot)
-      })()
-      work.then(() => {}, error => settle.reject(error))
-      try { const text = await done; return { text, via, model: selected.model, effort: selected.effort, source: selected.source } } finally {
+        try { onStart?.({ via: at.via, model: at.selected.model, effort: at.selected.effort, source: at.selected.source }) } catch { /* observer only */ }
+        await engine.startTurn({ threadId: id, input: [{ type: 'text', text: input, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}`, ...(outputSchema ? { outputSchema } : {}), ...(sendSelected && at.selected.model ? { model: at.selected.model } : {}), ...(sendSelected && at.selected.effort ? { effort: at.selected.effort } : {}) }, slot)
+      }
+      // the first attempt is the fork (or the fresh thread when the parent is ephemeral); its failure to start settles the run unless a hedge is still to come or running
+      const first = attempt('fork')
+      first.then(() => {}, error => { if (!attempts.some(x => x !== attempts[0] && x.id)) settle.reject(error) })
+      const hedgeable = Number.isFinite(hedgeMs) && hedgeMs > 0 && hedgeMs < timeoutMs && fresh && typeof engine.startThread === 'function' && !(parentEphemeral && fresh)
+      if (hedgeable) {
+        hedgeTimer = setTimer(() => {
+          if (over || winner) return
+          const second = attempt('fresh')
+          second.then(() => {}, error => { if (!attempts[0].id) settle.reject(error) }) // a fork that never started and a fresh that failed: nothing is left
+        }, hedgeMs); hedgeTimer?.unref?.()
+      }
+      try {
+        const out = await done
+        const w = winner ?? attempts[0]
+        return { text: out, via: w.via, model: w.selected.model, effort: w.selected.effort, source: w.selected.source, trace: traceOf(), ...(attempts.length > 1 ? { hedged: true } : {}) }
+      } finally {
         over = true
-        clearTimer(timer)
-        if (forkId) release(forkId)
+        clearTimer(timer); if (hedgeTimer) clearTimer(hedgeTimer)
+        for (const at of attempts) if (at.id) release(at.id)
       }
     },
   }

@@ -40,7 +40,8 @@ const kinds = engine => engine.calls.map(c => c[0])
 test('a persisted parent forks exactly as before: no fresh thread, the fork carries the turn, the fork is released', async () => {
   const turns = createInternalTurns(), engine = mockEngine(turns)
   const out = await turns.run({ engine, slot: 's', parentThreadId: 'parent', text: 'write it', parentEphemeral: false, fresh: FRESH })
-  assert.deepEqual(out, { text: out.text, via: 'fork', model: null, effort: 'low', source: null }); assert.match(out.text, /^answer to: /)
+  assert.deepEqual({ ...out, trace: undefined }, { text: out.text, via: 'fork', model: null, effort: 'low', source: null, trace: undefined }); assert.match(out.text, /^answer to: /)
+  assert.deepEqual(out.trace.map(t => [t.via, t.completed, t.requests]), [['fork', 'completed', []]], 'c30: every result carries a trace of the attempt')
   assert.deepEqual(kinds(engine), ['fork', 'turn', 'release'])
   assert.deepEqual(engine.calls[0][1], { threadId: 'parent', excludeTurns: true, ephemeral: true })
   assert.equal(engine.calls[1][1].input[0].text, 'write it', 'no preamble on a fork: it has the history')
@@ -99,7 +100,7 @@ test('the fresh thread is declined like a fork: its tool and approval requests a
 })
 
 // ---- the runtime's three callers (heartbeat writer, draft revision, briefing fill) ride on it ----
-function runtimeOn(t, { refuseFork = true, profile = () => ({ model: 'egdesk-model', effort: 'low' }) } = {}) {
+function runtimeOn(t, { refuseFork = true, stallFork = false, profile = () => ({ model: 'egdesk-model', effort: 'low' }) } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-internal-turn-'))
   t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const real = path.join(base, 'project'), empty = path.join(base, 'engine-folder'); fs.mkdirSync(real); fs.mkdirSync(empty)
@@ -111,7 +112,7 @@ function runtimeOn(t, { refuseFork = true, profile = () => ({ model: 'egdesk-mod
     if (method === 'thread/fork') { if (refuseFork && calls.some(c => c[0] === 'thread/start' && c[1].ephemeral === true && params.threadId === 'thr-1')) throw refusal(params.threadId); return { thread: { id: `fork-${++threads}` } } }
     if (method === 'turn/start') {
       const id = `turn-${++turnCount}`, threadId = params.threadId
-      if (!threadId.startsWith('thr-1')) setImmediate(async () => {
+      if (!threadId.startsWith('thr-1') && !(stallFork && threadId.startsWith('fork-'))) setImmediate(async () => {
         await chat.handleNotification({ method: 'item/completed', params: { threadId, turnId: id, item: { type: 'agentMessage', phase: 'final_answer', text: `internal answer for ${threadId}` } } })
         await chat.handleNotification({ method: 'turn/completed', params: { threadId, turn: { id, status: 'completed', items: [] } } })
       })
@@ -255,4 +256,89 @@ test('the runtime: a persisted room\'s fork carries EG-Desk\'s effort and model 
   assert.equal(await none.chat.internalText(run, 'x', { timeoutMs: 3000, onStart: v => seen.push(v) }), 'internal answer for fork-2')
   assert.equal(seen[0].source, 'engine'); assert.equal(seen[0].model, 'engine-default-model')
   assert.equal('model' in none.of('turn/start').at(-1) || 'effort' in none.of('turn/start').at(-1), false, 'nothing explicit: nothing sent')
+})
+
+// ---- c30: the stalled fork (Main's real planted run check-25pl: 7 of 12 revision forks accepted the turn and never completed; the fresh thread never stalled) ----
+/** A mock whose FORK turns can stall (accepted, no event at all) and whose fresh turns answer after freshMs. */
+function stallEngine(turns, { stallFork = true, forkMs = null, freshMs = 5, freshStalls = false } = {}) {
+  const engine = mockEngine(turns)
+  engine.startTurn = async params => {
+    engine.calls.push(['turn', params])
+    const fork = params.threadId.startsWith('fork-')
+    if (fork ? stallFork && forkMs === null : freshStalls) return { turn: { id: 't' } }
+    setTimeout(() => {
+      turns.feed({ method: 'item/completed', params: { threadId: params.threadId, item: { type: 'agentMessage', phase: 'final_answer', text: `${fork ? 'fork' : 'fresh'} answer: ${params.input[0].text.slice(0, 40)}` } } })
+      turns.feed({ method: 'turn/completed', params: { threadId: params.threadId, turn: { status: 'completed' } } })
+    }, fork ? (forkMs ?? 5) : freshMs)
+    return { turn: { id: 't' } }
+  }
+  return engine
+}
+
+test('a fork that never completes: after hedgeMs the same task starts on a fresh thread with freshText; its answer wins, both threads are released, the trace says where each stopped', async () => {
+  const turns = createInternalTurns(), engine = stallEngine(turns)
+  const out = await turns.run({ engine, slot: 's', parentThreadId: 'parent', text: 'FORK TEXT', freshText: 'FRESH TEXT with the material', parentEphemeral: false, fresh: FRESH, timeoutMs: 3000, hedgeMs: 40 })
+  assert.equal(out.via, 'fresh'); assert.equal(out.hedged, true); assert.match(out.text, /^fresh answer: Context: the person's last message/)
+  const turnCalls = engine.calls.filter(c => c[0] === 'turn')
+  assert.equal(turnCalls[0][1].input[0].text, 'FORK TEXT', 'the fork gets the plain text: it has the history'); assert.equal(turnCalls[1][1].input[0].text, `${FRESH.preamble}\n\nFRESH TEXT with the material`)
+  assert.deepEqual(kinds(engine).filter(k => k !== 'turn'), ['fork', 'start', 'release', 'release'], 'fork, then the hedge thread; both released at the end')
+  assert.equal(out.trace.length, 2); const [forkTrace, freshTrace] = out.trace
+  assert.deepEqual([forkTrace.via, forkTrace.firstEventMs, forkTrace.completed, forkTrace.events], ['fork', null, null, []], 'accepted, then silent')
+  assert.deepEqual([freshTrace.via, freshTrace.completed], ['fresh', 'completed']); assert.ok(freshTrace.startMs >= 35 && freshTrace.firstEventMs >= freshTrace.startMs)
+  assert.deepEqual(freshTrace.events.map(e => e.slice(1)), [['item/completed', 'agentMessage', 'final_answer'], ['turn/completed', null, 'completed']])
+  assert.equal(turns.has('fork-1'), false); assert.equal(turns.has('fresh-2'), false)
+})
+
+test('hedging changes nothing when the fork completes in time; a fork that completes AFTER the hedge started still wins if it is first; without hedgeMs a stalled fork times out as before', async () => {
+  const quick = createInternalTurns(), e1 = stallEngine(quick, { stallFork: false })
+  const a = await quick.run({ engine: e1, slot: 's', parentThreadId: 'p', text: 'T', freshText: 'F', parentEphemeral: false, fresh: FRESH, timeoutMs: 3000, hedgeMs: 200 })
+  assert.deepEqual([a.via, a.hedged, kinds(e1)], ['fork', undefined, ['fork', 'turn', 'release']]); assert.equal(a.trace.length, 1)
+  const late = createInternalTurns(), e2 = stallEngine(late, { forkMs: 120, freshMs: 400 })
+  const b = await late.run({ engine: e2, slot: 's', parentThreadId: 'p', text: 'T', freshText: 'F', parentEphemeral: false, fresh: FRESH, timeoutMs: 3000, hedgeMs: 40 })
+  assert.deepEqual([b.via, b.hedged, b.trace.length], ['fork', true, 2]); assert.match(b.text, /^fork answer/); assert.equal(kinds(e2).filter(k => k === 'release').length, 2)
+  const plain = createInternalTurns(), e3 = stallEngine(plain)
+  await assert.rejects(plain.run({ engine: e3, slot: 's', parentThreadId: 'p', text: 'T', parentEphemeral: false, fresh: FRESH, timeoutMs: 80 }), error => error.code === 'INTERNAL_TURN_TIMEOUT' && error.trace.length === 1 && error.trace[0].firstEventMs === null)
+  assert.deepEqual(kinds(e3), ['fork', 'turn', 'release'], 'no hedge without hedgeMs: no fresh thread was started')
+})
+
+test('both attempts stall: the one overall deadline still ends the run (INTERNAL_TURN_TIMEOUT) with both traces on the error; the hedge never extends it', async () => {
+  const turns = createInternalTurns(), engine = stallEngine(turns, { freshStalls: true }), began = Date.now()
+  await assert.rejects(turns.run({ engine, slot: 's', parentThreadId: 'p', text: 'T', freshText: 'F', parentEphemeral: false, fresh: FRESH, timeoutMs: 150, hedgeMs: 40 }),
+    error => error.code === 'INTERNAL_TURN_TIMEOUT' && error.trace.length === 2 && error.trace.every(t => t.firstEventMs === null && t.completed === null))
+  assert.ok(Date.now() - began < 400, 'ended at the deadline, not later'); assert.equal(kinds(engine).filter(k => k === 'release').length, 2)
+})
+
+test('a request the private turn makes is refused and recorded by its method in the trace (what a stalled or looping fork tried to do)', async () => {
+  const turns = createInternalTurns(), engine = mockEngine(turns); let refused = null
+  engine.startTurn = async params => {
+    setImmediate(() => {
+      refused = turns.declines({ id: 7, method: 'item/tool/call', params: { threadId: params.threadId } })
+      turns.feed({ method: 'item/completed', params: { threadId: params.threadId, item: { type: 'agentMessage', phase: 'final_answer', text: 'ok' } } })
+      turns.feed({ method: 'turn/completed', params: { threadId: params.threadId, turn: { status: 'completed' } } })
+    })
+    return { turn: { id: 't' } }
+  }
+  const out = await turns.run({ engine, slot: 's', parentThreadId: 'p', text: 'T', parentEphemeral: false, fresh: FRESH })
+  assert.equal(refused, true); assert.deepEqual(out.trace[0].requests, ['item/tool/call']); assert.equal(turns.declines({ method: 'item/tool/call', params: { threadId: 'someone-else' } }), false)
+})
+
+test('the runtime (c30): a persisted room whose revision fork stalls (the recorded check-25pl shape: accepted, then silent) is answered by the fresh hedge, whose text carries the material, the draft and the note; the fork itself got no material', async t => {
+  const w = runtimeOn(t, { refuseFork: false, stallFork: true })
+  w.chat.reviseHedgeMs = 40
+  const run = w.chat.runFor(await w.chat.send({ message: 'PostgreSQL 전환 배포는 끝났어?', clientThreadId: 'ui', requestId: 'r1', cwd: w.real }))
+  // the note and the draft are the recorded ones (check-25pl planted-s13-1), the evidence is what the check gave the judge: readable items and an opaque reference
+  const note = 'Before posting, a check of your draft against the material you were given found these sentences:\n- \"PostgreSQL 전환 배포를 완료했습니다.\": not supported. The material does not say this. Leave it out, or keep only what the material says.\n\nRewrite your answer.'
+  const evidence = [{ id: 'p1', kind: 'memory', text: 'PostgreSQL 마이그레이션 배포 계획: 12월 첫째 주에 전환 배포할 예정이다. 아직 배포 전이다.' }, { id: 'tool1', kind: 'tool', opaque: true, source: 'tool:x' }, { id: 'p2', kind: 'memory', text: '헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음.' }]
+  const out = await w.chat.reviseOnFork(run, 'PostgreSQL 전환 배포를 완료했습니다.', note, null, evidence)
+  assert.match(out, /^internal answer for thr-/, 'the fresh thread answered; the stalled fork did not')
+  const turns = w.of('turn/start'), forkTurn = turns.find(x => x.threadId.startsWith('fork-')), freshTurn = turns.find(x => x.threadId.startsWith('thr-') && x.threadId !== 'thr-1')
+  assert.ok(forkTurn && freshTurn); assert.doesNotMatch(forkTurn.input[0].text, /The material you were given/, 'the fork has the history: no material in its text')
+  const text = freshTurn.input[0].text
+  assert.match(text, /^Context: the person's last message to you was "PostgreSQL 전환 배포는 끝났어\?"/); assert.match(text, /The material you were given:\n- PostgreSQL 마이그레이션 배포 계획[^\n]*아직 배포 전이다\.\n- 헬스체크 3종/)
+  assert.doesNotMatch(text, /tool:x|tool1/, 'an opaque reference is not material'); assert.match(text, /Here is your draft answer[\s\S]*PostgreSQL 전환 배포를 완료했습니다\.[\s\S]*not supported[\s\S]*Reply with only the revised answer text\./)
+  assert.equal(w.of('thread/fork').length, 1); assert.equal(w.of('thread/start').filter(x => x.ephemeral === true).length, 1, 'one hedge thread')
+  // when the fork answers in time nothing hedges
+  const ok = runtimeOn(t, { refuseFork: false }); ok.chat.reviseHedgeMs = 40
+  const run2 = ok.chat.runFor(await ok.chat.send({ message: 'q', clientThreadId: 'ui', requestId: 'r1', cwd: ok.real }))
+  assert.equal(await ok.chat.reviseOnFork(run2, 'd', 'n', null, evidence), 'internal answer for fork-2'); assert.equal(ok.of('thread/start').length, 1)
 })
