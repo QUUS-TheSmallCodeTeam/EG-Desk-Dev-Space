@@ -148,6 +148,7 @@ export const EGRESS_SITES = Object.freeze({
   // c32: the open-item resolver quotes the person's message and one open item each (a waiting command: terminal_command; a question or a run: run_text); the runtime passes them through the run's gate first.
   'egdesk-open-items.mjs': ['run_text', 'terminal_command'],
   // c18: the idle warm-up sends the one fixed content-free request (CONTENT_FREE_REQUESTS.warmup) through gate.guardContentFree; no data class.
+  'egdesk-upper-bundle.mjs': ['pass-through: modeGatedClient hands the request it is given to the client it wraps, after the person\'s Decision mode and saved key allowed it; it adds no data and declares no kind (the callers\' gates do)'], // u1
   'egdesk-decision-warmup.mjs': ['content-free: the fixed warm-up request only (CONTENT_FREE_REQUESTS.warmup), no data of any class'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'run_text', 'terminal_command', 'plus any other kind a heartbeat question or a provider\'s context declares, each checked by the run\'s gate before it is sent'],
   // Plan builder for the real measurement: the product client with a recording fetch that refuses. Nothing is sent from this file.

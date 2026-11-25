@@ -1507,6 +1507,39 @@
                       },
                       "type": "object"
                     },
+                    "stages": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "includes": {
+                          "items": {
+                            "enum": [
+                              "memory",
+                              "action",
+                              "engine",
+                              "check"
+                            ]
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "order": {
+                          "items": {
+                            "enum": [
+                              "memory",
+                              "action",
+                              "engine",
+                              "check"
+                            ]
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    },
                     "timing": {
                       "additionalProperties": false,
                       "minProperties": 1,

@@ -98,6 +98,7 @@ export function reviseFreshText({ draft, note, evidence = [] }) {
 }
 import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-first-approvals.mjs' // c32 (U13): approvals decision-first
 import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
+import { markStage, stagesOf } from './egdesk-upper-bundle.mjs' // u1: the order of a turn (memory/action, engine, check) as state
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
 import { claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
@@ -943,6 +944,7 @@ export class CodexChatRuntime {
     this.engineWaiters = new Set() // { threadId, turnId, resolve }
     this.engineStallLog = [] // c36: every stall fact of this runtime, in order (bounded)
     this.engineStalls = new Map() // clientThreadId -> the last stall fact of the conversation (bounded)
+    this.turnStages = new Map() // u1: requestId -> [{ stage, at }] the order memory -> action -> engine -> check of a turn (state only; no text)
     this.openProposals = new Map() // c33: conversationId -> { items, at } what the last posted answer left open to the person (flag decisionContext.proposalRegistry)
     this.proposalJobs = new Set()
     this.openItemProviders = new Map() // c33: name -> (conversationId) => [open item]; the resolver of lane L1 reads them through openItemsFor
@@ -3023,14 +3025,17 @@ export class CodexChatRuntime {
       // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
       // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
       // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
+      this.markTurnStage(context.requestId, 'memory') // u1: what the memory layer prepared for this turn is in (turn context, settled record state)
       const dfLocal = ownTools && !bounded && ownFolder ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
       // c32: the person's reply is read for the ONE item it settles (or, without the flag or a verdict, for the waiting command as before); what it settled rides to the engine as closed words.
       // (L3 c32: the message that made code ask a question in this very call is not the reply to it: the registry was built in send(), before this call.)
       const openContext = await this.applyOpenItems(cid, body, context, dfLocal)
+      this.markTurnStage(context.requestId, 'action') // u1: the command the person asked for and the open item their reply settles are settled
       const withOpen = openContext ? { ...(turnAdditionalContext || {}), ...openContext } : turnAdditionalContext
       const dfContext = dfLocal?.context ? { ...(withOpen || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : withOpen
       const engineShape = this.shapeEngineContext(dfContext)
       turnStartAttempted = context.turnStartAttempted = true
+      if (!dfLocal?.finished) this.markTurnStage(context.requestId, 'engine') // u1: the engine speaks once, after the layers above
       const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await this.startTurnWatched(engine, {
         threadId: cid,
         input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
@@ -6670,6 +6675,7 @@ export class CodexChatRuntime {
   }
 
   async settleDraftAnswer(run, status, guard) {
+    this.markTurnStage(run?.requestId, 'check') // u1
     if (guard.state !== 'holding') return
     guard.state = 'checking'
     clearTimeout(guard.timer)
@@ -7476,6 +7482,7 @@ export class CodexChatRuntime {
   startDraftCheckAdvisory(run, itemId, text) {
     try {
       if (this.draftCheckMode() !== 'advisory') return
+      this.markTurnStage(run?.requestId, 'check') // u1
       const turn = this.draftCheckTurns.get(run), setup = this.decisionContext
       if (!turn || !setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return
       let seen = this.draftCheckSeen.get(run)
@@ -7524,6 +7531,7 @@ export class CodexChatRuntime {
     try {
       const mode = this.decisionContext?.turnMemory?.mode?.()
       if (mode !== 'advisory' && mode !== 'on') return 'off'
+      if (this.decisionContext.mode?.() === 'off') return 'off' // u1 (U9): the person's Decision mode 끔 is final; a memory setting left on does not send anything to the Decision model
       return mode === 'on' && this.decisionContext.mode?.() !== 'on' ? 'advisory' : mode
     } catch { return 'off' }
   }
@@ -7540,7 +7548,7 @@ export class CodexChatRuntime {
   beginTurnMemory(body, context) {
     try {
       const setup = this.decisionContext, tm = setup?.turnMemory
-      if (!tm || !setup.client || typeof tm.wiki !== 'function' || setup.configured?.() !== true) return null
+      if (!tm || !setup.client || typeof tm.wiki !== 'function' || setup.configured?.() !== true || setup.mode?.() === 'off') return null // u1 (U9): mode 끔 sends nothing
       const eligible = typeof tm.eligible === 'function' ? tm.eligible({ body, context }) === true : context.channelKind === 'direct' && !context.stateless && !context.board
       if (!eligible) return null
       const position = this.turnPosition(context)
@@ -8055,6 +8063,12 @@ export class CodexChatRuntime {
   // page this DM may read, or a new utterance page kept as a reference into the chat store (only with the speech consent that already lets
   // past utterances be reused). Nothing is promoted here; a pending reading becomes a status only through writer.promote on the person's
   // own later explicit confirmation.
+  // u1: the order of a turn as state. markTurnStage keeps the first mark of each stage per request; turnStagesFor lists them ([{ stage, at }], no text). At most 64 turns are kept.
+  markTurnStage(requestId, stage) {
+    try { if (typeof requestId === 'string' && requestId && markStage(this.turnStages, requestId, stage, this.now)) { while (this.turnStages.size > 64) this.turnStages.delete(this.turnStages.keys().next().value) } } catch { /* a mark never affects a turn */ }
+  }
+  turnStagesFor(requestId) { return stagesOf(this.turnStages, requestId) }
+
   // ---- c33: the answer's open proposals and questions, registered as defined items (flag decisionContext.proposalRegistry = { mode(): 'on' }, EGDESK_PROPOSAL_REGISTRY=on; default off) ----
   // No text is posted and no copy is added. See helper/egdesk-open-proposals.mjs for the item shape and the contract with the open-item resolver (lane L1).
   proposalRegistryOn() { try { return this.decisionContext?.proposalRegistry?.mode?.() === 'on' } catch { return false } }
