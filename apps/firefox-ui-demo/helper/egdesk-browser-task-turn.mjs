@@ -14,7 +14,7 @@ export const ALTERNATE_VALUE = 'alternate'
 
 const RULE_HEAD = 'EG-Desk\'s Decision model already worked on this browser request in the person\'s Card before your turn. This note says what it did and where it stopped (status, code). Do not redo those steps, and read the page only for what the note does not say.'
 const RULE_DONE = 'status done: tell the person the result in one message.'
-const RULE_VALUE_TOOL = `A status that needs a value or a choice (needs_value, needs_guidance, need_context): when the conversation already settles it (the person said it, or it follows plainly from what they said), continue with the browser task tool (${BROWSER_TASK_TOOL_NAME}) without a goal, giving the value under the field name the note asks for or the option it offers, and the Decision model carries on from where it stopped; otherwise ask the person one short question.`
+const RULE_VALUE_TOOL = `next continue_with_egdesk_browser_task: call ${BROWSER_TASK_TOOL_NAME} this turn without a goal. For needs_value, infer the value from the conversation and pass it in values under ask.field; ask the person one short question only if you cannot infer it. For needs_guidance, read the Card if needed and continue the task; use only option ids the tool offers. For need_context, follow the note's next.`
 const RULE_VALUE_ASK = 'A status that needs a value or a choice (needs_value, needs_guidance, need_context): when the conversation already settles it (the person said it, or it follows plainly from what they said), continue from where it stopped yourself; otherwise ask the person one short question.'
 const RULE_CANNOT = 'human_step, cannot or cannot_proceed: tell the person what is left for them to do on the page. Never ask the person for something they already said.'
 

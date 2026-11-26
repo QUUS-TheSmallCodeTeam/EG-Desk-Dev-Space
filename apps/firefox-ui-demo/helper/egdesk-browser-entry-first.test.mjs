@@ -43,10 +43,10 @@ async function replay(initial, { chooseText = true, later = submit('get') } = {}
   }
   const scope = { callTool, client, isDecisionCurrent: () => true }
   const provider = { directEntryEnabled: () => true, reflexScope: () => scope, runDirectTask: (_run, args) => runBrowserReflex({ ...args, ...scope, pageText: false }) }
-  const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), fieldText: () => true })
+  const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), fieldText: () => true, canContinue: () => true })
   const run = { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }
   const out = await entry.handle({ run, conversationKey: 'dm', message: MESSAGE, hosts: { card: 'duckduckgo.com' } })
-  return { status: out.status, code: JSON.parse(out.note).egdesk_browser_task.code, actions, askedPerson: asks.includes('person_target_1'), askedText: asks.includes('field_text') }
+  return { status: out.status, code: JSON.parse(out.note).egdesk_browser_task.code, next: JSON.parse(out.note).egdesk_browser_task.next, actions, askedPerson: asks.includes('person_target_1'), askedText: asks.includes('field_text') }
 }
 
 test('an uncertain entry chooses the message span for its field before asking about the identically named search mode radio', async () => {
@@ -56,7 +56,7 @@ test('an uncertain entry chooses the message span for its field before asking ab
 
 test('no chosen span: the original person-target follow-up still decides the handoff', async () => {
   const out = await replay(home, { chooseText: false })
-  assert.deepEqual([out.code, out.actions, out.askedText, out.askedPerson], ['human_step', [], true, true])
+  assert.deepEqual([out.code, out.next, out.actions, out.askedText, out.askedPerson], ['human_step', 'tell_user_and_ask_in_chat', [], true, true])
 })
 
 test('proven GET submit is not a person target; POST, payment, permission and delete submits are withheld', () => {

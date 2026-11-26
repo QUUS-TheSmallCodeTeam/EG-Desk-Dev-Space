@@ -91,7 +91,7 @@ function duckSite() {
   let docSeq = 1, cur = { url: `${D}/`, documentId: 'd1', revision: 1, value: '' }
   const submitUrl = () => `${D}/?q=${encodeURIComponent(cur.value)}`
   const elements = () => (new URL(cur.url).searchParams.get('q') === null ? [
-    { ref: 'q', role: 'searchbox', tag: 'input', label: '검색', href: '', value: cur.value },
+    { ref: 'q', role: 'searchbox', tag: 'input', label: '검색어', href: '', value: cur.value },
     { ref: 's', role: 'button', tag: 'button', label: '검색', href: '', value: '', nav: { type: 'submit', sensitiveRegion: false, regionLabel: '', form: { method: 'get', fields: ['search', 'submit'], sensitive: false, submitUrl: submitUrl() }, controls: null } },
     { ref: 'p', role: 'link', tag: 'a', label: '개인정보 보호', href: `${D}/privacy`, value: '' },
   ] : [{ ref: 'r1', role: 'link', tag: 'a', label: '장화 신은 고양이 - 나무위키', href: 'https://namu.wiki/w/x', value: '' }])
@@ -106,7 +106,8 @@ function duckSite() {
       else if (names.includes('field_text')) { const q = request.questions[0]; answers.push(choice('field_text', q.choices.some(c => c.value === '장화 신은 고양이') ? '장화 신은 고양이' : q.choices.at(-1).value, 0.95)) }
       else if (names.includes('next_step')) {
         const q = request.questions.find(item => item.name === 'next_step'), onHome = /URL: https:\/\/duckduckgo\.com\/\n/.test(`${evidence}\n`), typed = /filled \[F1\]/.test(evidence)
-        answers.push(choice('next_step', !onHome ? 'goal_met' : typed ? q.choices.find(c => c.value.startsWith('[B')).value : 'needs_free_text', 0.95), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onHome ? 0.02 : 0.95 })
+        const uncertainField = onHome && !typed && evidence.includes('비 올 때')
+        answers.push(choice('next_step', !onHome ? 'goal_met' : typed ? q.choices.find(c => c.value.startsWith('[B')).value : uncertainField ? q.choices.find(c => c.value.startsWith('[F')).value : 'needs_free_text', uncertainField ? 0.42 : 0.95), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onHome ? 0.02 : 0.95 })
       } else for (const q of request.questions) answers.push(q.type === 'choice' ? choice(q.name, q.choices[0].value, 0.95) : { name: q.name, type: 'predicate', probability: 0.02 })
       return { ok: true, text: async () => JSON.stringify({ answers }) }
     } })
@@ -291,7 +292,7 @@ test('DuckDuckGo, alternating: the Decision model fills the search box with the 
   assert.ok(w.timeline.indexOf('claude:turn') > w.timeline.lastIndexOf('ui:act'), 'the Card moved before Claude\'s turn')
   const note = noteOf(w.transports[0].sent[0])
   assert.equal(note.egdesk_browser_task.status, 'done'); assert.ok(note.rule)
-  assert.deepEqual(w.published.map(step => [step.op, step.target ?? null, step.status ?? null]), [['fill', '검색', null], ['submit', '검색', null], ['done', null, 'done']])
+  assert.deepEqual(w.published.map(step => [step.op, step.target ?? null, step.status ?? null]), [['fill', '검색어', null], ['submit', '검색', null], ['done', null, 'done']])
   assert.doesNotMatch(JSON.stringify(w.published), /장화|https?:/, 'the typed text and the address never reach the channel')
   assert.equal(w.transports[0].sent.length, 1, 'one Claude turn')
 })
@@ -312,6 +313,25 @@ test('the browser task tool (L8) in a Claude run continues the task the entry st
   const s2 = await alt.send(DUCK_MSG); await alt.settled(s2)
   assert.ok(alt.chat.collectToolSpecs('browserBounded', { browserInteraction: true, engineId: 'claude' }).specs.some(s => s.name === BROWSER_TASK_TOOL_NAME), 'offered with an interact Card')
   assert.equal(noteOf(alt.transports[0].sent[0]).rule, browserTaskRule({ toolOffered: true }))
+})
+
+test('alternate: an uncertain first field with no literal value hands the same task to the model for a value and GET search', { timeout: 20000 }, async t => {
+  const w = claudeWorld(t, { site: 'duck', hold: true, taskTool: true })
+  const sent = await w.send('덕덕고 카드에서 비 올 때 쓰는 거 검색해줘'); await w.drain()
+  const { egdesk_browser_task: note } = noteOf(w.transports[0].sent[0])
+  assert.ok(w.timeline.includes('decide:field_text')); assert.deepEqual(w.acts, [])
+  assert.deepEqual([note.status, note.code, note.next, note.ask], ['needs_value', 'detail_needed', 'continue_with_egdesk_browser_task', { field: '검색어', kind: 'text' }])
+  const out = await callTool(w, BROWSER_TASK_TOOL_NAME, { values: { [note.ask.field]: '우산' } })
+  assert.deepEqual([out.taskId, out.status], [note.id, 'done'])
+  assert.deepEqual(w.acts.map(a => a.type), ['fill', 'navigate']); assert.equal(new URL(w.cur.url).searchParams.get('q'), '우산')
+  w.transports[0].finish(); await w.settled(sent)
+})
+
+test('alternate without a task tool: an uncertain field still has its original next', async t => {
+  const w = claudeWorld(t, { site: 'duck' })
+  const sent = await w.send('덕덕고 카드에서 비 올 때 쓰는 거 검색해줘'); await w.settled(sent)
+  const { egdesk_browser_task: note } = noteOf(w.transports[0].sent[0])
+  assert.deepEqual([note.code, note.next, w.acts], ['uncertain', 'tell_user_and_ask_in_chat', []])
 })
 
 // ---- Codex: the same words ----
