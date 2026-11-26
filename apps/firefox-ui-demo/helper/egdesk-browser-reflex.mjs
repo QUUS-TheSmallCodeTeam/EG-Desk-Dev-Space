@@ -111,7 +111,7 @@ const NO_FIELD = 'no matching field'
 const MAX_ELEMENT_OPTIONS = 255 - Object.keys(REFLEX_CONTROLS).length
 // Roles from EGDeskBrowserAgentRuntimeChild.roleFor. 'password' is its own role
 // and is never a fill candidate; the runtime refuses password fills as well.
-const FIELD_ROLES = new Set(['textbox', 'searchbox', 'search', 'email', 'number'])
+const FIELD_ROLES = new Set(['textbox', 'searchbox', 'search', 'email', 'number', 'date', 'time'])
 const PRESS_ROLES = new Set(['button', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'treeitem', 'clickable'])
 // c19 (generalisation): controls the loop has no action for (a dropdown, a toggle, a check box, a radio button, a slider). They were dropped
 // without a trace, so a page whose only way on was such a control looked empty and the person was never told it was their step. They are
@@ -264,6 +264,11 @@ function elementKind(element, { textComboboxes = false } = {}) {
   const role = String(element.role || '')
   if (role === 'link') return httpUrl(element.href) ? 'navigate' : 'press'
   if (isSearchLandmark(element)) return null
+  const c = element.choice
+  if (c?.immediate || c?.sensitiveRegion || c?.regionLabels?.some(name => SENSITIVE_REGION.test(name)) || (c && (SENSITIVE_REGION.test(element.label) || element.label === 'Sensitive field'))) return null
+  if (c && element.tag === 'input' && c.inForm && ['radio','checkbox'].includes(role) && typeof element.checked === 'boolean' && element.value !== 'mixed') return 'choice'
+  if (c && element.tag === 'select' && role === 'combobox' && !c.multiple && !c.truncated && Array.isArray(element.options)) return 'choice'
+  if (['time', 'date'].includes(role) && (element.tag !== 'input' || element.label === 'Sensitive field')) return null
   if (FIELD_ROLES.has(role)) return 'fill'
   if (textComboboxes && isTextCombobox(element)) return 'fill'
   if (PRESS_ROLES.has(role)) return 'press'
@@ -279,7 +284,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   const elements = Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []
   const entries = []
   const excluded = { disabled: 0, gated: 0, offSite: 0, sensitive: 0, unlabeled: 0, overflow: 0, unsupported: 0 }
-  const counters = { navigate: 0, press: 0, fill: 0 }
+  const counters = { navigate: 0, press: 0, fill: 0, choice: 0 }
   const personOnly = [] // c22: the controls only the person may operate (no action exists for them), named for the step
   const withheld = [] // c26: every control withheld as the person's own (a button withheld by vocabulary, a control with no action), in page order, named for the note
   const offSite = [] // In page order for guidance. The chat-task loop also offers plain anchors, conditional on a Card grant.
@@ -297,6 +302,15 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     }
     if (element.disabled === true) { excluded.disabled++; continue }
     const label = compactText(element.label, 100)
+    if (kind === 'choice') {
+      const safe = name => !SENSITIVE_REGION.test(name) && !SENSITIVE_LABEL.test(name) && classify({ mode: 'activate', label: name, role: element.role, tag: element.tag, url: snapshot.url })?.category === 'none'
+      if (!safe(label) || element.choice.regionLabels?.some(name => !safe(name))) { excluded.gated++; continue }
+      const offer = (name, desired) => entries.push({ label: '[C' + (++counters.choice) + '] ' + name, description: 'reversible selection; now: ' + compactText(element.selectedLabel || element.value, 60), item: { kind, element, desired } })
+      if (element.tag === 'select') {
+        for (const o of element.options.slice(0, 32)) if (o?.label && !o.disabled && safe(o.label) && safe(o.value) && o.value !== element.value && element.options.filter(other => other.value === o.value).length === 1) offer((label || 'list') + ': ' + o.label, o.value)
+      } else if (label && (!element.checked || element.role === 'checkbox')) offer((element.checked ? 'uncheck ' : 'check ') + label, element.checked ? 'unchecked' : 'checked')
+      continue
+    }
     if (kind === 'fill') {
       if (SENSITIVE_LABEL.test(label)) { excluded.sensitive++; continue }
       counters.fill++
@@ -375,10 +389,22 @@ export function expectedTargetOf(element) {
 export function reflexActionArgs(option, { cardId, observationId, snapshot, text = null }) {
   const element = option.item.element
   const base = { cardId, observationId, expectedRevision: snapshot.revision }
+  if (option.item.kind === 'choice') {
+    const select = element.tag === 'select'
+    return { tool: select ? 'egdesk_browser_fill' : 'egdesk_browser_click', args: { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), ...(select ? { text: option.item.desired } : {}), postcondition: { kind: 'target-value', value: option.item.desired } } }
+  }
   if (option.item.kind === 'navigate') {
     return { tool: 'egdesk_browser_navigate', args: { ...base, url: element.href, postcondition: { kind: 'url', value: element.href } } }
   }
   if (option.item.kind === 'fill') {
+    if (element.role === 'time' && typeof text === 'string') {
+      const m = /^(오전|오후|저녁|아침|밤)\s*(\d{1,2})시(?:\s*(반|\d{1,2}분))?$/.exec(text.trim())
+      if (m && +m[2] >= 1 && +m[2] <= 12 && (!m[3] || m[3] === '반' || parseInt(m[3], 10) < 60)) {
+        const hour = +m[2] % 12 + (/^(오후|저녁|밤)$/.test(m[1]) ? 12 : 0)
+        text = String(hour).padStart(2,'0') + ':' + String(m[3] === '반' ? 30 : parseInt(m[3],10) || 0).padStart(2,'0')
+      }
+      if (!/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(text)) return { needsText: true }
+    }
     if (typeof text !== 'string' || !text.length) return { needsText: true }
     return { tool: 'egdesk_browser_fill', args: { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), text,
       postcondition: { kind: 'target-value', value: text } } }
@@ -409,9 +435,12 @@ export function controlLines(snapshot, { limit = MAX_CONTROL_LINES, textCombobox
   const out = []
   for (const option of built.options) {
     const element = option.item.element
+    if (option.item.kind === 'choice') continue
     const label = compactText(element.label, 60) || compactText(String(option.value).replace(/^\[[A-Z]\d+\]\s*/, ''), 60)
     if (label) out.push(line(String(element.role ?? ''), label, option.item.kind === 'fill' && typeof element.value === 'string' && element.value !== element.label ? element.value : ''))
   }
+  // Even already-selected radios/lists (no action) supply evidence for goal_met.
+  for (const el of snapshot?.interactiveElements ?? []) if (elementKind(el) === 'choice' && ![el.label, el.selectedLabel, ...(el.choice.regionLabels ?? [])].some(name => SENSITIVE_LABEL.test(name) || SENSITIVE_REGION.test(name) || classifyAction({ mode: 'activate', label: name, role: el.role, url: snapshot.url })?.category !== 'none')) out.unshift(line(el.role, el.label || 'list', el.selectedLabel || el.value))
   for (const control of built.personOnly) out.push(line(String(control.role ?? ''), control.label, control.value))
   for (const link of built.offSite) out.push(`link to another site: ${compactText(link.label, 60)}`)
   const credentials = built.excluded.sensitive + (Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements.filter(element => String(element?.role ?? '') === 'password').length : 0)
@@ -460,7 +489,7 @@ export const STEP_GROUPS = Object.freeze({
 /** crowdedStep(options) -> null (not crowded) | { direct: options asked in next_step itself, groups: { open_link?: [options], press_other?: [options] } } (page order kept). */
 export function crowdedStep(options) {
   if (!Array.isArray(options) || options.length <= CROWDED_STEP_OPTIONS) return null
-  const decisive = option => option.item?.kind === 'fill' || option.item?.readOnly?.kind === 'get_form'
+  const decisive = option => option.item?.kind === 'choice' || option.item?.kind === 'fill' || option.item?.readOnly?.kind === 'get_form'
   const members = { open_link: options.filter(option => !decisive(option) && option.item?.kind === 'navigate'), press_other: options.filter(option => !decisive(option) && option.item?.kind !== 'navigate') }
   const groups = Object.fromEntries(Object.entries(members).filter(([, list]) => list.length >= 2)) // a kind with one target is offered as itself
   const grouped = new Set(Object.values(groups).flat())
@@ -499,10 +528,11 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
     `Visible text:\n${visibleText(snapshot) || '(none)'}`,
   ].filter(Boolean).join('\n\n')
   const result = await client.decide({
-    input: [{ role: 'developer', content: REFLEX_RULES }, { role: 'user', content: evidence }],
+    input: [{ role: 'developer', content: options.some(o => o.item.kind === 'choice') ? REFLEX_RULES + '\n' + 'Pick [C] check/uncheck or list selections only for the exact choices and states explicitly requested by the person, never as an inferred prerequisite. For multiple requested choices, continue until each has the requested state.' : REFLEX_RULES }, { role: 'user', content: evidence }],
     questions: [
       choiceQuestion('next_step', 'Which option moves toward the goal next?', choices),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
+      ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person explicitly request the exact named choice AND state of the selected check/uncheck/list action? No if merely inferred or unspecified.')] : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', 'Does the current page already satisfy the goal?'),
       ...(arrived ? [predicateQuestion('arrival_finishes', arrived === 'search' ? 'Is displaying the results of this search the ONLY requested browser outcome? No if a result still needs to be opened, or anything else selected, filtered or visited.' : 'Was opening this selected link the last requested browser action, with at most reading this page for a chat answer left? No if another page or control is needed.')] : []),
@@ -538,6 +568,7 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
   if (next.value === 'blocked') return { kind: 'blocked', ...out }
   if (next.value === 'goal_met') return { kind: 'uncertain', ...out } // chosen, but goal_met stayed below the done threshold
   const option = options.find(item => item.value === next.value)
+  if (option?.item.kind === 'choice' && readPredicate(result.answers, 'choice_requested', thresholds.done).state !== 'yes') return { kind: 'user_context', ...out }
   // History conflicts with this page (the earlier choice is gone): the person decides, whatever the model picked.
   if (option && historyConflict) return { kind: 'user_context', ...out }
   return option ? { kind: 'act', option, ...out } : { kind: 'uncertain', ...out }
@@ -668,7 +699,7 @@ const failure = error => (error instanceof DecisionError ? error.code : 'unreach
 // name only (never the text typed, never an address): op 'open' a link | 'submit' a read-only GET search | 'press' a view button | 'fill' a field | 'scroll' | 'wait'.
 const OP_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'open', egdesk_browser_click: 'press', egdesk_browser_fill: 'fill', egdesk_browser_scroll: 'scroll', egdesk_browser_wait: 'wait' })
 export const STEP_TARGET_CHARS = 40
-export const optionTarget = option => compactText(String(option?.item?.element?.label ?? option?.value ?? '').replace(/^\[[A-Z]\d+\]\s*/, ''), STEP_TARGET_CHARS) || null
+export const optionTarget = option => compactText(String((option?.item?.kind === 'choice' && option.item.element.tag === 'select' ? option.item.element.options.find(o => o.value === option.item.desired)?.label : null) ?? option?.item?.element?.label ?? option?.value ?? '').replace(/^\[[A-Z]\d+\]\s*/, ''), STEP_TARGET_CHARS) || null
 export const optionOp = option => (option?.item?.kind === 'fill' ? 'fill' : option?.item?.kind === 'navigate' ? 'open' : option?.item?.readOnly?.kind === 'get_form' ? 'submit' : 'press')
 const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch { return null } }
 
@@ -828,6 +859,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) }) }
         attemptedRefs.add(action.args.ref)
         const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
+        if (done.ok && option.item.element.role === 'time' && done.result?.status !== 'postcondition-observed') return { result: finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OUTCOME_UNKNOWN' }) }
         if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`); typedTexts.push(action.args.text) }
         else if (done.code === 'BROWSER_OBSERVATION_STALE' && SAME_DOCUMENT_NOT_SENT.has(done.staleBy) && !staleRetried.has(ready)) {
           // L6 a1b (real window 11-26 17:16, DuckDuckGo: the task's first fill refused by the Card as not sent, staleBy target, and the task ended there while the
@@ -896,7 +928,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       if (typed.retry) { entry.rule = 'fill_not_sent'; continue }
     }
     // The recorded choice on this page is a string comparison (code, once per path and run); the person's reply in this task overrides it.
-    const recorded = priorRun && !usedRecorded.has(safePathOf(snapshot.url)) ? recordedChoice(priorRun, snapshot, options, { goal, userContext: contextLines }) : null
+    const recorded = priorRun && !usedRecorded.has(safePathOf(snapshot.url)) ? recordedChoice(priorRun, snapshot, options.filter(o => o.item.kind !== 'choice'), { goal, userContext: contextLines }) : null
     const prior = priorRun ? priorFacts(priorRun, snapshot, options) : { lines: [], conflict: false }
     // An earlier choice that is gone forces a question only while the person has not answered in this task.
     const conflict = prior.conflict && !contextLines.length
@@ -982,6 +1014,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     // A decided link leaves this page: supplied values are not typed into a page
     // that is about to be replaced (§3.3; they stay pending for the next page).
     if (decision.kind === 'act' && decision.option.item.kind !== 'navigate') {
+      // A native time field the decision picked: use a single, explicit clock value from this request.
+      // No generation or inference (multiple/relative times go through the normal value handoff).
+      const selected = decision.option
+      if (!pending.size && selected.item.kind === 'fill' && selected.item.element.role === 'time') {
+        const clocks = goal.match(/(?:오전|오후|저녁|아침|밤)\s*\d{1,2}시(?:\s*(?:반|\d{1,2}분))?|(?<![\d:])(?:[01]\d|2[0-3]):[0-5]\d(?![\d:])/g) ?? []
+        if (clocks.length === 1 && !/전후|이전|이후|전까지|후에|분\s*(?:뒤|전|후)/.test(goal) && !reflexActionArgs(selected, { cardId, observationId, snapshot, text: clocks[0] }).needsText) pending.set(selected.value, clocks[0])
+      }
       const typed = await typePending(entry, snapshot, observationId, fields)
       if (typed.result) return typed.result
       if (typed.typed) continue
@@ -1056,8 +1095,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         } : null
         const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (!done.ok) {
-          if (option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
+          if (option.item.kind === 'choice' || option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue
+        }
+        if (option.item.kind === 'choice') {
+          if (done.result?.status !== 'postcondition-observed') return finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OUTCOME_UNKNOWN' })
+          history.push('selected ' + option.value)
+          continue // no load wait for an in-place edit; next decision uses a new observation
         }
         const kind = typedSearch(option, typedTexts) ? 'search' : option.item.askSite ? 'link' : null
         if (kind && expectedUrl) arrival = { kind, goal, from: snapshot.url, expected: expectedUrl }
