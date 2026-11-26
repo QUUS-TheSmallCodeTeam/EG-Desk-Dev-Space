@@ -619,7 +619,8 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       task.replan = false
       const controller = new AbortController()
       task.abort = controller
-      const extra = fieldTextOn() ? { ...(values ? { values } : {}), valuesFirst: true, textComboboxes: true } : {}
+      const extra = fieldTextOn() ? { ...(values ? { values } : {}), valuesFirst: true, textComboboxes: true,
+        firstFieldText: async field => (await chosenText(run, task, { field }))?.[field] ?? null } : {}
       values = null
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
         maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => { store.progress?.(task, info); stepEvent(run, task, info) }, today: localDay(now()), signal: controller.signal, ...extra })
