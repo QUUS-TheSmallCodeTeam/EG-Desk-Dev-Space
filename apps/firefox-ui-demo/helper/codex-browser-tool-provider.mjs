@@ -60,11 +60,13 @@ function reflexEnabled(decision) {
   try { return Boolean(decision) && decision.mode?.() === 'on' && decision.configured?.() === true }
   catch { return false }
 }
-function reflexStepError(text) {
+function reflexStepError(text, tool) {
   let code = 'TOOL_FAILED', staleBy = null, targetBy = null
   try {
     const parsed = JSON.parse(text)
     if (typeof parsed?.error?.code === 'string') code = parsed.error.code
+    // A returned navigation receipt with an unmatched condition is not a refused call.
+    else if (!parsed?.error && tool === 'egdesk_browser_navigate' && parsed?.status === 'postcondition-unverified') code = 'POSTCONDITION_UNVERIFIED'
     if (BROWSER_STALE_REASONS.includes(parsed?.error?.staleBy)) staleBy = parsed.error.staleBy
     if (BROWSER_TARGET_REASONS.includes(parsed?.error?.targetBy)) targetBy = parsed.error.targetBy
   } catch {}
@@ -326,7 +328,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
         const output = await this.dispatch(run, { tool: name, arguments: toolArgs,
           callId: `${event.callId || 'reflex'}.reflex-${step}-${randomUUID()}`, namespace: event.namespace || null, ...(actor === 'decision' || actor === 'model' ? { actor } : {}) })
         const text = output?.contentItems?.[0]?.text ?? ''
-        if (!output?.success) throw reflexStepError(text)
+        if (!output?.success) throw reflexStepError(text, name)
         return JSON.parse(text)
       }
       // Page text reaches the decision model only where it may reach this run's models: the Agent tool ceiling and the selected Card grant.

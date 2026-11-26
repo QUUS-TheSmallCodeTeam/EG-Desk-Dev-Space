@@ -5,7 +5,12 @@ import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { boundedFieldValue, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 
-function fixture() {
+import { browserStepFor } from './egdesk-browser-task-turn.mjs'
+import { taskStepEvent } from './egdesk-browser-task.mjs'
+import { browserStepFrame } from './egdesk-browser-steps-channel.mjs'
+import { browserStepLine } from '../overlay/resources/EGDeskBrowserStepsView.sys.mjs'
+
+function fixture(decision = null) {
   const calls = [], events = []
   const runs = new Map()
   const transport = {
@@ -25,13 +30,37 @@ function fixture() {
     cancelRun: async run => { calls.push(['cancel', run.runId]); return [] },
     reset: async () => { calls.push(['reset']); return [] },
   }
-  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'codex:account-1', service })
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'codex:account-1', service, decision })
   provider.runtime = { browserRegisteredThreads: new Set(), currentEpoch: () => 7, emit: (run, event, detail) => events.push({ runId: run.runId, event, detail }) }
   return { provider, calls, events, transport }
 }
 
 const selected = permission => [{ id: 'source-1', kind: 'browser', selectedByUser: true, browserToolPermission: permission,
   browserToolSelection: { token: 'one-time-token', threadId: 'ui-thread-1' }, browserToolIdentity: { cardEpoch: 'epoch-1' }, sourceRef: { viewId: 'card-1' } }]
+
+test('chat distinguishes an unverified navigation receipt from a refused action, without claiming a landing', async () => {
+  const { provider } = fixture({})
+  const run = { clientThreadId: 'thread' }, task = { taskId: 'task', cardId: 'card' }
+  const scope = provider.reflexScope(run, {}, task.cardId)
+  const unmatched = { status: 'postcondition-unverified', postcondition: { matched: false } }
+  for (const [tool, op, receipt, ok, text] of [
+    ['navigate', 'submit', unmatched, null, "'검색' 제출"],
+    ['navigate', 'open', unmatched, null, '검색 열기'],
+    ['navigate', 'submit', { error: { code: 'BROWSER_OBSERVATION_STALE' } }, false, "'검색' 제출 실패"],
+    ['navigate', 'open', { error: { code: 'BROWSER_ACTION_UNVERIFIED' } }, false, '검색 열기 실패'],
+    ['navigate', 'open', {}, false, '검색 열기 실패'],
+    ['fill', 'fill', unmatched, false, '검색에 입력 실패'],
+  ]) {
+    const name = 'egdesk_browser_' + tool
+    provider.dispatch = async () => ({ success: false, contentItems: [{ type: 'inputText', text: JSON.stringify(receipt) }] })
+    await assert.rejects(scope.callTool(name, {}), error => {
+      const event = taskStepEvent(task, { op, failed: name, target: '검색', ok: false, code: error.code }, { seq: 4 })
+      const line = browserStepLine(browserStepFrame(browserStepFor(event, run)))
+      assert.deepEqual([line.ok, line.text], [ok, text])
+      return true
+    })
+  }
+})
 
 test('QA Browser preparation requires an original observe selection and a live UI stream', async () => {
   const f = fixture()

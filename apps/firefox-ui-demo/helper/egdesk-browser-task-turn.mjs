@@ -72,10 +72,12 @@ export function browserStepFor(event, { clientThreadId } = {}) {
     reason = op === 'handoff' ? handoff : null
   }
   if (!op) return null
+  // Keep an unverified navigation neutral. Only the loop's own landing check can report success.
+  const unverified = (op === 'navigate' || op === 'submit') && event.ok === false && code === 'POSTCONDITION_UNVERIFIED'
   const step = { clientThreadId, taskId, seq, op,
     ...(typeof event.cardId === 'string' && ID.test(event.cardId) ? { cardId: event.cardId } : {}),
     ...(short(event.target, 60) ? { target: short(event.target, 60) } : {}), ...(short(event.valueName, 40) ? { valueName: short(event.valueName, 40) } : {}),
-    ...(typeof event.ok === 'boolean' ? { ok: event.ok } : {}), ...(count(event.ms) !== null ? { ms: event.ms } : {}),
+    ...(!unverified && typeof event.ok === 'boolean' ? { ok: event.ok } : {}), ...(count(event.ms) !== null ? { ms: event.ms } : {}),
     by: event.by === 'model' ? 'model' : 'decision',
     ...(op === 'handoff' ? { status: reason } : status ? { status } : {}), ...(reason ? { reason } : {}) }
   return step

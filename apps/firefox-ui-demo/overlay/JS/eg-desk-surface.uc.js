@@ -14690,7 +14690,7 @@
                   onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleBrowserSteps(activeThread.id, block.key); },
                 }, view.toggleLabel) : null),
               el('ol', { class: 'egd-codex-browser-steps-list' }, ...view.lines.map(line => el('li', {
-                class: 'egd-codex-browser-step', data: { testid: 'chat-browser-step', by: line.kind === 'handoff' ? 'handoff' : line.by, ok: String(line.ok !== false) },
+                class: 'egd-codex-browser-step', data: { testid: 'chat-browser-step', by: line.kind === 'handoff' ? 'handoff' : line.by, ...(typeof line.ok === 'boolean' ? { ok: String(line.ok) } : {}) },
               }, line.kind === 'step' ? el('span', { class: 'egd-codex-browser-step-who' }, line.who) : null,
               el('span', { class: 'egd-codex-browser-step-text' }, line.text),
               line.time ? el('span', { class: 'egd-codex-browser-step-time' }, line.time) : null)))));
