@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { browserNavigationPolicy } from '../overlay/resources/EGDeskBrowserGrant.sys.mjs'
+import { cardSiteRule } from './egdesk-card-site-rule.fixture.mjs'
 import path from 'node:path'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
@@ -37,7 +38,7 @@ const PAGES = () => ({ '/home': { text: ['쇼핑몰'], elements: [{ ref: 'q', ro
  * world(t, { harness, pageTools, codexReady, oldReadiness }): the bridge's wiring in miniature. harness / pageTools: the two flags (EGDESK_CLAUDE_HARNESS, EGDESK_PAGE_TOOLS).
  * codexReady: the Codex slot's own answer (qaReady), false = no Codex app-server (the real-window case). oldReadiness: the Browser provider's readiness as u4 left it (the Codex slot's, for every engine).
  */
-export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null, realTransport = false, siteUnreflected = false, staleSwap = null, taskDecide = null } = {}) {
+export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null, realTransport = false, siteUnreflected = false, staleSwap = null, cardSites = null, taskDecide = null } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-claude-route-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const root = path.join(base, 'project'); fs.mkdirSync(root); const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
   const transports = [], events = [], ran = [], decisionBodies = [], receiveErrors = []
@@ -84,7 +85,25 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   // the Card's site question as the overlay answers it (browserToolCardRequest 'allow-site'): the person's answer ('allowed' | 'refused' | 'pending') decides; an allowed site joins the conversation's set
   const sites = new Set(), siteQuestions = []
   const send1 = pw.transport.sendToUi.bind(pw.transport)
+  // L6 a1 (D25) cardSites 'window': the Card's OWN site rule (the overlay's code in a window-like global, egdesk-card-site-rule.fixture.mjs) answers the question, sends the policy and judges an
+  // allowed-site move the way browserToolNavigateChrome does (refused: 'rejected', not dispatched, as the overlay's fail() replies). Without it nothing here changes.
+  const rule = cardSites === 'window' ? cardSiteRule() : null
   pw.transport.sendToUi = async request => {
+    if (rule && request.kind === 'allow-site') {
+      const known = rule.browserToolThreadSiteSet(request.clientThreadId)
+      if (known.has(request.site)) return { requestId: request.requestId, status: 'site-allowed', site: request.site, navigationPolicy: rule.browserToolNavigationPolicy(request.clientThreadId), timing: {} }
+      siteQuestions.push(request.site)
+      const answer = typeof siteAnswer === 'function' ? await siteAnswer(request.site) : siteAnswer
+      if (answer === 'allowed') { known.add(request.site); sites.add(request.site) }
+      return { requestId: request.requestId, status: answer === 'allowed' ? 'site-allowed' : answer === 'refused' ? 'site-refused' : 'site-pending', site: request.site, navigationPolicy: rule.browserToolNavigationPolicy(request.clientThreadId), timing: {}, diag: { leftMs: request.deadlineMs - Date.now(), waitedMs: 3 } }
+    }
+    if (rule && request.kind === 'act' && request.action.type === 'navigate' && request.guard?.navigationScope === 'allowed-site') {
+      const decision = rule.browserToolNavigationAllowed(request.clientThreadId, request.action.url, request.guard.url)
+      if (!decision?.allowed) {
+        pw.state.acts.push({ type: 'navigate', ref: null, path: `offsite:${request.action.url}`, rejected: true, by: 'site-rule' })
+        return { requestId: request.requestId, status: 'rejected', error: `Browser navigation is outside the allowed sites [${decision?.reason || 'blocked'}]`, dispatchPhase: 'not-dispatched', timing: {} }
+      }
+    }
     if (request.kind === 'allow-site') {
       if (sites.has(request.site)) return { requestId: request.requestId, status: 'site-allowed', site: request.site, navigationPolicy: browserNavigationPolicy([...sites]), timing: {} } // the overlay answers a site the conversation already allowed at once
       siteQuestions.push(request.site)
@@ -143,7 +162,7 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   const browserSend = (message, extra = {}) => send(message, { executionPolicy: { mode: 'browserBounded' }, selectedSources: selected(), ...extra })
   const runOf = sent => chat.runs.get(`${sent.conversationId}/${sent.runId}`)
   const settled = async sent => { await until(() => ['completed', 'failed', 'interrupted'].includes(runOf(sent)?.status)); await drain(); return runOf(sent) }
-  return { chat, claude, transports, events, root, send, browserSend, runOf, settled, drain, pw, ran, decisionBodies, wiring, siteQuestions, sites, receiveErrors }
+  return { chat, claude, transports, events, root, send, browserSend, runOf, settled, drain, pw, ran, decisionBodies, wiring, siteQuestions, sites, receiveErrors, browser }
 }
 export const refusal = async promise => { try { await promise; return null } catch (error) { return { code: error.code, status: error.httpStatus } } }
 

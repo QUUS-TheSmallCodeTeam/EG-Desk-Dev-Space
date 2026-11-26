@@ -10,9 +10,17 @@ import { fingerprintNativeExecutable, probeGeneratedNativeSchema, probeThreadDel
 export const NATIVE_SCHEMA_VERSION = '0.160.1'
 // This exact Windows app build was checked against its generated experimental
 // schema as well. Prerelease banners never authorize an unverified build.
-const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1', '0.162.1', '0.163.0-alpha.10.2'])
+// 0.171.0-alpha.13 (the ChatGPT.app Codex CLI, L4 a1 2026-11-26): its generated
+// experimental schema passes the context and QA shape checks (fixture
+// scripts/real-engine/fixtures/native-schema-0.171.0-alpha.13), its launcher and
+// native binary are fingerprinted, the real engine ran EG-Desk's dynamic tools and
+// additionalContext on it (11-25 real-engine checks), and effective isolation was
+// measured on it (scripts/real-engine/codex-qa-isolation-check.mjs: the bounded
+// thread proofs held; read-only + offline refused writes inside and outside the
+// folder and the network, with working write and network controls).
+const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1', '0.162.1', '0.163.0-alpha.10.2', '0.171.0-alpha.13'])
 // Generated schema shape alone does not verify effective isolation for QA.
-const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1', '0.163.0-alpha.10.2'])
+const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1', '0.163.0-alpha.10.2', '0.171.0-alpha.13'])
 
 // SUB-13: ordinary Chat follows a version range instead of the exact sets
 // above, so an automatic CLI update keeps Chat running and the screen says

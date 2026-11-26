@@ -1,4 +1,4 @@
-import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INPUT_DENIED_REASONS, BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_STALE_REASONS, BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { chatError } from './codex-chat-values.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
@@ -33,6 +33,8 @@ function publicBrowserErrorDetail(error) {
   if ([true, false, 'unknown'].includes(error.dispatched)) detail.dispatched = error.dispatched
   if (typeof error.obscuredBy === 'string' && /^[A-Za-z0-9 #._=:/-]{1,160}$/.test(error.obscuredBy)) detail.obscuredBy = error.obscuredBy
   if (DIALOG_TYPES.has(error.dialog?.type)) detail.dialog = { type: error.dialog.type }
+  if (BROWSER_STALE_REASONS.includes(error.staleBy)) detail.staleBy = error.staleBy // L6 a1 (D25): which observed fact made it "not sent", one closed word
+  if (BROWSER_INPUT_DENIED_REASONS.includes(error.inputDeniedBy)) detail.inputDeniedBy = error.inputDeniedBy
   if (error.navigation && typeof error.navigation === 'object' && NAVIGATION_REASONS.has(error.navigation.reason)) {
     detail.navigation = { reason: error.navigation.reason,
       ...(typeof error.navigation.host === 'string' && HOST_PATTERN.test(error.navigation.host) ? { host: error.navigation.host } : {}) }
@@ -274,6 +276,8 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
         const failure = classifyPublicToolError(error, { browser: true })
         const selected = run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
         this.emit(run, 'browser.tool.failed', { callId: event.callId, code: failure.code, cardId: selected?.cardId || null,
+          ...(BROWSER_STALE_REASONS.includes(error?.staleBy) ? { staleBy: error.staleBy } : {}),
+          ...(BROWSER_INPUT_DENIED_REASONS.includes(error?.inputDeniedBy) ? { inputDeniedBy: error.inputDeniedBy } : {}),
           originalProviderId: this.providerId, namespace: event.namespace || null,
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
           ...(selected?.sourceId ? { sourceId: selected.sourceId } : {}),

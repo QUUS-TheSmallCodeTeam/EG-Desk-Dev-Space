@@ -239,7 +239,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
 
   function result(done, body, run, cardId) {
     last.delete(`${run?.runId ?? run?.answerId}/${cardId}`) // the page may have changed: the next action observes again
-    if (!done.ok) return respond(true, { ...body, status: 'not_done', code: done.data?.error?.code ?? 'PAGE_ACTION_FAILED', ...(done.data?.error?.actionGate ? { actionGate: done.data.error.actionGate } : {}), next: 'read_again' })
+    if (!done.ok) return respond(true, { ...body, status: 'not_done', code: done.data?.error?.code ?? 'PAGE_ACTION_FAILED', ...(done.data?.error?.actionGate ? { actionGate: done.data.error.actionGate } : {}), ...(typeof done.data?.error?.staleBy === 'string' ? { staleBy: done.data.error.staleBy } : {}), next: 'read_again' }) // staleBy (L6 a1): the provider's closed word for a "not sent"
     return respond(true, { ...body, outcome: done.data?.status ?? null, next: 'read_again', forYouOnly: INTERNAL_NOTE })
   }
 

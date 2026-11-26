@@ -36,7 +36,9 @@ function install(t, { launcher = LAUNCHER, native = 'native codex v1' } = {}) {
   return { base, wrapper, nativePath }
 }
 const union = (...methods) => JSON.stringify({ oneOf: methods.map(method => ({ properties: { method: { enum: [method] } } })) })
-/** The CLI of that install, as a fake run: --version answers the banner, generate-json-schema writes the schema files of 0.171.0-alpha.13 into --out. */
+/** The CLI of that install, as a fake run: --version answers the banner, generate-json-schema writes the schema files of 0.171.0-alpha.13 into --out.
+ * L4 a1: 0.171.0-alpha.13 is a pinned contract version now, so thread/delete and steer come from its ONE full probe: the fake writes the real files that
+ * probe reads (fixtures/native-schema-0.171.0-alpha.13) as the real binary does; ClientRequest and the delete/steer files stay the test's own. */
 function fakeCli({ version = '0.171.0-alpha.13', withDelete = true, withSteer = true } = {}) {
   const calls = []
   const run = (file, args) => {
@@ -44,6 +46,7 @@ function fakeCli({ version = '0.171.0-alpha.13', withDelete = true, withSteer = 
     if (args[0] === '--version') return { status: 0, stdout: `codex-cli ${version}\n` }
     if (args[0] === 'app-server' && args[1] === 'generate-json-schema') {
       const out = args[args.indexOf('--out') + 1]
+      fs.cpSync(path.join(here, '..', 'scripts', 'real-engine', 'fixtures', 'native-schema-0.171.0-alpha.13'), out, { recursive: true })
       fs.mkdirSync(path.join(out, 'v2'), { recursive: true })
       fs.writeFileSync(path.join(out, 'ClientRequest.json'), union('thread/start', ...(withDelete ? ['thread/delete'] : []), ...(withSteer ? ['turn/steer'] : [])))
       for (const name of ['ThreadDeleteParams', 'ThreadDeleteResponse', 'TurnSteerParams', 'TurnSteerResponse']) fs.writeFileSync(path.join(out, 'v2', `${name}.json`), fixture(name))
