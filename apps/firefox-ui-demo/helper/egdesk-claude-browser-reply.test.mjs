@@ -65,11 +65,30 @@ test('D27: a Claude browser conversation under the harness is started with EG-De
   assert.deepEqual([w.transports.at(-1).options.bounded, w.transports.at(-1).options.tools], [true, []])
 })
 
+test('D27: every bounded Claude message places the reply rule beside the current human text, including after an entry report', async t => {
+  const w = world(t), entryNote = JSON.stringify({ egdesk_browser_task: { next: 'report_to_user' } })
+  let conversationId
+  for (const [index, message] of ['덕덕고 카드에서 장화 신은 고양이 검색해줘', '계속해줘', '두 번째 결과 열어줘'].entries()) {
+    if (index === 2) {
+      w.chat.browserEntryMode = () => 'on'
+      w.chat.runBrowserEntryOn = async () => ({ note: entryNote }) // isolate the handoff, not the Decision model's actions
+    }
+    const sent = await w.browserSend(message, { conversationId }); await w.settled(sent)
+    conversationId = sent.conversationId
+    const blocks = w.transports.at(-1).sent.at(-1)
+    assert.ok(Array.isArray(blocks), 'language rule is in this turn, not just the process options')
+    assert.deepEqual(blocks.slice(-2).map(b => b.text), ['[EG-Desk context: egdesk_reply_language]\n' + REPLY_LANGUAGE, message])
+    if (index === 2) assert.ok(blocks.slice(0, -2).some(b => b.text.includes(entryNote)))
+  }
+  assert.deepEqual(w.chat.store.listMessages('ui-claude', { limit: 50 }).messages.filter(m => m.role === 'user').map(m => m.text), ['덕덕고 카드에서 장화 신은 고양이 검색해줘', '계속해줘', '두 번째 결과 열어줘'])
+})
+
 test('D27, unchanged without the harness: a bounded Claude thread (the SUB-10 contract alone) gets no instruction from EG-Desk', async t => {
   const w = world(t, { harness: false, codexReady: true })
   assert.equal(w.chat.claudeBrowserLive(), false)
   const sent = await w.browserSend('이 페이지 제목 알려줘'); await w.settled(sent)
   assert.equal(w.transports.at(-1).options.appendPrompt ?? null, null)
+  assert.ok(!JSON.stringify(w.transports.at(-1).sent).includes(REPLY_LANGUAGE))
 })
 
 test('hold: with the draft check off, a browser turn\'s talk before a tool is a work note and only the answer is posted (before: two bubbles, the English line first)', async t => {
