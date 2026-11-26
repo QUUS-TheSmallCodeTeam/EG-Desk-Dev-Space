@@ -212,6 +212,18 @@ export function readOnlyPress(element, snapshot, { classify = classifyAction, is
 }
 
 // c26: the snapshot's own scroll state (the Firefox child reports { x, y, maxY }): more than a few pixels left below. Unknown is not "more".
+// a1 (Main 16:5x, L6's reading of a real DuckDuckGo search: "the call failed, yet the results page opened"): a site adds parameters to a GET search's address (ia=web, origin,
+// t ...), so the exact address the form predicted is not the address that loads, and the navigation's url postcondition reads a failure. formResultLanded(actual, expected): the
+// page that loaded is that search's result: the same origin and path as the form's action, and every parameter the form submitted with a value is there with the same value
+// (a parameter the site adds is no evidence against it; one it drops or changes is). Code only: nothing is judged.
+export function formResultLanded(actual, expected) {
+  let a, e
+  try { a = new URL(actual); e = new URL(expected) } catch { return false }
+  const path = url => url.pathname.replace(/\/+$/, '') || '/'
+  if (a.origin !== e.origin || path(a) !== path(e)) return false
+  const submitted = [...e.searchParams].filter(([, value]) => value !== '')
+  return submitted.length > 0 && submitted.every(([name, value]) => a.searchParams.getAll(name).includes(value))
+}
 export const MORE_BELOW_PX = 16
 export const MAX_OFF_SITE = 6
 export function contentBelow(snapshot) {
@@ -618,6 +630,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       return { ok: true, result }
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'TOOL_FAILED'
+      // a1: a GET search whose address the site extended: the page that loaded proves it (formResultLanded on a fresh observation); then it is done, as the call would have said
+      if (typeof meta.landed === 'function' && await meta.landed().catch(() => false) === true) {
+        entry.actions.push({ tool, ok: true, status: 'form-result-observed' })
+        tell({ step: entry.step, action: tool, ok: true, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...described(tool, meta) })
+        lastFailure = null
+        return { ok: true, result: { status: 'form-result-observed' } }
+      }
       entry.actions.push({ tool, ok: false, code })
       tell({ step: entry.step, failed: tool, ok: false, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...(PUBLIC_CODE.test(code) ? { code } : {}), ...described(tool, meta) })
       const repeated = lastFailure === code
@@ -837,7 +856,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
           return finish('escalated', { reason: action.escalate, observationId,
             suggestion: { ref: option.item.element.ref, option: option.value, expectedTarget: expectedTargetOf(option.item.element) } })
         }
-        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option) })
+        const readOnlyUrl = option.item.readOnly?.kind === 'get_form' ? option.item.readOnly.url : null
+        const landed = readOnlyUrl ? async () => {
+          try { await callTool('egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 5000 }) } catch { /* observe the page as it is */ }
+          const seen = await callTool('egdesk_browser_observe', { cardId })
+          return formResultLanded(seen?.snapshot?.url, readOnlyUrl)
+        } : null
+        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed } : {}) })
         if (!done.ok) {
           if (done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue

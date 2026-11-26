@@ -136,7 +136,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],
   'egdesk-browser-task.mjs': ['page_text'],
-  'egdesk-browser-task-tool.mjs': ['page_text'], // L8 a1: the field-text choice (the spans of the person's message and the goal, the field's label and the host), through the Browser scope's page_text gate, like the loop's own steps
+  'egdesk-browser-field-text.mjs': ['page_text'], // L8 a1: the field-text choice (the spans of the person's message and the goal, the field's label and the host), through the Browser scope's page_text gate, like the loop's own steps
   'egdesk-entry-placeless-measure.mjs': ['page_text'], // L8 c43: measurement only: the entry request (the message, the open card's title, host and first lines) exactly as the product sends it
   'egdesk-browser-open-item-combined.mjs': ['run_text', 'terminal_command', 'browser_task_record', 'page_text'], // L8 c42: measurement only: the resolver's request for a browser task and another open item, as the runtime sends it
   'egdesk-ordinal-step-measure.mjs': ['page_text', 'browser_task_record'], // L8 c44: measurement only: the objective step request (the goal, the person's reply with the asked list, the page's text) exactly as the product sends it
