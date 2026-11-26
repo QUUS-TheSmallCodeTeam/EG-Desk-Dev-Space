@@ -23,7 +23,8 @@ const NAME_KINDS = Object.freeze([
   [/^(sup_|tense_|claim_|present_)/, 'check'], [/^risk_/, 'command_gate'], [/^output_reports_/, 'run_conditions'], [/^(terminal_state$|log_)/, 'terminal_state'],
   [/^(tn_|tw_)/, 'memory'], [/^(wm_|role_|topic_need_)/, 'working_memory'], [/^(rc_|cf_|ct_)/, 'record'],
   [/^(owner_action$|same_matter_)/, 'placement'], [/^(assistant_request$|web_search$|goes_to_)/, 'hud_routing'],
-  [/^(ps_|next_step$|goal_met$|same_|field_|task_resume$)/, 'browser'], [/^warmup$/, 'warmup'],
+  // a1 (L5): the direct entry's own questions (browser_entry, browser_entry_card_N, _answer, _wall_N) are browser calls too
+  [/^(ps_|next_step$|goal_met$|same_|field_|task_resume$|browser_entry)/, 'browser'], [/^warmup$/, 'warmup'],
   // u5: the proposal registry (sentence checks pq_/ph_, the hold question pa and the 'not done' question pw) and the open-proposal items; the app pick of the observe-first path
   [/^(pq_|ph_|pa$|pw$|open_prop_)/, 'proposals'], [/^ov_app$/, 'observe_app'],
 ])

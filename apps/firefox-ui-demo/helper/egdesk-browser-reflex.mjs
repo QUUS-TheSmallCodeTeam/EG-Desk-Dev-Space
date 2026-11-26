@@ -212,7 +212,35 @@ export function readOnlyPress(element, snapshot, { classify = classifyAction, is
 }
 
 // c26: the snapshot's own scroll state (the Firefox child reports { x, y, maxY }): more than a few pixels left below. Unknown is not "more".
+// a1 (Main 16:5x, L6's reading of a real DuckDuckGo search: "the call failed, yet the results page opened"): a site adds parameters to a GET search's address (ia=web, origin,
+// t ...), so the exact address the form predicted is not the address that loads, and the navigation's url postcondition reads a failure. formResultLanded(actual, expected): the
+// page that loaded is that search's result: the same origin and path as the form's action, and every parameter the form submitted with a value is there with the same value
+// (a parameter the site adds is no evidence against it; one it drops or changes is). Code only: nothing is judged.
+export function formResultLanded(actual, expected) {
+  let a, e
+  try { a = new URL(actual); e = new URL(expected) } catch { return false }
+  const path = url => url.pathname.replace(/\/+$/, '') || '/'
+  if (a.origin !== e.origin || path(a) !== path(e)) return false
+  const submitted = [...e.searchParams].filter(([, value]) => value !== '')
+  return submitted.length > 0 && submitted.every(([name, value]) => a.searchParams.getAll(name).includes(value))
+}
+// a1 (Main 16:55, D33: a link to about.google opened after the site was allowed, yet the call read a failure: the site redirected and added fg and utm parameters). One rule for the
+// loop's steps and the page tools' presses: navigationLanded({ actual, expected, from?, submitted? }) -> the page that loaded is where the navigation we asked for went.
+//   submitted (a read-only GET search): formResultLanded (the form's own parameters with their values are there; added ones are the site's).
+//   a link: not still where it started (from, exactly), and either the same host and path as the link (its query and fragment are the site's), or a redirect inside the link's
+//   own site (sameSiteNavigation). Code only, after the call already read a failure; it never turns a refused or unsent action into a success.
+export function navigationLanded({ actual, expected, from = null, submitted = false } = {}) {
+  if (submitted === true) return formResultLanded(actual, expected)
+  let a, e
+  try { a = new URL(actual); e = new URL(expected) } catch { return false }
+  if (!['http:', 'https:'].includes(a.protocol)) return false
+  if (from) { try { if (new URL(from).href === a.href) return false } catch { /* no start to compare */ } }
+  const path = url => url.pathname.replace(/\/+$/, '') || '/'
+  if (a.host === e.host && path(a) === path(e)) return true
+  try { return sameSiteNavigation(e.href, a.href) === true } catch { return false }
+}
 export const MORE_BELOW_PX = 16
+export const MAX_OFF_SITE = 6
 export function contentBelow(snapshot) {
   const scroll = snapshot?.scroll
   return record(scroll) && Number.isFinite(scroll.y) && Number.isFinite(scroll.maxY) && scroll.maxY - scroll.y > MORE_BELOW_PX
@@ -242,6 +270,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   const counters = { navigate: 0, press: 0, fill: 0 }
   const personOnly = [] // c22: the controls only the person may operate (no action exists for them), named for the step
   const withheld = [] // c26: every control withheld as the person's own (a button withheld by vocabulary, a control with no action), in page order, named for the note
+  const offSite = [] // a1: links to another site (never options: the loop follows same-site links only), in page order, for the task tool's guidance (the person is asked about the site)
   for (const element of elements) {
     if (!record(element) || typeof element.ref !== 'string' || !element.ref) continue
     const kind = elementKind(element, { textComboboxes })
@@ -285,7 +314,12 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
       continue
     }
     if (kind === 'navigate') {
-      if (!isAllowedUrl(element.href, snapshot)) { excluded.offSite++; continue }
+      if (!isAllowedUrl(element.href, snapshot)) {
+        excluded.offSite++
+        const words = hrefWords(element.href)
+        if (label && offSite.length < MAX_OFF_SITE && !(words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none')) offSite.push({ label, href: element.href })
+        continue
+      }
       const words = hrefWords(element.href)
       if (words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none') { excluded.gated++; continue }
       counters.navigate++
@@ -299,7 +333,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   }
   const kept = entries.slice(0, Math.max(0, maxOptions))
   excluded.overflow = entries.length - kept.length
-  return { options: uniqueOptions(kept), excluded, personOnly, withheld }
+  return { options: uniqueOptions(kept), excluded, personOnly, withheld, offSite }
 }
 
 export function expectedTargetOf(element) {
@@ -339,6 +373,24 @@ export function reflexActionArgs(option, { cardId, observationId, snapshot, text
   if (readOnly?.kind === 'get_form') return { tool: 'egdesk_browser_navigate', args: { ...base, url: readOnly.url, postcondition: { kind: 'url', value: readOnly.url } } }
   if (readOnly?.kind === 'view') return { tool: 'egdesk_browser_click', args: { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), postcondition: { kind: 'visible-text', value: readOnly.text } } }
   return { escalate: 'press_needs_expected_effect' }
+}
+
+// a1 (owner 2026-11-26 16:00, as Main recorded it: the decision model may receive the names and values of a page's controls on every site, not its body text): the
+// snapshot the step's judgments read when page text is withheld. Its text is the page title and the controls (role and name, a field's current value), never a line of
+// the page body; a value that looks like a credential is never listed. Options, fields and the finished page's text for the caller's code still come from the real snapshot.
+const CONTROL_WORD = Object.freeze({ link: 'link', button: 'button', textbox: 'text field', searchbox: 'search field', search: 'search field', email: 'text field', number: 'number field', combobox: 'list or field', tab: 'tab', checkbox: 'check box', radio: 'option', switch: 'switch', select: 'list', listbox: 'list', slider: 'slider', menuitem: 'menu item', option: 'option' })
+export const MAX_CONTROL_LINES = 40
+export function withoutPageText(snapshot) {
+  const lines = [`Page title: "${compactText(typeof snapshot?.title === 'string' ? snapshot.title : '', 120).replace(/"/g, "'")}" (the page's own text is not sent; its controls are listed instead)`]
+  for (const element of (Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []).slice(0, MAX_CONTROL_LINES)) {
+    if (!record(element)) continue
+    const label = compactText(element.label, 60)
+    if (!label) continue
+    const role = String(element.role ?? '')
+    const value = role !== 'password' && !SENSITIVE_LABEL.test(label) && typeof element.value === 'string' && element.value && element.value !== element.label ? compactText(element.value, 30) : ''
+    lines.push(`${CONTROL_WORD[role] ?? 'control'}: ${label}${value ? ` (now "${value.replace(/"/g, "'")}")` : ''}${element.disabled === true ? ' (disabled)' : ''}`)
+  }
+  return { ...snapshot, text: lines }
 }
 
 function visibleText(snapshot) {
@@ -467,7 +519,8 @@ const fieldRef = option => option.item?.element?.ref ?? option.value
  * question per key, then a greedy assignment by probability.
  * → { assigned: Map<key, optionValue>, unmatched: key[], usage }
  */
-export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+// pageState (a1, the task tool's values-first step): the page-state predicates ride in the same request, so a value is never typed on a page that is a person's step; the result names the state.
+export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch, pageState = false }) {
   if (!fieldOptions.length) return { assigned: new Map(), unmatched: keys, usage: null }
   const byValue = new Map(fieldOptions.map(option => [option.value, option]))
   const choices = [...fieldOptions.map(option => ({ value: option.value, ...(option.description ? { description: option.description } : {}) })),
@@ -475,7 +528,7 @@ export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, 
   const result = await client.decide({
     input: [{ role: 'developer', content: 'You match named values to the text fields of one web page.' },
       { role: 'user', content: `URL: ${snapshot.url}\n\nVisible text:\n${visibleText(snapshot) || '(none)'}` }],
-    questions: keys.map((key, index) => choiceQuestion(`field_${index}`, `Which text field should hold the value named "${compactText(key, 80)}"?`, choices)),
+    questions: [...keys.map((key, index) => choiceQuestion(`field_${index}`, `Which text field should hold the value named "${compactText(key, 80)}"?`, choices)), ...(pageState === true ? pageStateQuestions() : [])],
     timeoutMs, signal, authorizeDispatch,
   })
   const pairs = []
@@ -496,7 +549,7 @@ export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, 
     assigned.set(pair.key, pair.value)
     usedFields.add(pair.ref)
   }
-  return { assigned, unmatched: keys.filter(key => !assigned.has(key)), usage: result.usage }
+  return { assigned, unmatched: keys.filter(key => !assigned.has(key)), usage: result.usage, ...(pageState === true ? { pageState: readPageState(result.answers, thresholds.pageState).state } : {}) }
 }
 
 export function validateReflexArgs(args) {
@@ -522,13 +575,22 @@ export function validateReflexArgs(args) {
 const PUBLIC_CODE = /^[A-Z][A-Z0-9_]{2,63}$/
 const failure = error => (error instanceof DecisionError ? error.code : 'unreachable')
 
+// a1 (the task tool, egdesk-browser-task-tool.mjs): what one page action of the loop was, for the step observer. Closed words and the element's own short
+// name only (never the text typed, never an address): op 'open' a link | 'submit' a read-only GET search | 'press' a view button | 'fill' a field | 'scroll' | 'wait'.
+const OP_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'open', egdesk_browser_click: 'press', egdesk_browser_fill: 'fill', egdesk_browser_scroll: 'scroll', egdesk_browser_wait: 'wait' })
+export const STEP_TARGET_CHARS = 40
+export const optionTarget = option => compactText(String(option?.item?.element?.label ?? option?.value ?? '').replace(/^\[[A-Z]\d+\]\s*/, ''), STEP_TARGET_CHARS) || null
+export const optionOp = option => (option?.item?.kind === 'fill' ? 'fill' : option?.item?.kind === 'navigate' ? 'open' : option?.item?.readOnly?.kind === 'get_form' ? 'submit' : 'press')
+const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch { return null } }
+
 /**
  * runBrowserReflex({ cardId, goal, values?, maxSteps?, callTool, client, thresholds?, classify?, isAllowedUrl?, timeoutMs?, signal? })
  * callTool(name, args) → the egdesk_browser_* tool result (throws on refusal).
  * → { outcome, reason?, steps, ... } — see the module header for outcomes.
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
-  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null } = {}) {
+  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
+  textComboboxes = false, onPage = null, valuesFirst = false, pageText = true } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -544,6 +606,15 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   const assigned = new Map(arr(seed.assigned)) // value name → frozen field and observation scope
   const attemptedRefs = new Set(arr(seed.attemptedRefs))
   const unmatched = new Set(arr(seed.unmatched))
+  // a1: values the caller gives when it resumes the task (the task tool's needs_value answer) join the pending ones. A name already typed (its field was
+  // tried) is never typed again; any other name given again is matched again on the page as it is now.
+  if (resumeState) {
+    for (const [key, value] of Object.entries(values || {})) {
+      const bound = assigned.get(key)
+      if (bound && attemptedRefs.has(bound.ref)) continue
+      assigned.delete(key); unmatched.delete(key); pending.set(key, value)
+    }
+  }
   const history = arr(seed.history).map(String).slice(-8)
   const contextLines = arr(userContext).filter(item => typeof item === 'string' && item.trim()).slice(-4)
   // The first decision of a run may open a cold connection (recorded cold calls 1.4-2.2 s against the 1.5 s
@@ -557,25 +628,115 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
 
   // One tool call; two consecutive failures with the same code stop the loop.
   // Read-only observer for progress facts (step number and whether a tool call just succeeded); it cannot change the loop.
-  const observe = (step, action) => { try { onStep?.({ step, ...(action ? { action } : {}) }) } catch { /* an observer never affects the loop */ } }
-  async function act(entry, tool, args) {
+  const tell = info => { try { onStep?.(info) } catch { /* an observer never affects the loop */ } }
+  const observe = (step, action) => tell({ step, ...(action ? { action } : {}) })
+  // a1: each page action also tells the observer what it was (op, the element's short name, the NAME of the value typed) and how long it took (ms: the call,
+  // stepMs: since the step began, its decision included). A refused call is told as `failed` (never `action`: the progress facts count only done actions).
+  let stepStart = Date.now()
+  // a wait carries no op: it is part of the step before it, never a line of its own (a reader that maps the tool name, like the runtime's step sink, drops it as before)
+  const described = (tool, meta) => ({ ...(tool === 'egdesk_browser_wait' && !meta.op ? {} : { op: meta.op ?? OP_OF_TOOL[tool] ?? 'act' }), target: typeof meta.target === 'string' && meta.target ? meta.target : null, ...(typeof meta.valueName === 'string' && meta.valueName ? { valueName: compactText(meta.valueName, 60) } : {}) })
+  async function act(entry, tool, args, meta = {}) {
+    const t0 = Date.now()
     try {
       const result = await callTool(tool, args)
       entry.actions.push({ tool, ok: true, status: typeof result?.status === 'string' ? result.status : null })
-      observe(entry.step, tool)
+      tell({ step: entry.step, action: tool, ok: true, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...described(tool, meta) })
       lastFailure = null
       return { ok: true, result }
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'TOOL_FAILED'
+      // a1: a navigation whose address the site changed (a redirect, added parameters): the page that loaded proves it (navigationLanded on a fresh observation); then it is done
+      if (typeof meta.landed === 'function' && await meta.landed().catch(() => false) === true) {
+        entry.actions.push({ tool, ok: true, status: meta.landedStatus ?? 'navigation-observed' })
+        tell({ step: entry.step, action: tool, ok: true, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...described(tool, meta) })
+        lastFailure = null
+        return { ok: true, result: { status: meta.landedStatus ?? 'navigation-observed' } }
+      }
       entry.actions.push({ tool, ok: false, code })
+      tell({ step: entry.step, failed: tool, ok: false, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...(PUBLIC_CODE.test(code) ? { code } : {}), ...described(tool, meta) })
       const repeated = lastFailure === code
       lastFailure = code
       return { ok: false, code, repeated }
     }
   }
 
+  // The supplied values for this page: bind each (an exact field name first, else one mapping request) and type the first ready one. -> { result } (the loop returns it) |
+  // { typed: true } (a field was typed: next step) | { typed: false }. firstPass (a1 valuesFirst): before the step's choice, with the page-state predicates in the mapping request.
+  const triedHere = new Set() // a1: `name|url|document` pairs the values-first mapping already asked about
+  async function typePending(entry, snapshot, observationId, fields, { firstPass = false } = {}) {
+      const byValue = new Map(fields.map(option => [option.value, option]))
+      const { documentId, url } = snapshot
+      const hasDocument = (typeof documentId === 'string' && documentId.length > 0) || Number.isSafeInteger(documentId)
+      // Without a stable document identifier, do not carry a binding across observations.
+      const inScope = binding => binding.url === url && binding.documentId === documentId &&
+        (binding.observationId === observationId || hasDocument)
+      const reserved = new Set(attemptedRefs)
+      for (const binding of assigned.values()) if (inScope(binding)) reserved.add(binding.ref)
+      const bind = (key, option) => {
+        const ref = fieldRef(option)
+        assigned.set(key, { value: option.value, ref, documentId, url, observationId })
+        reserved.add(ref)
+      }
+
+      // Exact names reserve their observed controls before model assignment.
+      const docKey = `${url}|${documentId}`
+      const unassigned = [...pending.keys()].filter(key => !assigned.has(key) && !unmatched.has(key) && !triedHere.has(`${key}|${docKey}`))
+      if (unassigned.length && fields.length) {
+        const named = []
+        for (const key of unassigned) {
+          const option = byValue.get(key)
+          if (!option) named.push(key)
+          else if (reserved.has(fieldRef(option))) unmatched.add(key)
+          else bind(key, option)
+        }
+        if (named.length) {
+          try {
+            const available = fields.filter(option => !reserved.has(fieldRef(option)))
+            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot: pageText === false ? withoutPageText(snapshot) : snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch, ...(firstPass ? { pageState: true } : {}) })
+            if (signal?.aborted) return { result: finish('aborted') }
+            if (isDecisionCurrent && !isDecisionCurrent()) return { result: finish('fallback', { reason: 'evidence_unavailable' }) }
+            entry.mapping = { assigned: Object.fromEntries(mapping.assigned), unmatched: mapping.unmatched, usage: mapping.usage }
+            if (firstPass) {
+              // values first: nothing is typed on a page that is not decided to be ordinary content (the step's own choice and page state then decide, as without it); a name
+              // that fits no field here is tried again on another page (never marked unmatched), and not asked again on this one
+              if (mapping.pageState !== 'content') return { typed: false }
+              named.forEach(key => triedHere.add(`${key}|${docKey}`))
+              for (const [key, value] of mapping.assigned) bind(key, byValue.get(value))
+            } else {
+              for (const [key, value] of mapping.assigned) bind(key, byValue.get(value))
+              mapping.unmatched.forEach(key => unmatched.add(key))
+            }
+          } catch (error) { return { result: signal?.aborted ? finish('aborted') : finish('fallback', { reason: failure(error) }) } }
+        }
+      }
+      // Display labels can be renumbered after a fill. Do not retarget a binding.
+      const readyFields = new Map()
+      for (const key of pending.keys()) {
+        const binding = assigned.get(key)
+        if (!binding || unmatched.has(key)) continue
+        const option = byValue.get(binding.value)
+        if (option && inScope(binding) && fieldRef(option) === binding.ref && !attemptedRefs.has(binding.ref)) {
+          readyFields.set(key, option)
+        } else unmatched.add(key)
+      }
+      const ready = readyFields.keys().next().value
+      if (ready) {
+        const option = readyFields.get(ready)
+        const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
+        if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100) }) }
+        attemptedRefs.add(action.args.ref)
+        const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
+        if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`) }
+        else return { result: finish('escalated', { reason: 'tool_failed', code: done.code }) }
+        return { typed: true }
+      }
+      return { typed: false }
+
+  }
+
   for (let step = 1; step <= maxSteps; step++) {
     if (signal?.aborted) return finish('aborted')
+    stepStart = Date.now()
     observe(step, null)
     let observed
     try { observed = await callTool('egdesk_browser_observe', { cardId }) }
@@ -588,7 +749,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     }
     const entry = { step, observationId, revision: snapshot.revision, url: snapshot.url, actions: [] }
     steps.push(entry)
-    const { options, excluded, personOnly, withheld } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}) })
+    const seen = pageText === false ? withoutPageText(snapshot) : snapshot // a1: what the step's judgments read (the page's own text only when it may be sent)
+    // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
+    const { options, excluded, personOnly, withheld, offSite } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    try { onPage?.({ step, title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOfUrl(snapshot.url), offSite: offSite.map(link => ({ label: compactText(link.label, 60), href: link.href })) }) } catch { /* an observer never affects the loop */ }
     entry.excluded = excluded
     // Code rule (R3/R5): nothing on this page may be chosen and something was withheld as the person's own control (submit, payment,
     // permission, delete). There is nothing to judge, so no request is made: the step is the person's. Real measurement (2026-11-25):
@@ -607,6 +771,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       continue
     }
     const fields = options.filter(option => option.item.kind === 'fill')
+    // a1 (opt-in, the task tool): the values the caller gave are typed where they belong BEFORE the step's choice (one mapping request with the page-state predicates;
+    // an exact field name needs none), so typing a given value never waits on the choice picking its field
+    if (valuesFirst === true && pending.size && fields.length) {
+      const typed = await typePending(entry, snapshot, observationId, fields, { firstPass: true })
+      if (typed.result) return typed.result
+      if (typed.typed) { entry.rule = 'values_first'; continue }
+    }
     // The recorded choice on this page is a string comparison (code, once per path and run); the person's reply in this task overrides it.
     const recorded = priorRun && !usedRecorded.has(safePathOf(snapshot.url)) ? recordedChoice(priorRun, snapshot, options, { goal, userContext: contextLines }) : null
     const prior = priorRun ? priorFacts(priorRun, snapshot, options) : { lines: [], conflict: false }
@@ -617,8 +788,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     let decision
     try {
       if (recorded) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
-      decision = recorded ? await decideRecordedStep({ goal, snapshot, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ goal, snapshot, options, history, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+      decision = recorded ? await decideRecordedStep({ goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
+        : await decideReflexStep({ goal, snapshot: seen, options, history, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
@@ -638,7 +809,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       let check = null
       // c36: the targets are the controls withheld as the person's own, buttons included (page order, at most three), not only those with no action
       const personTargets = withheld.map(control => personOnly.find(item => item.label === control.label) ?? { label: control.label, role: control.role, value: '' })
-      try { check = await decidePersonTarget({ goal, snapshot, personOnly: personTargets, today, client, thresholds, timeoutMs: timeoutMs ?? undefined, signal, authorizeDispatch }) }
+      try { check = await decidePersonTarget({ goal, snapshot: seen, personOnly: personTargets, today, client, thresholds, timeoutMs: timeoutMs ?? undefined, signal, authorizeDispatch }) }
       catch { check = null } // a failed follow-up leaves the first decision as it was; nothing is concluded on a guess
       if (signal?.aborted) return finish('aborted')
       if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
@@ -660,63 +831,9 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     // A decided link leaves this page: supplied values are not typed into a page
     // that is about to be replaced (§3.3; they stay pending for the next page).
     if (decision.kind === 'act' && decision.option.item.kind !== 'navigate') {
-      const byValue = new Map(fields.map(option => [option.value, option]))
-      const { documentId, url } = snapshot
-      const hasDocument = (typeof documentId === 'string' && documentId.length > 0) || Number.isSafeInteger(documentId)
-      // Without a stable document identifier, do not carry a binding across observations.
-      const inScope = binding => binding.url === url && binding.documentId === documentId &&
-        (binding.observationId === observationId || hasDocument)
-      const reserved = new Set(attemptedRefs)
-      for (const binding of assigned.values()) if (inScope(binding)) reserved.add(binding.ref)
-      const bind = (key, option) => {
-        const ref = fieldRef(option)
-        assigned.set(key, { value: option.value, ref, documentId, url, observationId })
-        reserved.add(ref)
-      }
-
-      // Exact names reserve their observed controls before model assignment.
-      const unassigned = [...pending.keys()].filter(key => !assigned.has(key) && !unmatched.has(key))
-      if (unassigned.length && fields.length) {
-        const named = []
-        for (const key of unassigned) {
-          const option = byValue.get(key)
-          if (!option) named.push(key)
-          else if (reserved.has(fieldRef(option))) unmatched.add(key)
-          else bind(key, option)
-        }
-        if (named.length) {
-          try {
-            const available = fields.filter(option => !reserved.has(fieldRef(option)))
-            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch })
-            if (signal?.aborted) return finish('aborted')
-            if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
-            entry.mapping = { assigned: Object.fromEntries(mapping.assigned), unmatched: mapping.unmatched, usage: mapping.usage }
-            for (const [key, value] of mapping.assigned) bind(key, byValue.get(value))
-            mapping.unmatched.forEach(key => unmatched.add(key))
-          } catch (error) { return signal?.aborted ? finish('aborted') : finish('fallback', { reason: failure(error) }) }
-        }
-      }
-      // Display labels can be renumbered after a fill. Do not retarget a binding.
-      const readyFields = new Map()
-      for (const key of pending.keys()) {
-        const binding = assigned.get(key)
-        if (!binding || unmatched.has(key)) continue
-        const option = byValue.get(binding.value)
-        if (option && inScope(binding) && fieldRef(option) === binding.ref && !attemptedRefs.has(binding.ref)) {
-          readyFields.set(key, option)
-        } else unmatched.add(key)
-      }
-      const ready = readyFields.keys().next().value
-      if (ready) {
-        const option = readyFields.get(ready)
-        const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
-        if (action.needsText) return finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100) })
-        attemptedRefs.add(action.args.ref)
-        const done = await act(entry, action.tool, action.args)
-        if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`) }
-        else return finish('escalated', { reason: 'tool_failed', code: done.code })
-        continue
-      }
+      const typed = await typePending(entry, snapshot, observationId, fields)
+      if (typed.result) return typed.result
+      if (typed.typed) continue
     }
 
     switch (decision.kind) {
@@ -754,7 +871,15 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
           return finish('escalated', { reason: action.escalate, observationId,
             suggestion: { ref: option.item.element.ref, option: option.value, expectedTarget: expectedTargetOf(option.item.element) } })
         }
-        const done = await act(entry, action.tool, action.args)
+        // a navigation (a link, a read-only GET search) whose url postcondition read a failure: the page that loaded decides (navigationLanded)
+        const submitted = option.item.readOnly?.kind === 'get_form'
+        const expectedUrl = action.tool === 'egdesk_browser_navigate' ? action.args.url : null
+        const landed = expectedUrl ? async () => {
+          try { await callTool('egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 5000 }) } catch { /* observe the page as it is */ }
+          const seen = await callTool('egdesk_browser_observe', { cardId })
+          return navigationLanded({ actual: seen?.snapshot?.url, expected: expectedUrl, from: snapshot.url, submitted })
+        } : null
+        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (!done.ok) {
           if (done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue

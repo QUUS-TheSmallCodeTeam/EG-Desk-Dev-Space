@@ -3,7 +3,8 @@ import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './eg
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
 import { grantHint } from './egdesk-browser-grant-path.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation } from './egdesk-browser-url-policy.mjs'
-import { buildReflexCandidates, expectedTargetOf, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { buildReflexCandidates, expectedTargetOf, navigationLanded, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
 
 // L8 u1 ('위': up to the conversation): the browser as EG-Desk tools (the tools are named after the Card: egdesk_card_*; egdesk_page_* is the working-memory fixture's stand-in) the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
 // this provider's specs()). Four coarse tools on top of the Browser tool service, whose checks stay in force because EVERY action goes through that provider's own dispatch for the same run
@@ -58,7 +59,8 @@ function parse(response) {
  *   browser: the Browser tool provider (providerId 'egdesk-browser'); every action is its dispatch(run, { tool, arguments, callId }) for the SAME run
  *   ledger:  the approval ledger of the command and file tools (check({ sessionId, turnId, cwd, command, floor, identity })); without it nothing that needs approval is done
  */
-export function createPageToolsProvider({ mode = () => 'off', browser = null, ledger = null, env = process.env, limits = {} } = {}) {
+// taskTool (L8 a1, optional): the browser task tool (egdesk-browser-task-tool.mjs) served beside these four (its flag EGDESK_BROWSER_TASK_TOOL); without it nothing changes.
+export function createPageToolsProvider({ mode = () => 'off', browser = null, ledger = null, env = process.env, limits = {}, taskTool = null } = {}) {
   const L = { ...PAGE_LIMITS, ...limits }
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const last = new Map() // `${runId}/${cardId}` -> { observationId, snapshot, options }
@@ -178,7 +180,12 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     // press
     if (verdict.act === 'auto') {
       const planned = reflexActionArgs(verdict.option, { cardId, observationId: obs.observationId, snapshot })
-      if (planned.tool) { const done = await call(run, event, planned.tool, planned.args, 'press'); return result(done, { status: 'pressed', via: 'auto', cardId, label }, run, cardId) }
+      if (planned.tool) {
+        const done = await call(run, event, planned.tool, planned.args, 'press')
+        const outcome = planned.tool === 'egdesk_browser_navigate' ? await landed(run, event, cardId, done, { expected: planned.args.url, from: snapshot.url, submitted: verdict.option.item.readOnly?.kind === 'get_form' }) : null
+        if (outcome) return landedPress(run, cardId, { status: 'pressed', via: 'auto', cardId, label }, outcome)
+        return result(done, { status: 'pressed', via: 'auto', cardId, label }, run, cardId)
+      }
     }
     // u9 (D25): a link to ANOTHER site (outside the conversation's sites). The person's consent for that is the site question the Card already asks (egdesk_browser_request_site: "Agent가 이 대화에서 … 사이트도
     // 열려고 합니다. 허용할까요?"), so the tool asks it ITSELF, in this run on this Card, instead of leaving the engine to call it (a Claude run's question stayed unanswered for its whole 55 s: nobody saw it) or
@@ -192,14 +199,17 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
       // What changed since the engine read the page is the POLICY only; the link is found again on a new observation by what it is (the same address and the same words), not by its ref (refs may be renumbered when
       // the page re-renders). Another address or other words: refused as before. A new call id each time (a call id repeated with the same arguments returns the earlier observation).
       const linkOf = snapshot => { const items = (snapshot.interactiveElements ?? []).filter(item => item.href === element.href && String(item.label ?? '') === String(element.label ?? '') && String(item.tag).toLowerCase() === 'a'); return items.find(item => item.ref === args.ref) ?? items[0] ?? null }
-      let moved = null
+      let moved = null, from = snapshot.url
       for (const attempt of [1, 2]) {
         const fresh = await observe(run, event, cardId, `siteobs${attempt}`)
+        from = fresh.snapshot?.url ?? from
         if (fresh.error) return respond(true, { status: 'refused', code: fresh.error })
         if (!linkOf(fresh.snapshot)) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
         moved = await call(run, event, 'egdesk_browser_navigate', { cardId, observationId: fresh.observationId, expectedRevision: fresh.snapshot.revision, url: element.href, postcondition: { kind: 'url', value: element.href } }, `sitepress${attempt}`)
         if (moved.ok || moved.data?.error?.code !== 'BROWSER_OBSERVATION_STALE') break // one more new observation when the page moved under the first
       }
+      const outcome = await landed(run, event, cardId, moved, { expected: element.href, from })
+      if (outcome) return landedPress(run, cardId, { status: 'pressed', via: 'site', cardId, label }, outcome)
       return result(moved, { status: 'pressed', via: 'site', cardId, label }, run, cardId)
     }
     const expectText = short(args.expectText, 200)
@@ -212,8 +222,20 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const tool = link ? 'egdesk_browser_navigate' : 'egdesk_browser_click'
     const args2 = link ? { ...base, url: element.href, postcondition: { kind: 'url', value: element.href } } : { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), postcondition: { kind: 'visible-text', value: expectText } }
     const done = await call(run, event, tool, args2, 'press')
+    const outcome = link ? await landed(run, event, cardId, done, { expected: element.href, from: snapshot.url }) : null
+    if (outcome) return landedPress(run, cardId, { status: 'pressed', via: 'approved', cardId, label }, outcome)
     return result(done, { status: 'pressed', via: 'approved', cardId, label }, run, cardId)
   }
+
+  // a1 (Main 16:55, D33; L6's DuckDuckGo reading): a navigation whose url postcondition read a failure while the page did move (a redirect, parameters the site adds). The page that
+  // loaded decides, by the loop's own rule (navigationLanded): -> 'navigation-observed' | 'form-result-observed', or null (the failure stands).
+  async function landed(run, event, cardId, done, { expected, from, submitted = false }) {
+    if (done?.ok || typeof expected !== 'string' || !expected) return null
+    const fresh = await observe(run, event, cardId, 'landed')
+    if (fresh.error) return null
+    return navigationLanded({ actual: fresh.snapshot.url, expected, from, submitted }) ? (submitted ? 'form-result-observed' : 'navigation-observed') : null
+  }
+  const landedPress = (run, cardId, body, outcome) => { last.delete(`${run?.runId ?? run?.answerId}/${cardId}`); return respond(true, { ...body, outcome, next: 'read_again', forYouOnly: INTERNAL_NOTE }) }
 
   function result(done, body, run, cardId) {
     last.delete(`${run?.runId ?? run?.answerId}/${cardId}`) // the page may have changed: the next action observes again
@@ -234,10 +256,21 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     return respond(true, { status: 'opened', cardId: done.data?.cardId ?? null, host: parsed.host.toLowerCase(), next: 'read' })
   }
 
+  // a1: the task tool's guidance opens a link to another site through this tool's own press (its site question, u9 D25), never a path of its own: the link is found on a FRESH
+  // observation of this provider (so the press reads the same refs), by its exact address
+  const pressLink = async (run, event, { cardId, href } = {}) => {
+    if (typeof cardId !== 'string' || typeof href !== 'string' || !href) return refused('PAGE_REF_REQUIRED')
+    const fresh = await observe(run, event, cardId, 'taskobs')
+    if (fresh.error) return respond(true, { status: 'refused', code: fresh.error })
+    const element = (fresh.snapshot.interactiveElements ?? []).find(item => typeof item?.ref === 'string' && item.href === href && String(item.tag).toLowerCase() === 'a')
+    if (!element) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
+    return act(run, event, { cardId, ref: element.ref }, 'press')
+  }
+  try { taskTool?.usePagePress?.(pressLink) } catch { /* the task tool then offers no link to another site */ }
   return {
     providerId: PAGE_TOOLS_PROVIDER_ID,
     runtime: null,
-    specs() { return on() ? PAGE_TOOL_SPECS : [] },
+    specs() { return on() ? (taskTool?.spec ? [...PAGE_TOOL_SPECS, taskTool.spec] : PAGE_TOOL_SPECS) : [] },
     dispatch(run, event) {
       const key = `${run?.answerId ?? run?.runId ?? ''}/${event?.callId ?? ''}`
       if (event?.callId && calls.has(key)) return calls.get(key)
@@ -247,6 +280,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     },
     async handle(run, event) {
       const name = event?.tool
+      if (!event?.namespace && taskTool?.spec && name === taskTool.spec.name) return on() ? taskTool.handle(run, event) : refused('PAGE_TOOLS_OFF') // a1
       if (event?.namespace || !Object.values(PAGE_TOOL_NAMES).includes(name)) return refused('PAGE_TOOL_UNKNOWN')
       if (!on()) return refused('PAGE_TOOLS_OFF')
       const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
@@ -261,7 +295,8 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
 // The page tool needs exactly what its Browser equivalent needs: read = observe (a Card granted to observe or interact), press = click, type = fill, open = open_card (a Card granted to interact).
 // The runtime asks these functions instead of knowing the page tools; the Browser provider checks again for every action it is asked to do.
 export const PAGE_BROWSER_EQUIVALENT = Object.freeze({ [PAGE_TOOL_NAMES.read]: 'egdesk_browser_observe', [PAGE_TOOL_NAMES.press]: 'egdesk_browser_click', [PAGE_TOOL_NAMES.type]: 'egdesk_browser_fill', [PAGE_TOOL_NAMES.open]: 'egdesk_browser_open_card' })
-export const pageToolBrowserEquivalent = name => PAGE_BROWSER_EQUIVALENT[name] ?? null
+// a1: the browser task tool acts on its Card (opens links, types, runs read-only searches): it needs what egdesk_browser_navigate needs (an interact grant, an Agent ceiling that allows interaction)
+export const pageToolBrowserEquivalent = name => PAGE_BROWSER_EQUIVALENT[name] ?? (name === BROWSER_TASK_TOOL_NAME ? 'egdesk_browser_navigate' : null)
 /** { tool: <the Browser tool it needs>, cardId } for a page tool call (the Card it names, else the first interact Card, else the first Card), null for any other tool. */
 export function pageToolGate(run, event) {
   if (event?.namespace) return null

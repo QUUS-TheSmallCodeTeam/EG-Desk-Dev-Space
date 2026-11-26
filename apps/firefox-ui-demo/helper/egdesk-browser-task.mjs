@@ -5,6 +5,7 @@ import { hostOf, hrefIdentifiers, identifiersOf, labelKey, outcomeCandidate, pri
 import { decideOpenItem, settledNote } from './egdesk-browser-open-items.mjs'
 import { choiceContextLine } from './egdesk-browser-choice-reply.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
+import { candidateSpans, pickFieldText } from './egdesk-browser-field-text.mjs'
 
 // Direct chat -> objective browser entry (L8 cycle 6; DECISION_MODEL_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
 //
@@ -403,6 +404,26 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
   }
 }
 
+// a1 ('교대' round): the step event contract. One event per page action of a browser task (the direct entry's loop and the task tool alike); lane L1 draws
+// it, lane L5 carries it through the runtime. Closed words, the element's own short name and the NAME of a typed value only: never the text typed, an
+// address or page text. by: 'decision' (the objective loop decided the step) | 'model' (the conversation model chose it, the task tool's guidance).
+// status: only on the task tool's last event of a call (op 'end'). A wait is part of the step before it: no event of its own.
+export const STEP_EVENT_OPS = Object.freeze(['open', 'submit', 'press', 'fill', 'scroll', 'end'])
+const EVENT_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
+export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision', status = null } = {}) {
+  if (!task || !info || typeof info !== 'object') return null
+  const end = info.op === 'end'
+  if (!end && typeof info.action !== 'string' && typeof info.failed !== 'string') return null
+  if (!STEP_EVENT_OPS.includes(info.op)) return null
+  const ms = Number.isFinite(info.stepMs) ? info.stepMs : Number.isFinite(info.ms) ? info.ms : null
+  return Object.freeze({ taskId: task.taskId, cardId: cardId ?? task.cardId ?? null, seq: Number.isSafeInteger(seq) ? seq : 0, op: info.op,
+    target: typeof info.target === 'string' && info.target ? compactText(info.target, 40) : null,
+    valueName: typeof info.valueName === 'string' && info.valueName ? compactText(info.valueName.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) || null : null, // a field's own option value as the name ('[F1] 검색') reads as its label
+    ok: info.ok === true, ms: ms === null ? null : Math.max(0, Math.round(ms)), by: by === 'model' ? 'model' : 'decision',
+    ...(typeof info.code === 'string' && EVENT_CODE.test(info.code) ? { code: info.code } : {}),
+    ...(typeof status === 'string' && EVENT_CODE.test(status) ? { status } : {}) })
+}
+
 const CANNOT = new Set(['blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_rejected'])
 const PUBLIC_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
 const tally = (task, result) => {
@@ -507,7 +528,11 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
 // pageTextInNote(): whether this run's models may receive Browser data (the run's egress gate, page_text); off by default.
 // cardTextInEntry(): whether the entry may quote what each card shows (the run's egress gate, page_text); off by default.
 // inRunChange(): whether a message that replaces the task is recognised (the in-run messages flag); off by default.
-export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false } = {}) {
+// onStepEvent(run, event) (a1, optional): each page action as the step event contract (taskStepEvent); an observer only, it never changes the task.
+// fieldText() (a1, default off; Main 16:5x, real window: the entry entered the DuckDuckGo card and stopped at its first step because nobody gave the search text): a field the loop
+// needs text for is filled with a span of the person's own message the decision model CHOOSES (egdesk-browser-field-text.mjs; none = the pause as before), the chosen text is typed
+// before the next step's choice, and a search box that announces itself as a combobox (Google's) is a text field. Off: everything as before.
+export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false, onStepEvent = null, fieldText = () => false } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -549,8 +574,35 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
     }
   }
 
+  function stepEvent(run, task, info) {
+    if (typeof onStepEvent !== 'function') return
+    try { const event = taskStepEvent(task, info, { seq: (task.eventSeq ?? 0) + 1 }); if (event) { task.eventSeq = event.seq; onStepEvent(run, event) } } catch { /* an observer never affects the task */ }
+  }
+
+  const fieldTextOn = () => { try { return fieldText() === true } catch { return false } }
+  // a1: the text for the field the step needs, chosen among the spans of the person's message (the task's goal) and what they said since. null: pause as before.
+  async function chosenText(run, task, result) {
+    const fields = Array.isArray(result.fields) ? result.fields : []
+    const field = typeof result.field === 'string' && result.field ? result.field : fields.length === 1 ? fields[0] : null
+    if (!field) return null
+    const label = typeof result.label === 'string' && result.label ? result.label : String(field).replace(/^\[[A-Z]\d+\]\s*/, '')
+    task.fieldTried ??= []
+    if (task.fieldTried.includes(label)) return null
+    task.fieldTried.push(label)
+    const spans = candidateSpans([task.goal, ...(task.userContext || []).slice(-2)])
+    if (!spans.length) return null
+    try {
+      const scope = provider.reflexScope(run, { callId: `${task.taskId}.text`, namespace: null }, task.cardId)
+      if (!scope?.client) return null
+      const picked = await pickFieldText({ client: scope.client, goal: task.goal, field: label, host: task.cardHost ?? null, spans, thresholds, timeoutMs, authorizeDispatch: scope.authorizeDispatch })
+      if (typeof scope.isDecisionCurrent === 'function' && !scope.isDecisionCurrent()) return null
+      return picked.text ? { [field]: picked.text } : null
+    } catch { return null }
+  }
+
   async function loop(run, task, hosts) {
     if (!task.cardHost && typeof hosts?.[task.cardId] === 'string') task.cardHost = hosts[task.cardId].toLowerCase() // the card's host, for the brief
+    let values = null // a1 fieldText: the chosen text, given to the next segment once (the loop keeps what is still to type in its state)
     // Segments of a few steps; the task's total budget survives pauses.
     for (;;) {
       const remaining = MAX_TASK_STEPS - task.steps
@@ -559,8 +611,10 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       task.replan = false
       const controller = new AbortController()
       task.abort = controller
+      const extra = fieldTextOn() ? { ...(values ? { values } : {}), valuesFirst: true, textComboboxes: true } : {}
+      values = null
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
-        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info), today: localDay(now()), signal: controller.signal })
+        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => { store.progress?.(task, info); stepEvent(run, task, info) }, today: localDay(now()), signal: controller.signal, ...extra })
       if (task.abort === controller) task.abort = null
       task.liveStep = 0
       recordSteps(result)
@@ -570,6 +624,13 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       // c23: whatever this segment ended with (even a pause or done) was about the OLD goal: the person changed it meanwhile, so plan again
       if (task.replan && result.outcome !== 'fallback' && task.status === 'running') continue
       if (result.outcome === 'max_steps' && result.reason !== 'step_rejected') continue
+      if (fieldTextOn() && task.status === 'running') {
+        // the step needs text for a field (or was undecided with a text field among its top two choices, nothing left to type): the span choice, then the loop goes on
+        const pendingText = Array.isArray(task.state?.pending) && task.state.pending.length > 0
+        const rankedField = result.outcome === 'escalated' && result.reason === 'uncertain' && !pendingText ? (result.ranked || []).slice(0, 2).map(row => row?.value).find(value => /^\[F\d+\]/.test(value ?? '')) : null
+        const chosen = result.outcome === 'needs_free_text' ? await chosenText(run, task, result) : rankedField ? await chosenText(run, task, { field: rankedField }) : null
+        if (chosen) { values = chosen; continue }
+      }
       return fromResult(task, result)
     }
   }
