@@ -28540,11 +28540,15 @@
     const browserToolHistory = async (expected, historyAction, guard, { allowed } = {}) => {
       assertBrowserToolBinding(expected);
       assertGuardedDocumentCurrent(guard, { compareUrl: false });
+      const offset = historyAction === 'back' ? -1 : historyAction === 'forward' ? 1 : 0;
+      const targetUrl = browserState.history[browserState.historyIndex + offset];
+      if (targetUrl && !allowed?.(targetUrl, guard.url)?.allowed) throw Object.assign(new Error('Browser history is outside the allowed sites'),
+        { browserToolActor: { dispatchPhase: 'not-dispatched' } });
       showAgentActivity(historyAction === 'reload' ? 'Agent가 새로고침' : historyAction === 'back' ? 'Agent가 뒤로 이동' : 'Agent가 앞으로 이동');
       const moved = historyAction === 'back' ? goBrowserBack() : historyAction === 'forward' ? goBrowserForward() : reloadBrowser();
       setAgentNavigationGuard({ fromUrl: guard.url, allowed });
       return { dispatchReceipt: { actor: 'chrome', inputRoute: 'chrome-history', historyAction,
-        eventDispatched: moved !== false && moved !== null, documentStillCurrent: false }, after: null, observation: null };
+        ...(targetUrl ? { targetUrl } : {}), eventDispatched: moved !== false && moved !== null, documentStillCurrent: false }, after: null, observation: null };
     };
     // BRW-05 (D-B1): the person's answer to "may this conversation also open
     // <site>?", asked on the Card the Agent works in. No answer before the
