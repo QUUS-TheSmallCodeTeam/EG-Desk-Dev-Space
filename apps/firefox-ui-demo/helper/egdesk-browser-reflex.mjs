@@ -259,9 +259,16 @@ export function contentBelow(snapshot) {
 // (the page tools' own field rule already reads any input as one; the Firefox child fills only a text-like input, isFillableControl).
 const TEXT_COMBOBOX_TAGS = new Set(['textarea', 'input'])
 const isTextCombobox = element => String(element.role || '') === 'combobox' && TEXT_COMBOBOX_TAGS.has(String(element.tag || '').toLowerCase())
+// a2 (L6c, real window 11-26 19:27 KST, the DuckDuckGo home Card): 'search' is the Firefox child's role for an <input type="search"> (roleFor), and the same word as an explicit
+// role is the ARIA search LANDMARK: DuckDuckGo wraps its real box (<textarea role="combobox" aria-label="DuckDuckGo로 검색">) in <form role="search" aria-label="DuckDuckGo로 웹 검색">,
+// which the child lists ([role] is a candidate) as role 'search', tag 'form'. Read as a text field it became [F1] beside the real [F2]; the step and the value mapping chose it,
+// the page actor refused the fill (isFillableControl: not an input, [not-editable]) twice and the task ended. A 'search' element is a field only as an <input> (a snapshot without
+// a tag keeps the old reading); the landmark is a region, neither a field nor a control.
+const isSearchLandmark = element => String(element.role || '') === 'search' && Boolean(element.tag) && String(element.tag).toLowerCase() !== 'input'
 function elementKind(element, { textComboboxes = false } = {}) {
   const role = String(element.role || '')
   if (role === 'link') return httpUrl(element.href) ? 'navigate' : 'press'
+  if (isSearchLandmark(element)) return null
   if (FIELD_ROLES.has(role)) return 'fill'
   if (textComboboxes && isTextCombobox(element)) return 'fill'
   if (PRESS_ROLES.has(role)) return 'press'
@@ -517,7 +524,11 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
   const group = sameKindCandidates(options)
   // a2 (measured, crowded DuckDuckGo-like home): an undecided step whose top choice is TYPING into a text field is not a "which of these alike elements" question; two links both
   // named "Duck.ai" turned it into one ("choice_needed: Duck.ai / Duck.ai"). It stays undecided (the callers that fill a field with the person's words take it from there).
-  const typing = options.some(option => option.item?.kind === 'fill' && option.value === next.ranked?.[0]?.value)
+  // L6c (Main 19:45, the real DuckDuckGo home replayed on the real model: needs_free_text 0.43 on top, then the fields): needs_free_text on top of a page that HAS a text field is
+  // the same typing step (the next step needs text for a field), not a question about two alike links ("Mac용 DuckDuckGo 다운로드" twice); it stays undecided too. A page with no
+  // text field is asked as before.
+  const typing = options.some(option => option.item?.kind === 'fill' && option.value === next.ranked?.[0]?.value) ||
+    (next.ranked?.[0]?.value === 'needs_free_text' && options.some(option => option.item?.kind === 'fill'))
   if (next.state !== 'accepted') return next.value === 'needs_user_context' || (group.length >= 2 && !typing) ? { kind: 'user_context', candidates: group, ...out } : { kind: 'uncertain', ...out }
   if (next.value === 'scroll_more') return { kind: 'scroll', ...out }
   if (next.value === 'needs_free_text') return { kind: 'free_text', ...out }
@@ -640,6 +651,10 @@ const PUBLIC_CODE = /^[A-Z][A-Z0-9_]{2,63}$/
 // L6 a1b: a fill the Card refused as not sent while the page stayed the same document (its element, revision, viewport or focus moved, or the helper's copy was not
 // the latest): decided once more on a new observation. A replaced document, an unnamed refusal and every other one end the task as before.
 const SAME_DOCUMENT_NOT_SENT = new Set(['target', 'revision', 'viewport', 'focus', 'observation'])
+// L6c a2: the element a refused fill named as not editable (the page actor's isFillableControl: [not-editable], the provider's targetBy) is not a text field for the rest of
+// the task on that document: the re-decision (the same once-per-value rule) never offers it again, whatever the candidate rule read it as. Its key: document and ref
+// (the child's refs are per document).
+const fieldKey = (snapshot, ref) => `${(typeof snapshot?.documentId === 'string' && snapshot.documentId) || Number.isSafeInteger(snapshot?.documentId) ? `d:${snapshot.documentId}` : `u:${snapshot?.url ?? ''}`}|${ref}`
 const failure = error => (error instanceof DecisionError ? error.code : 'unreachable')
 
 // a1 (the task tool, egdesk-browser-task-tool.mjs): what one page action of the loop was, for the step observer. Closed words and the element's own short
@@ -673,6 +688,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   const assigned = new Map(arr(seed.assigned)) // value name → frozen field and observation scope
   const attemptedRefs = new Set(arr(seed.attemptedRefs))
   const unmatched = new Set(arr(seed.unmatched))
+  const notEditable = new Set(arr(seed.notEditable).filter(key => typeof key === 'string')) // L6c a2: fields the page actor refused as not editable (fieldKey)
   // a1: values the caller gives when it resumes the task (the task tool's needs_value answer) join the pending ones. A name already typed (its field was
   // tried) is never typed again; any other name given again is matched again on the page as it is now.
   if (resumeState) {
@@ -691,7 +707,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   let lastFailure = null
   const typedTexts = [] // a2: the texts this run typed (typedSearch below)
   const finish = (outcome, extra = {}) => ({ outcome, steps, decisions: steps.filter(step => step.decision).length,
-    state: { pending: [...pending], assigned: [...assigned], attemptedRefs: [...attemptedRefs], unmatched: [...unmatched], history: history.slice(-8) },
+    state: { pending: [...pending], assigned: [...assigned], attemptedRefs: [...attemptedRefs], unmatched: [...unmatched], history: history.slice(-8), ...(notEditable.size ? { notEditable: [...notEditable] } : {}) },
     ...(unmatched.size ? { unmatchedValues: [...unmatched] } : {}), ...extra })
 
   // One tool call; two consecutive failures with the same code stop the loop.
@@ -724,7 +740,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       tell({ step: entry.step, failed: tool, ok: false, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...(PUBLIC_CODE.test(code) ? { code } : {}), ...described(tool, meta) })
       const repeated = lastFailure === code
       lastFailure = code
-      return { ok: false, code, repeated, ...(typeof error?.staleBy === 'string' ? { staleBy: error.staleBy } : {}) }
+      return { ok: false, code, repeated, ...(typeof error?.staleBy === 'string' ? { staleBy: error.staleBy } : {}), ...(typeof error?.targetBy === 'string' ? { targetBy: error.targetBy } : {}) }
     }
   }
 
@@ -803,6 +819,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
           // is NOT sent again on another one: the value's binding is dropped (still pending, its field untried), so the next step reads the page again and decides
           // where it goes anew. Once per value: a second refusal ends the task as before. A replaced document (or an unnamed refusal) ends it at once, as before.
           staleRetried.add(ready); attemptedRefs.delete(action.args.ref); assigned.delete(ready); unmatched.delete(ready)
+          // L6c a2 (real window 19:27: the same element refused twice as [not-editable]): the re-decision is among the OTHER fields; this one is out for the task
+          if (done.targetBy === 'not-editable') { notEditable.add(fieldKey(snapshot, action.args.ref)); entry.notEditable = true }
           for (const tried of [...triedHere]) if (tried.startsWith(`${ready}|`)) triedHere.delete(tried)
           return { retry: true }
         }
@@ -830,7 +848,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     steps.push(entry)
     const seen = pageText === false ? withoutPageText(snapshot) : snapshot // a1: what the step's judgments read (the page's own text only when it may be sent)
     // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
-    const { options, excluded, personOnly, withheld, offSite } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    const built = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    const { excluded, personOnly, withheld, offSite } = built
+    // L6c a2: a field the page actor refused as not editable on this document is no option of this task any more (its label stays as numbered)
+    const options = notEditable.size ? built.options.filter(option => !(option.item.kind === 'fill' && notEditable.has(fieldKey(snapshot, option.item.element.ref)))) : built.options
     try { onPage?.({ step, title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOfUrl(snapshot.url), offSite: offSite.map(link => ({ label: compactText(link.label, 60), href: link.href })) }) } catch { /* an observer never affects the loop */ }
     entry.excluded = excluded
     // Code rule (R3/R5): nothing on this page may be chosen and something was withheld as the person's own control (submit, payment,
@@ -887,7 +908,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     // stopped one press short. Code rule: an undecided step whose TOP choice is a read-only GET search (readOnlyPress proved it) that submits, as one of its parameters, exactly a
     // text this run typed, is that search. Nothing else is widened: not a second choice, not a POST, not a link, not on a page that is not ordinary content (an undecided page state
     // never reaches 'uncertain'), and the step's own answer stays recorded as it was (entry.rule says the rule took it).
-    if (decision.kind === 'uncertain' && typedTexts.length) {
+    // L6c: the same holds when code turned that undecided step into the c16 "which of these alike elements" question (the model did not choose needs_user_context; the
+    // real DuckDuckGo home holds two alike download links): the question was about other elements, the top choice is the proven search of the text just typed.
+    const alikeAsk = decision.kind === 'user_context' && decision.next?.state !== 'accepted' && decision.next?.value !== 'needs_user_context'
+    if ((decision.kind === 'uncertain' || alikeAsk) && typedTexts.length) {
       const top = options.find(option => option.value === decision.ranked?.[0]?.value)
       if (top && typedSearch(top, typedTexts)) { decision = { ...decision, kind: 'act', option: top }; entry.rule = 'typed_search' }
     }
