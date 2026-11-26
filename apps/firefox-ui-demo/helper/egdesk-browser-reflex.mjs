@@ -2,7 +2,7 @@ import { requestedMotion, runRequestedMotion, isHistory } from './egdesk-browser
 import { undecidedField } from './egdesk-browser-field-text.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded } from './egdesk-browser-url-policy.mjs'
-import { NAMED_CHANGE, sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
+import { isBrowserUserHold, NAMED_CHANGE, sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { labelKey, priorFacts, recordedChoice, safePath as safePathOf } from './egdesk-browser-task-memory.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
@@ -764,7 +764,6 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
   // default, and an expired deadline aborts the socket, so the next call is cold again): give it the
   // foreground deadline once; later decisions of the run reuse the warm connection and the default.
   let warmed = false
-  const userHeld = error => error?.code === 'BROWSER_OBSERVATION_STALE' && error.staleBy === 'user-hold'
   const heldResult = () => finish('escalated', { reason: 'human_step', staleBy: 'user-hold' })
   let lastFailure = null
   const typedTexts = arr(seed.typedTexts).slice(-MAX_VALUES) // a2: the texts this run typed (typedSearch below)
@@ -792,9 +791,13 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
       return { ok: true, result }
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'TOOL_FAILED'
-      if (userHeld(error)) return { ok: false, held: true }
+      if (isBrowserUserHold(error)) return { ok: false, held: true }
       // a1: a navigation whose address the site changed (a redirect, added parameters): the page that loaded proves it (navigationLanded on a fresh observation); then it is done
-      if (typeof meta.landed === 'function' && await meta.landed().catch(() => false) === true) {
+      let landed = false
+      if (typeof meta.landed === 'function') {
+        try { landed = await meta.landed() } catch (readError) { if (isBrowserUserHold(readError)) return { ok: false, held: true } }
+      }
+      if (landed === true) {
         entry.actions.push({ tool, ok: true, status: meta.landedStatus ?? 'navigation-observed' })
         tell({ step: entry.step, action: tool, ok: true, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...described(tool, meta) })
         lastFailure = null
@@ -911,7 +914,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     observe(step, null)
     let observed
     try { observed = await callTool('egdesk_browser_observe', { cardId }) }
-    catch (error) { return userHeld(error) ? heldResult() : finish('escalated', { reason: 'observe_failed', code: typeof error?.code === 'string' ? error.code : null }) }
+    catch (error) { return isBrowserUserHold(error) ? heldResult() : finish('escalated', { reason: 'observe_failed', code: typeof error?.code === 'string' ? error.code : null }) }
     if (signal?.aborted) return finish('aborted')
     const snapshot = observed?.snapshot
     const observationId = observed?.observationId
@@ -1096,10 +1099,10 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
           // The existing Card question owns the 55s deadline and the conversation grant. Nothing is dispatched while it is pending.
           let answer, fresh
           try { answer = await callTool('egdesk_browser_request_site', { cardId, site: hostOfUrl(option.item.element.href) }) }
-          catch (error) { return finish('escalated', { reason: 'tool_failed', code: PUBLIC_CODE.test(error?.code) ? error.code : 'TOOL_FAILED' }) }
+          catch (error) { return isBrowserUserHold(error) ? heldResult() : finish('escalated', { reason: 'tool_failed', code: PUBLIC_CODE.test(error?.code) ? error.code : 'TOOL_FAILED' }) }
           if (signal?.aborted) return finish('aborted')
           if (answer?.status !== 'site-allowed') return finish('escalated', { reason: answer?.status === 'site-pending' ? 'site_pending' : 'site_not_allowed' })
-          try { fresh = await callTool('egdesk_browser_observe', { cardId }) } catch { return finish('escalated', { reason: 'observe_failed' }) }
+          try { fresh = await callTool('egdesk_browser_observe', { cardId }) } catch (error) { return isBrowserUserHold(error) ? heldResult() : finish('escalated', { reason: 'observe_failed' }) }
           if (signal?.aborted) return finish('aborted')
           if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
           const now = fresh?.snapshot, el = option.item.element
@@ -1119,7 +1122,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
         const submitted = option.item.readOnly?.kind === 'get_form'
         const expectedUrl = action.tool === 'egdesk_browser_navigate' ? action.args.url : null
         const landed = expectedUrl ? async () => {
-          try { await callTool('egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 5000 }) } catch { /* observe the page as it is */ }
+          try { await callTool('egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 5000 }) } catch (error) { if (isBrowserUserHold(error)) throw error }
           const seen = await callTool('egdesk_browser_observe', { cardId })
           return navigationLanded({ actual: seen?.snapshot?.url, expected: expectedUrl, from: snapshot.url, submitted })
         } : null
@@ -1146,7 +1149,8 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
         entry.opened = { option: option.value, to: action.args.url ?? action.url, ...(recorded && decision.next?.by === 'code' ? { recordedAsked: recorded.item.asked } : {}) } // for the caller's content-minimal task record
         if (signal?.aborted) return finish('aborted')
         // a view change loads nothing: wait for the page to settle instead of a load
-        await act(entry, 'egdesk_browser_wait', option.item.readOnly?.kind === 'view' ? { cardId, for: 'idle', timeoutMs: 5000 } : { cardId, for: 'load', timeoutMs: 10000 })
+        const waited = await act(entry, 'egdesk_browser_wait', option.item.readOnly?.kind === 'view' ? { cardId, for: 'idle', timeoutMs: 5000 } : { cardId, for: 'load', timeoutMs: 10000 })
+        if (waited.held) return heldResult()
       }
     }
   }
@@ -1166,6 +1170,7 @@ export function reflexResultForModel(result) {
   for (const key of ['outcome', 'reason', 'code', 'url', 'observationId', 'pageState', 'field', 'label', 'fields', 'suggestion', 'ranked', 'candidates', 'unmatchedValues', 'withheld', 'controls']) {
     if (result[key] !== undefined && result[key] !== null) pick[key] = result[key]
   }
+  if (result.staleBy === 'user-hold') pick.staleBy = 'user-hold'
   pick.steps = Array.isArray(result.steps) ? result.steps.length : 0
   pick.decisions = Number.isSafeInteger(result.decisions) ? result.decisions : 0
   return JSON.stringify(pick)

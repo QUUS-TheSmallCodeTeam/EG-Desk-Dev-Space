@@ -868,9 +868,9 @@ export class CodexChatRuntime {
         slot = this.threadOperationSlot(pending.run.conversationId)
         this.dynamicRequestProviders.delete(id)
         if (result.success === false) {
-          let rawCode = null
-          try { rawCode = JSON.parse(result.contentItems[0]?.text)?.error?.code } catch {}
-          const failure = classifyPublicToolError({ code: rawCode }, { browser: pending.provider?.providerId === 'egdesk-browser', context: pending.provider === this.contexts })
+          let rawError = null
+          try { rawError = JSON.parse(result.contentItems[0]?.text)?.error } catch {}
+          const failure = classifyPublicToolError({ code: rawError?.code, staleBy: rawError?.staleBy }, { browser: pending.provider?.providerId === 'egdesk-browser', context: pending.provider === this.contexts })
           result = { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
         }
       }

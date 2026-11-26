@@ -159,6 +159,10 @@ export function targetReasonOf(text) {
   const word = /Browser (?:target (?:changed|is unavailable|is not an editable field)|action requires an observed element reference) \[([a-z-]{1,24})\]/.exec(typeof text === 'string' ? text.slice(0, 600) : '')?.[1]
   return word && BROWSER_TARGET_REASONS.includes(word) ? word : null
 }
+export const isBrowserUserHold = error => error?.code === 'BROWSER_OBSERVATION_STALE' && error.staleBy === 'user-hold'
+function userHoldError() {
+  return Object.assign(new Error('The person took control of this Browser Card'), { code: 'BROWSER_OBSERVATION_STALE', staleBy: 'user-hold' })
+}
 export function staleReasonOf(text) {
   const message = typeof text === 'string' ? text.slice(0, 600) : ''
   const named = /\bstale \[([a-z-]{1,24})\]/.exec(message)?.[1]
@@ -552,6 +556,15 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
       if (!record(response) || response.requestId !== requestId) reject('BROWSER_UI_PROTOCOL', 'Browser UI response does not match this request')
       if (JSON.stringify(response).length > 180000) reject('BROWSER_UI_PROTOCOL', 'Browser UI response exceeded the bounded limit')
       Object.assign(trace, uiTiming(response.timing))
+      // BRW-13 revokes this run's grant. Remember the refusal only on that binding's Card;
+      // a later grant uses a new binding. Never reinterpret an uncertain physical action.
+      if (payload.kind !== 'bind' && payload.kind !== 'cancel' && payload.kind !== 'reconcile' &&
+          response.status === 'rejected' && staleReasonOf(response.error) === 'user-hold' &&
+          (payload.kind !== 'act' || (provenNotDispatched(response) && !response.dialog))) {
+        const card = binding?.cards.get(payload.cardId)
+        if (card) card.userHeld = true
+        if (payload.kind !== 'act') throw userHoldError() // act keeps its existing dispatch proof below
+      }
       return response
     } catch (error) {
       // A timeout is neither "no effect" nor "cancelled" (REA T-03); it only
@@ -823,6 +836,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
     const card = binding.cards.get(args.cardId)
     if (!card) reject('BROWSER_CARD_NOT_SELECTED', 'Browser Card was not selected for this run')
+    if (card.userHeld) throw userHoldError()
     if (card.busy) reject('BROWSER_CARD_BUSY', 'Wait for the current Browser request to finish')
     if (!READ_TOOLS.has(tool) && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
     if (tool === 'egdesk_browser_observe') {

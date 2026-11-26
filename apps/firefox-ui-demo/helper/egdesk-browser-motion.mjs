@@ -1,3 +1,4 @@
+import { isBrowserUserHold } from './egdesk-browser-tool-runtime.mjs'
 // Whole requests only: never turn a quoted example, a negation or one part of a longer task into a completed motion.
 export function requestedMotion(goal) {
   const text = String(goal ?? '').normalize('NFKC').trim().toLowerCase().replace(/[.!]+$/u, '').trim()
@@ -27,6 +28,7 @@ export async function runRequestedMotion({ motion, observed, cardId, callTool, a
     const args = { cardId, observationId: before.observationId, expectedRevision: before.snapshot.revision }
     const moved = isHistory(motion) ? await act(entry, 'egdesk_browser_history', { ...args, action: motion }, { op: 'open' })
       : await act(entry, 'egdesk_browser_scroll', { ...args, direction: motion, amount: 'page' })
+    if (moved.held) return finish('escalated', { reason: 'human_step', staleBy: 'user-hold' })
     if (!moved.ok) return finish('escalated', { reason: 'tool_failed', code: moved.code })
     const target = moved.result?.dispatchReceipt?.targetUrl
     if (isHistory(motion) && (moved.result?.status !== 'history-dispatched' || !target)) return unverified()
@@ -40,7 +42,7 @@ export async function runRequestedMotion({ motion, observed, cardId, callTool, a
         await new Promise(resolve => setTimeout(resolve, delay))
         fresh = await callTool('egdesk_browser_observe', { cardId })
       }
-    } catch { return finish('escalated', { reason: 'observe_failed' }) }
+    } catch (error) { return finish('escalated', isBrowserUserHold(error) ? { reason: 'human_step', staleBy: 'user-hold' } : { reason: 'observe_failed' }) }
     if (!fresh?.snapshot || !fresh.observationId || fresh.observationId === before.observationId) return unverified()
     const now = fresh.snapshot
     if (isHistory(motion)) return now.url === target && (now.url !== snapshot.url || now.documentId !== snapshot.documentId) ? complete(fresh) : unverified()
