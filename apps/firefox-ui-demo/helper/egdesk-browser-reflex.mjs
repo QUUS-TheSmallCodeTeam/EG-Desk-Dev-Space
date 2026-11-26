@@ -348,6 +348,24 @@ export function reflexActionArgs(option, { cardId, observationId, snapshot, text
   return { escalate: 'press_needs_expected_effect' }
 }
 
+// a1 (owner 2026-11-26 16:00, as Main recorded it: the decision model may receive the names and values of a page's controls on every site, not its body text): the
+// snapshot the step's judgments read when page text is withheld. Its text is the page title and the controls (role and name, a field's current value), never a line of
+// the page body; a value that looks like a credential is never listed. Options, fields and the finished page's text for the caller's code still come from the real snapshot.
+const CONTROL_WORD = Object.freeze({ link: 'link', button: 'button', textbox: 'text field', searchbox: 'search field', search: 'search field', email: 'text field', number: 'number field', combobox: 'list or field', tab: 'tab', checkbox: 'check box', radio: 'option', switch: 'switch', select: 'list', listbox: 'list', slider: 'slider', menuitem: 'menu item', option: 'option' })
+export const MAX_CONTROL_LINES = 40
+export function withoutPageText(snapshot) {
+  const lines = [`Page title: "${compactText(typeof snapshot?.title === 'string' ? snapshot.title : '', 120).replace(/"/g, "'")}" (the page's own text is not sent; its controls are listed instead)`]
+  for (const element of (Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []).slice(0, MAX_CONTROL_LINES)) {
+    if (!record(element)) continue
+    const label = compactText(element.label, 60)
+    if (!label) continue
+    const role = String(element.role ?? '')
+    const value = role !== 'password' && !SENSITIVE_LABEL.test(label) && typeof element.value === 'string' && element.value && element.value !== element.label ? compactText(element.value, 30) : ''
+    lines.push(`${CONTROL_WORD[role] ?? 'control'}: ${label}${value ? ` (now "${value.replace(/"/g, "'")}")` : ''}${element.disabled === true ? ' (disabled)' : ''}`)
+  }
+  return { ...snapshot, text: lines }
+}
+
 function visibleText(snapshot) {
   const parts = Array.isArray(snapshot?.text) ? snapshot.text : []
   let used = 0
@@ -545,7 +563,7 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
-  textComboboxes = false, onPage = null, valuesFirst = false } = {}) {
+  textComboboxes = false, onPage = null, valuesFirst = false, pageText = true } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -639,7 +657,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         if (named.length) {
           try {
             const available = fields.filter(option => !reserved.has(fieldRef(option)))
-            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch, ...(firstPass ? { pageState: true } : {}) })
+            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot: pageText === false ? withoutPageText(snapshot) : snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch, ...(firstPass ? { pageState: true } : {}) })
             if (signal?.aborted) return { result: finish('aborted') }
             if (isDecisionCurrent && !isDecisionCurrent()) return { result: finish('fallback', { reason: 'evidence_unavailable' }) }
             entry.mapping = { assigned: Object.fromEntries(mapping.assigned), unmatched: mapping.unmatched, usage: mapping.usage }
@@ -696,6 +714,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     }
     const entry = { step, observationId, revision: snapshot.revision, url: snapshot.url, actions: [] }
     steps.push(entry)
+    const seen = pageText === false ? withoutPageText(snapshot) : snapshot // a1: what the step's judgments read (the page's own text only when it may be sent)
     // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
     const { options, excluded, personOnly, withheld, offSite } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
     try { onPage?.({ step, title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOfUrl(snapshot.url), offSite: offSite.map(link => ({ label: compactText(link.label, 60), href: link.href })) }) } catch { /* an observer never affects the loop */ }
@@ -734,8 +753,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     let decision
     try {
       if (recorded) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
-      decision = recorded ? await decideRecordedStep({ goal, snapshot, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ goal, snapshot, options, history, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+      decision = recorded ? await decideRecordedStep({ goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
+        : await decideReflexStep({ goal, snapshot: seen, options, history, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
@@ -755,7 +774,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       let check = null
       // c36: the targets are the controls withheld as the person's own, buttons included (page order, at most three), not only those with no action
       const personTargets = withheld.map(control => personOnly.find(item => item.label === control.label) ?? { label: control.label, role: control.role, value: '' })
-      try { check = await decidePersonTarget({ goal, snapshot, personOnly: personTargets, today, client, thresholds, timeoutMs: timeoutMs ?? undefined, signal, authorizeDispatch }) }
+      try { check = await decidePersonTarget({ goal, snapshot: seen, personOnly: personTargets, today, client, thresholds, timeoutMs: timeoutMs ?? undefined, signal, authorizeDispatch }) }
       catch { check = null } // a failed follow-up leaves the first decision as it was; nothing is concluded on a guess
       if (signal?.aborted) return finish('aborted')
       if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })

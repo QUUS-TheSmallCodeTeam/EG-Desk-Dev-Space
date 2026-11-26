@@ -22,6 +22,7 @@ import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-
 export const BROWSER_TASK_TOOL_NAME = 'egdesk_browser_task' // provisional: the owner names model-facing tools; change it here only
 export const BROWSER_TASK_TOOL_FLAG = 'EGDESK_BROWSER_TASK_TOOL'
 export const browserTaskToolEnabled = env => env?.[BROWSER_TASK_TOOL_FLAG] === 'on'
+export const BROWSER_TASK_PAGE_TEXT_FLAG = 'EGDESK_BROWSER_TASK_PAGE_TEXT' // on: the loop's judgments may read the page's own text (default: names and values of controls only)
 export const BROWSER_TASK_STATUSES = Object.freeze(['done', 'needs_value', 'needs_guidance', 'human_step', 'cannot'])
 export const BROWSER_TASK_LIMITS = Object.freeze({ goal: 500, values: 20, valueName: 80, valueChars: 500, choose: 40, cardId: 160, options: 6, optionLabel: 60, spans: 60, spanWords: 6, message: 600, segment: 6 })
 export const BROWSER_TASK_NOTE = 'Not for the person: status, code, op and the other fields are EG-Desk\'s own markings. Say what happened in everyday words.'
@@ -189,7 +190,9 @@ export function outcomeBody(task, result, { outside = [] } = {}) {
  *   onStep(run, event): each page action as the step event contract (an observer: it never changes the task)
  * One task per conversation (the store's create cancels an older one); a call without goal continues the conversation's open task.
  */
-export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(), now = Date.now, clock = Date.now, messageOf = null, onStep = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, maxSteps = MAX_TASK_STEPS } = {}) {
+// pageText (default false): whether the loop's judgments may read the page's own text. Off (Main's brief of the owner's 16:00 answer: control names and values on every site, no body
+// text): they read the title and the controls instead (withoutPageText). On: the page text as the direct entry sends it (the run's page_text gate decides as always).
+export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(), now = Date.now, clock = Date.now, messageOf = null, onStep = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, maxSteps = MAX_TASK_STEPS, pageText = false } = {}) {
   if (!browser || typeof browser.runDirectTask !== 'function' || typeof browser.reflexScope !== 'function') throw new TypeError('the task tool needs the Browser provider (runDirectTask, reflexScope)')
   const t = decisionThresholds(thresholds)
   const busy = new Set()
@@ -298,7 +301,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }
       const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState: task.state,
-        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true })
+        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, ...(pageText === true ? {} : { pageText: false }) })
       values = {}
       task.state = record(out?.state) ? out.state : task.state
       task.steps += Array.isArray(out?.steps) ? out.steps.length : 0
