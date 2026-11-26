@@ -24,7 +24,7 @@ function world({ allow = true, observe = 'ok', cards = [{ cardId: 'card', permis
 }
 const sha = text => createHash('sha256').update(text).digest('hex')
 
-test('off (the default, or the run may not receive page text): the entry body is the real one, byte for byte, and no card is observed', async () => {
+test('off (the default, or the run may not receive page text): the entry body is the real one, byte for byte, and no page body is sent', async () => {
   const w = world({ allow: false })
   await w.say(MSG)
   // c27/c29: the request predicate's evidence lists the open pages, its question says what counts, and a second single-condition predicate asks whether the request
@@ -34,7 +34,7 @@ test('off (the default, or the run may not receive page text): the entry body is
   assert.deepEqual(body.questions.slice(0, 2).map(q => [q.name, q.instructions]), [['browser_entry', ENTRY_WEB_ASK], ['browser_entry_answer', ENTRY_ANSWER_ASK]])
   const c21 = { ...body, input: [body.input[0], { ...body.input[1], content: 'User message: 마케팅 알림 꺼줘' }], questions: [{ ...body.questions[0], instructions: 'Is this request something to do in a web page rather than an answer?' }, body.questions[2]] }
   assert.equal(sha(JSON.stringify(c21)).slice(0, 12), '6b1eb94ef39b', 'the real c21 body, byte for byte, without the two c27 changes')
-  assert.deepEqual(w.observed, [])
+  assert.deepEqual(w.observed, [['egdesk_browser_observe', 'card', 'card']])
 })
 
 test('on: one observation per card (a read, no Decision request); the card predicate quotes its first three lines, each on its own', async () => {
@@ -85,11 +85,11 @@ import { pageTextFor } from './egdesk-page-text.fixture.mjs'
 pageTextFor(["on: one observation per card (a read, no Decision request); ","ride-along, on: one observation per card, the same quoting a","through the entry: the follow-up enters an error page and th","c27: the request predicate sees the open pages (title, site,"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 const RIDE_CARDS = [{ cardId: 'card', host: 'account.example.test', title: '알림 설정 | 계정' }]
 const rideProvider = (calls = []) => ({ reflexScope: (_run, _call, cardId) => ({ callTool: async (name, args) => { calls.push([name, args.cardId, cardId]); return { observationId: 'o', snapshot: { text: SHOWS } } } }) })
-test('ride-along, off (the run may not receive page text): the questions are the c21 ones byte for byte and no card is observed', async () => {
+test('ride-along, off (the run may not receive page text): the questions are the c21 ones byte for byte and no body is sent', async () => {
   const calls = []
   const ride = await rideAlongEntry({ provider: rideProvider(calls), run: {}, message: MSG, cards: RIDE_CARDS, cardText: false })
   assert.equal(JSON.stringify(ride.questions), JSON.stringify(entryQuestions(RIDE_CARDS)))
-  assert.deepEqual([ride.codeCard, calls], [null, []])
+  assert.deepEqual([ride.codeCard, calls], [null, [['egdesk_browser_observe', 'card', 'card']]])
 })
 test('ride-along, on: one observation per card, the same quoting as the standalone entry, the same fallback, nothing when code named the card', async () => {
   const calls = []
@@ -207,4 +207,23 @@ test('c28: the ride-along host appends the entry evidence after the message (tri
   const base = JSON.parse(bodies[0]), withEvidence = JSON.parse(bodies[3])
   assert.deepEqual(withEvidence.slice(0, base.length), base, 'everything before is unchanged')
   assert.deepEqual(withEvidence.slice(base.length), [{ role: 'user', content: evidence }], 'one extra user item, after the message')
+})
+
+test('one unnamed card: both entry paths use a fresh title and bounded controls; no body even when the personal flag alone is on', async t => {
+  const saved = process.env.EGDESK_BROWSER_TASK_PAGE_TEXT
+  process.env.EGDESK_BROWSER_TASK_PAGE_TEXT = 'on'
+  t.after(() => { if (saved === undefined) delete process.env.EGDESK_BROWSER_TASK_PAGE_TEXT; else process.env.EGDESK_BROWSER_TASK_PAGE_TEXT = saved })
+  const cards = [{ cardId: 'form', host: 'pizza.example', title: 'stale' }]
+  const snapshot = { url: 'https://pizza.example/', title: 'Pizza order', text: ['PRIVATE BODY'], interactiveElements: Array.from({ length: 22 }, (_, i) => ({ ref: `f${i}`, role: 'textbox', tag: 'input', label: i ? `Item ${i}` : 'Delivery time' })) }
+  const provider = { reflexScope: () => ({ callTool: async () => ({ snapshot }) }) }
+  const message = '배달 시간 저녁 7시 반으로 넣어줘, 제출하지 마'
+  const ride = await rideAlongEntry({ cards, provider, message })
+  assert.match(ride.evidence, /"Pizza order"/); assert.match(ride.evidence, /Delivery time/)
+  assert.doesNotMatch(ride.evidence, /PRIVATE BODY|Item 16|stale/)
+  assert.match(ride.questions[0].instructions, /without a site name/)
+  const client = { decide: async request => { assert.deepEqual(request.questions, ride.questions); assert.ok(request.input[1].content.endsWith(ride.evidence)); return { answers: P2({ browser_entry: 1, browser_entry_answer: 0, browser_entry_card_0: 1 }) } } }
+  assert.equal((await decideBrowserEntry({ message, cards: await observeCardLines({ cards, message, provider }), client })).cardId, 'form')
+  const neg = (list, values) => decideBrowserEntry({ cards: list, message: list.length === 1 ? '오늘 날씨 어때?' : '거기서 내려받아줘', client: { decide: async () => ({ answers: P2(values) }) } })
+  assert.equal((await neg(ride.cards, { browser_entry: 0, browser_entry_answer: 1, browser_entry_card_0: 0 })).kind, 'not_browser')
+  assert.equal((await neg([...cards, { cardId: 'other', host: 'other.example' }], { browser_entry: 0.5, browser_entry_answer: 0, browser_entry_card_0: 0, browser_entry_card_1: 0 })).kind, 'not_browser')
 })
