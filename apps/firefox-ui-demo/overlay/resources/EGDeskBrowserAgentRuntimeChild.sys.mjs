@@ -1380,18 +1380,20 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   assertGuard(action, guard) {
     if (!guard || typeof guard !== "object") throw new Error("Guarded Browser action requires observed state");
     const current = this.observationState();
-    if (guard.documentId !== current.documentId || guard.revision !== current.revision
-        || guard.viewport?.width !== current.viewport.width || guard.viewport?.height !== current.viewport.height
-        || guard.viewport?.devicePixelRatio !== current.viewport.devicePixelRatio
-        || guard.focusedRef !== (this.focusedElement(this.document)?.ref || null)
-        || guard.url !== this.contentWindow.location.href) {
-      throw new Error("Browser observation is stale; observe the current page again");
-    }
+    // L6 a1 (D25): the same checks; the refusal names the fact that moved in one closed word, for the helper's staleBy. The viewport is named before the
+    // revision because a viewport change also moves the revision (observationState), and the cause is what the record needs.
+    const moved = guard.documentId !== current.documentId ? "document"
+      : guard.viewport?.width !== current.viewport.width || guard.viewport?.height !== current.viewport.height
+        || guard.viewport?.devicePixelRatio !== current.viewport.devicePixelRatio ? "viewport"
+      : guard.revision !== current.revision ? "revision"
+      : guard.focusedRef !== (this.focusedElement(this.document)?.ref || null) ? "focus"
+      : guard.url !== this.contentWindow.location.href ? "url" : null;
+    if (moved) throw new Error(`Browser observation is stale [${moved}]; observe the current page again`);
     // An observed Gecko document identity must still be this actor's.
     const identity = this.documentIdentity();
     for (const key of ["innerWindowId", "browsingContextId"]) {
       if (Object.hasOwn(guard, key) && guard[key] !== identity[key]) {
-        throw new Error("Browser observation is stale; the document changed");
+        throw new Error("Browser observation is stale [identity]; the document changed");
       }
     }
     if (action.type === "navigate") {
@@ -1590,7 +1592,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   assertScrollGuard(action, guard) {
     const scroll = this.scrollState();
     if (!guard.scroll || guard.scroll.x !== scroll.x || guard.scroll.y !== scroll.y) {
-      throw new Error("Browser observation is stale; the scroll position changed");
+      throw new Error("Browser observation is stale [scroll]; the scroll position changed");
     }
     if (action.selector) throw new Error("Browser action requires an observed element reference");
     const boundedDirection = ["up", "down", "top", "bottom"].includes(action.direction) && ["page", "half"].includes(action.amount);
@@ -1612,7 +1614,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const state = this.scrollContainerState(target);
     if (!state) throw new Error("Browser target is not a scrollable container; observe again");
     if (!guard.containerScroll || guard.containerScroll.x !== state.x || guard.containerScroll.y !== state.y) {
-      throw new Error("Browser observation is stale; the container scroll position changed");
+      throw new Error("Browser observation is stale [scroll]; the container scroll position changed");
     }
   }
 

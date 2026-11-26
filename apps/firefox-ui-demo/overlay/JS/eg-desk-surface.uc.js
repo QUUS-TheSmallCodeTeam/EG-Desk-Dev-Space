@@ -24826,7 +24826,8 @@
     leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl, innerWindowId, browsingContextId }) {
     const lease = browserToolActionLeases.get(leaseId);
     if (!lease) return false;
-    const deny = reason => { browserToolRecordFixtureAuthorization(lease, reason); return false; };
+    // L6 a1 (D25): the lease keeps which check denied the input (a closed word), so the refusal can say it (inputDeniedBy) instead of only "not sent".
+    const deny = reason => { lease.deniedBy = reason; browserToolRecordFixtureAuthorization(lease, reason); return false; };
     if (lease.authorized) return deny('lease-already-used');
     if (lease.requestId !== requestId) return deny('request-id-mismatch');
     if (lease.deadlineMs !== deadlineMs) return deny('deadline-mismatch');
@@ -25027,6 +25028,7 @@
         if (dialog) rejected.dialog = dialog;
         rejected.dispatchPhase = browserToolDispatchPhase({ phase: diagnosticPhase,
           leaseAuthorized: activityLease?.authorized === true, actor });
+        if (typeof activityLease?.deniedBy === 'string') rejected.inputDeniedBy = activityLease.deniedBy;
         const timing = browserToolTiming({ receivedAtMs, authorizedAtMs: activityLease?.authorizedAtMs }, actor?.timing);
         if (rejected.dispatchPhase === 'not-dispatched') {
           for (const key of BROWSER_TOOL_PERFORM_MS) delete timing[key];
@@ -25189,7 +25191,7 @@
       for (const [field, leaseField] of [['innerWindowId', 'guardInnerWindowId'], ['browsingContextId', 'guardBrowsingContextId']]) {
         if (!Object.hasOwn(request.guard, field)) continue;
         if (!Number.isSafeInteger(request.guard[field]) || request.guard[field] <= 0) {
-          throw new Error('Browser observation is stale; the observed document identity is invalid');
+          throw new Error('Browser observation is stale [identity]; the observed document identity is invalid');
         }
         guardIdentity[leaseField] = request.guard[field];
       }
@@ -28486,10 +28488,12 @@
       if (!windowGlobal) throw new Error('Browser document is unavailable');
       let currentUrl = browserState.uri;
       try { currentUrl = windowGlobal.documentURI?.spec || currentUrl; } catch {}
-      if ((Object.hasOwn(guard, 'innerWindowId') && guard.innerWindowId !== windowGlobal.innerWindowId) ||
-          (Object.hasOwn(guard, 'browsingContextId') && guard.browsingContextId !== context.id) ||
-          (compareUrl && typeof guard.url === 'string' && guard.url !== currentUrl && guard.url !== browserState.uri)) {
-        throw Object.assign(new Error('Browser observation is stale; observe the current page again'),
+      // L6 a1 (D25): the same checks; the refusal names which one moved in one closed word (the helper's staleBy).
+      const moved = (Object.hasOwn(guard, 'innerWindowId') && guard.innerWindowId !== windowGlobal.innerWindowId) ||
+          (Object.hasOwn(guard, 'browsingContextId') && guard.browsingContextId !== context.id) ? 'identity'
+        : compareUrl && typeof guard.url === 'string' && guard.url !== currentUrl && guard.url !== browserState.uri ? 'url' : null;
+      if (moved) {
+        throw Object.assign(new Error(`Browser observation is stale [${moved}]; observe the current page again`),
           { browserToolActor: { dispatchPhase: 'not-dispatched' } });
       }
     };
