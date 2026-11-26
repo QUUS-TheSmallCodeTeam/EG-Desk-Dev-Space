@@ -46,6 +46,8 @@ function publicBrowserErrorDetail(error) {
   }
   return detail
 }
+// a1 (Main 16:33, L3's D27 finding): the fixed English error sentences read like guidance for the person and were passed on to them; the result says they are not (the harness rule of the page tools)
+export const BROWSER_ERROR_NOTE = 'Not for the person: the error code and message are EG-Desk\'s own markings. Say what happened in everyday words.'
 const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met',
   'cards-listed', 'site-allowed', 'card-opened', 'card-closed', 'history-dispatched', 'screenshot-observed'])
 // DECISION_MODEL_CONTEXT_SETUP.md §3.3: the reflex tool is appended after the
@@ -276,7 +278,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
           ...(selected?.sourceId ? { sourceId: selected.sourceId } : {}),
           ...(selected?.cardEpoch ? { targetCardEpoch: selected.cardEpoch } : {}) }, event.callId)
-        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...publicBrowserErrorDetail(error) } }) }] }
+        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...publicBrowserErrorDetail(error) }, forYouOnly: BROWSER_ERROR_NOTE }) }] }
       }
     },
     // Each reflex step goes through this provider's own dispatch for the same
@@ -347,11 +349,12 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
     // The account the run belongs to (history records are scoped to it).
     currentOwnerKey() { const key = getOwnerKey(); return typeof key === 'string' && key ? key : null },
     // a1 (the task tool, egdesk-browser-task-tool.mjs): `values` the conversation model named (typed into the fields they match; joined to a resumed task's pending ones) and
-    // `textComboboxes` (a search box that announces itself as a combobox on a <textarea>, as Google's does, is a text field, as it is for the page tools). Neither is given by the direct entry.
-    async runDirectTask(run, { cardId, goal, values = null, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null, signal = undefined, textComboboxes = false, onPage = null }) {
+    // `textComboboxes` (a search box that announces itself as a combobox on a <textarea>, as Google's does, is a text field, as it is for the page tools), `valuesFirst` (the given values are typed
+    // where they belong before each step's choice) and `onPage` (the page each step is on). None is given by the direct entry.
+    async runDirectTask(run, { cardId, goal, values = null, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null, signal = undefined, textComboboxes = false, onPage = null, valuesFirst = false }) {
       if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
       const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId)
-      const result = await runReflex({ cardId, goal, ...(values && typeof values === 'object' && Object.keys(values).length ? { values } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}), ...(typeof onPage === 'function' ? { onPage } : {}),
+      const result = await runReflex({ cardId, goal, ...(values && typeof values === 'object' && Object.keys(values).length ? { values } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}), ...(typeof onPage === 'function' ? { onPage } : {}), ...(valuesFirst === true ? { valuesFirst: true } : {}),
         ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(today ? { today } : {}), ...(signal ? { signal } : {}),
         callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
       if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })

@@ -474,7 +474,8 @@ const fieldRef = option => option.item?.element?.ref ?? option.value
  * question per key, then a greedy assignment by probability.
  * → { assigned: Map<key, optionValue>, unmatched: key[], usage }
  */
-export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+// pageState (a1, the task tool's values-first step): the page-state predicates ride in the same request, so a value is never typed on a page that is a person's step; the result names the state.
+export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch, pageState = false }) {
   if (!fieldOptions.length) return { assigned: new Map(), unmatched: keys, usage: null }
   const byValue = new Map(fieldOptions.map(option => [option.value, option]))
   const choices = [...fieldOptions.map(option => ({ value: option.value, ...(option.description ? { description: option.description } : {}) })),
@@ -482,7 +483,7 @@ export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, 
   const result = await client.decide({
     input: [{ role: 'developer', content: 'You match named values to the text fields of one web page.' },
       { role: 'user', content: `URL: ${snapshot.url}\n\nVisible text:\n${visibleText(snapshot) || '(none)'}` }],
-    questions: keys.map((key, index) => choiceQuestion(`field_${index}`, `Which text field should hold the value named "${compactText(key, 80)}"?`, choices)),
+    questions: [...keys.map((key, index) => choiceQuestion(`field_${index}`, `Which text field should hold the value named "${compactText(key, 80)}"?`, choices)), ...(pageState === true ? pageStateQuestions() : [])],
     timeoutMs, signal, authorizeDispatch,
   })
   const pairs = []
@@ -503,7 +504,7 @@ export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, 
     assigned.set(pair.key, pair.value)
     usedFields.add(pair.ref)
   }
-  return { assigned, unmatched: keys.filter(key => !assigned.has(key)), usage: result.usage }
+  return { assigned, unmatched: keys.filter(key => !assigned.has(key)), usage: result.usage, ...(pageState === true ? { pageState: readPageState(result.answers, thresholds.pageState).state } : {}) }
 }
 
 export function validateReflexArgs(args) {
@@ -544,7 +545,7 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
-  textComboboxes = false, onPage = null } = {}) {
+  textComboboxes = false, onPage = null, valuesFirst = false } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -606,6 +607,80 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     }
   }
 
+  // The supplied values for this page: bind each (an exact field name first, else one mapping request) and type the first ready one. -> { result } (the loop returns it) |
+  // { typed: true } (a field was typed: next step) | { typed: false }. firstPass (a1 valuesFirst): before the step's choice, with the page-state predicates in the mapping request.
+  const triedHere = new Set() // a1: `name|url|document` pairs the values-first mapping already asked about
+  async function typePending(entry, snapshot, observationId, fields, { firstPass = false } = {}) {
+      const byValue = new Map(fields.map(option => [option.value, option]))
+      const { documentId, url } = snapshot
+      const hasDocument = (typeof documentId === 'string' && documentId.length > 0) || Number.isSafeInteger(documentId)
+      // Without a stable document identifier, do not carry a binding across observations.
+      const inScope = binding => binding.url === url && binding.documentId === documentId &&
+        (binding.observationId === observationId || hasDocument)
+      const reserved = new Set(attemptedRefs)
+      for (const binding of assigned.values()) if (inScope(binding)) reserved.add(binding.ref)
+      const bind = (key, option) => {
+        const ref = fieldRef(option)
+        assigned.set(key, { value: option.value, ref, documentId, url, observationId })
+        reserved.add(ref)
+      }
+
+      // Exact names reserve their observed controls before model assignment.
+      const docKey = `${url}|${documentId}`
+      const unassigned = [...pending.keys()].filter(key => !assigned.has(key) && !unmatched.has(key) && !triedHere.has(`${key}|${docKey}`))
+      if (unassigned.length && fields.length) {
+        const named = []
+        for (const key of unassigned) {
+          const option = byValue.get(key)
+          if (!option) named.push(key)
+          else if (reserved.has(fieldRef(option))) unmatched.add(key)
+          else bind(key, option)
+        }
+        if (named.length) {
+          try {
+            const available = fields.filter(option => !reserved.has(fieldRef(option)))
+            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch, ...(firstPass ? { pageState: true } : {}) })
+            if (signal?.aborted) return { result: finish('aborted') }
+            if (isDecisionCurrent && !isDecisionCurrent()) return { result: finish('fallback', { reason: 'evidence_unavailable' }) }
+            entry.mapping = { assigned: Object.fromEntries(mapping.assigned), unmatched: mapping.unmatched, usage: mapping.usage }
+            if (firstPass) {
+              // values first: nothing is typed on a page that is not decided to be ordinary content (the step's own choice and page state then decide, as without it); a name
+              // that fits no field here is tried again on another page (never marked unmatched), and not asked again on this one
+              if (mapping.pageState !== 'content') return { typed: false }
+              named.forEach(key => triedHere.add(`${key}|${docKey}`))
+              for (const [key, value] of mapping.assigned) bind(key, byValue.get(value))
+            } else {
+              for (const [key, value] of mapping.assigned) bind(key, byValue.get(value))
+              mapping.unmatched.forEach(key => unmatched.add(key))
+            }
+          } catch (error) { return { result: signal?.aborted ? finish('aborted') : finish('fallback', { reason: failure(error) }) } }
+        }
+      }
+      // Display labels can be renumbered after a fill. Do not retarget a binding.
+      const readyFields = new Map()
+      for (const key of pending.keys()) {
+        const binding = assigned.get(key)
+        if (!binding || unmatched.has(key)) continue
+        const option = byValue.get(binding.value)
+        if (option && inScope(binding) && fieldRef(option) === binding.ref && !attemptedRefs.has(binding.ref)) {
+          readyFields.set(key, option)
+        } else unmatched.add(key)
+      }
+      const ready = readyFields.keys().next().value
+      if (ready) {
+        const option = readyFields.get(ready)
+        const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
+        if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100) }) }
+        attemptedRefs.add(action.args.ref)
+        const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
+        if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`) }
+        else return { result: finish('escalated', { reason: 'tool_failed', code: done.code }) }
+        return { typed: true }
+      }
+      return { typed: false }
+
+  }
+
   for (let step = 1; step <= maxSteps; step++) {
     if (signal?.aborted) return finish('aborted')
     stepStart = Date.now()
@@ -642,6 +717,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       continue
     }
     const fields = options.filter(option => option.item.kind === 'fill')
+    // a1 (opt-in, the task tool): the values the caller gave are typed where they belong BEFORE the step's choice (one mapping request with the page-state predicates;
+    // an exact field name needs none), so typing a given value never waits on the choice picking its field
+    if (valuesFirst === true && pending.size && fields.length) {
+      const typed = await typePending(entry, snapshot, observationId, fields, { firstPass: true })
+      if (typed.result) return typed.result
+      if (typed.typed) { entry.rule = 'values_first'; continue }
+    }
     // The recorded choice on this page is a string comparison (code, once per path and run); the person's reply in this task overrides it.
     const recorded = priorRun && !usedRecorded.has(safePathOf(snapshot.url)) ? recordedChoice(priorRun, snapshot, options, { goal, userContext: contextLines }) : null
     const prior = priorRun ? priorFacts(priorRun, snapshot, options) : { lines: [], conflict: false }
@@ -695,63 +777,9 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     // A decided link leaves this page: supplied values are not typed into a page
     // that is about to be replaced (§3.3; they stay pending for the next page).
     if (decision.kind === 'act' && decision.option.item.kind !== 'navigate') {
-      const byValue = new Map(fields.map(option => [option.value, option]))
-      const { documentId, url } = snapshot
-      const hasDocument = (typeof documentId === 'string' && documentId.length > 0) || Number.isSafeInteger(documentId)
-      // Without a stable document identifier, do not carry a binding across observations.
-      const inScope = binding => binding.url === url && binding.documentId === documentId &&
-        (binding.observationId === observationId || hasDocument)
-      const reserved = new Set(attemptedRefs)
-      for (const binding of assigned.values()) if (inScope(binding)) reserved.add(binding.ref)
-      const bind = (key, option) => {
-        const ref = fieldRef(option)
-        assigned.set(key, { value: option.value, ref, documentId, url, observationId })
-        reserved.add(ref)
-      }
-
-      // Exact names reserve their observed controls before model assignment.
-      const unassigned = [...pending.keys()].filter(key => !assigned.has(key) && !unmatched.has(key))
-      if (unassigned.length && fields.length) {
-        const named = []
-        for (const key of unassigned) {
-          const option = byValue.get(key)
-          if (!option) named.push(key)
-          else if (reserved.has(fieldRef(option))) unmatched.add(key)
-          else bind(key, option)
-        }
-        if (named.length) {
-          try {
-            const available = fields.filter(option => !reserved.has(fieldRef(option)))
-            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch })
-            if (signal?.aborted) return finish('aborted')
-            if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
-            entry.mapping = { assigned: Object.fromEntries(mapping.assigned), unmatched: mapping.unmatched, usage: mapping.usage }
-            for (const [key, value] of mapping.assigned) bind(key, byValue.get(value))
-            mapping.unmatched.forEach(key => unmatched.add(key))
-          } catch (error) { return signal?.aborted ? finish('aborted') : finish('fallback', { reason: failure(error) }) }
-        }
-      }
-      // Display labels can be renumbered after a fill. Do not retarget a binding.
-      const readyFields = new Map()
-      for (const key of pending.keys()) {
-        const binding = assigned.get(key)
-        if (!binding || unmatched.has(key)) continue
-        const option = byValue.get(binding.value)
-        if (option && inScope(binding) && fieldRef(option) === binding.ref && !attemptedRefs.has(binding.ref)) {
-          readyFields.set(key, option)
-        } else unmatched.add(key)
-      }
-      const ready = readyFields.keys().next().value
-      if (ready) {
-        const option = readyFields.get(ready)
-        const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
-        if (action.needsText) return finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100) })
-        attemptedRefs.add(action.args.ref)
-        const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
-        if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`) }
-        else return finish('escalated', { reason: 'tool_failed', code: done.code })
-        continue
-      }
+      const typed = await typePending(entry, snapshot, observationId, fields)
+      if (typed.result) return typed.result
+      if (typed.typed) continue
     }
 
     switch (decision.kind) {

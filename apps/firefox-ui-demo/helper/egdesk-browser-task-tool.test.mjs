@@ -108,7 +108,7 @@ function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양�
         answers.push(choice('field_text', q.choices.some(c => c.value === fieldText) ? fieldText : q.choices.at(-1).value))
       } else if (names.includes('field_0')) {
         const q = request.questions.find(item => item.name === 'field_0')
-        answers.push(choice('field_0', q.choices.find(c => c.value.startsWith('[F')).value))
+        answers.push(choice('field_0', q.choices.find(c => c.value.startsWith('[F')).value), ...(names.includes('ps_sign_in') ? pageStateWire('content') : []))
       } else {
         const q = request.questions.find(item => item.name === 'next_step')
         const onSearch = /URL: https:\/\/wiki\.example\.test\/\n/.test(`${evidence}\n`)

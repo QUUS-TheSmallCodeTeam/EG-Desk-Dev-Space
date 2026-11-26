@@ -50,7 +50,8 @@ const CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
 const OPTION_VALUE = /^\[([A-Z])\d+\]\s*/
 const strip = value => compactText(String(value ?? '').replace(OPTION_VALUE, ''), BROWSER_TASK_LIMITS.optionLabel)
 const hostOf = url => { try { return new URL(url).host.toLowerCase() } catch { return null } }
-const reply = body => ({ success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(body) }] })
+// every result carries the "not for the person" note (the harness rule the page tools follow, u8 D23): its fields are EG-Desk's markings, never words for the person
+const reply = body => ({ success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ ...body, forYouOnly: BROWSER_TASK_NOTE }) }] })
 
 export function validateTaskArgs(args) {
   if (!record(args)) return 'arguments must be an object'
@@ -140,11 +141,13 @@ const opOfValue = value => { const kind = OPTION_VALUE.exec(String(value ?? ''))
 function offer(task, values, code, outside = []) {
   const seen = new Set()
   const list = (Array.isArray(values) ? values : []).filter(value => typeof value === 'string' && OPTION_VALUE.test(value) && !seen.has(value) && seen.add(value))
-  const far = (Array.isArray(outside) ? outside : []).slice(0, Math.max(0, BROWSER_TASK_LIMITS.options - Math.min(list.length, 2)))
-  const near = list.slice(0, BROWSER_TASK_LIMITS.options - far.length)
-  task.offered = [...far.map(link => ({ label: compactText(link.label, BROWSER_TASK_LIMITS.optionLabel), op: 'open', href: link.href, site: hostOf(link.href) })), ...near.map(value => ({ value, label: strip(value), op: opOfValue(value) }))]
+  // the same site's elements first (what the loop itself ranked), then links to another site (each asks the person about its site when chosen)
+  const links = Array.isArray(outside) ? outside : []
+  const near = list.slice(0, links.length ? BROWSER_TASK_LIMITS.options - 2 : BROWSER_TASK_LIMITS.options)
+  const far = links.slice(0, BROWSER_TASK_LIMITS.options - near.length)
+  task.offered = [...near.map(value => ({ value, label: strip(value), op: opOfValue(value) })), ...far.map(link => ({ label: compactText(link.label, BROWSER_TASK_LIMITS.optionLabel), op: 'open', href: link.href, site: hostOf(link.href) }))]
     .map((item, index) => ({ id: `o${index + 1}`, ...item }))
-  return { status: 'needs_guidance', code: far.length && !near.length ? 'outside_site' : code, options: task.offered.map(({ id, label, site }) => ({ id, label, ...(site ? { site } : {}) })) }
+  return { status: 'needs_guidance', code: far.length && !near.length ? 'outside_site' : code, options: task.offered.map(({ id, label, site }) => ({ id, label, ...(site ? { site } : {}) })), ...(task.offered.length ? {} : { next: 'read_the_card' }) }
 }
 
 /** outcomeBody(task, result) -> { status, code?, ask?, options?, controls?, target?, next? }: the reflex result in the tool's closed words. */
@@ -295,7 +298,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }
       const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState: task.state,
-        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true })
+        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true })
       values = {}
       task.state = record(out?.state) ? out.state : task.state
       task.steps += Array.isArray(out?.steps) ? out.steps.length : 0
@@ -303,6 +306,13 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       if (out?.outcome === 'max_steps' && out.reason !== 'step_rejected') continue
       if (out?.outcome === 'needs_free_text') {
         const found = await textFromSpans(run, event, task, out, page)
+        if (found) { values = found; continue }
+      }
+      // an undecided step whose top choices hold a text field, with nothing left to type: the step is about the text for that field (the same span choice)
+      const pendingText = Array.isArray(task.state?.pending) && task.state.pending.length > 0
+      const rankedField = out?.outcome === 'escalated' && out.reason === 'uncertain' && !pendingText ? (out.ranked || []).slice(0, 2).map(row => row?.value).find(value => /^\[F\d+\]/.test(value ?? '')) : null
+      if (rankedField) {
+        const found = await textFromSpans(run, event, task, { field: rankedField }, page)
         if (found) { values = found; continue }
       }
       result = out ?? { outcome: 'fallback' }
