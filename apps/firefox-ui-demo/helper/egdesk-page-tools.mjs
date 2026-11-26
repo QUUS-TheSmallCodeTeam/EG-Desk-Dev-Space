@@ -3,7 +3,7 @@ import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './eg
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
 import { grantHint } from './egdesk-browser-grant-path.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation } from './egdesk-browser-url-policy.mjs'
-import { buildReflexCandidates, expectedTargetOf, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { buildReflexCandidates, expectedTargetOf, formResultLanded, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
 
 // L8 u1 ('위': up to the conversation): the browser as EG-Desk tools (the tools are named after the Card: egdesk_card_*; egdesk_page_* is the working-memory fixture's stand-in) the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
@@ -180,7 +180,16 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     // press
     if (verdict.act === 'auto') {
       const planned = reflexActionArgs(verdict.option, { cardId, observationId: obs.observationId, snapshot })
-      if (planned.tool) { const done = await call(run, event, planned.tool, planned.args, 'press'); return result(done, { status: 'pressed', via: 'auto', cardId, label }, run, cardId) }
+      if (planned.tool) {
+        const done = await call(run, event, planned.tool, planned.args, 'press')
+        // a1 (Main 16:5x, L6's DuckDuckGo reading): a read-only GET search whose address the site extended reads as a failed url postcondition; the page that loaded proves it
+        const getUrl = verdict.option.item.readOnly?.kind === 'get_form' ? verdict.option.item.readOnly.url : null
+        if (!done.ok && getUrl) {
+          const fresh = await observe(run, event, cardId, 'landed')
+          if (!fresh.error && formResultLanded(fresh.snapshot.url, getUrl)) return respond(true, { status: 'pressed', via: 'auto', cardId, label, outcome: 'form-result-observed', next: 'read_again', forYouOnly: INTERNAL_NOTE })
+        }
+        return result(done, { status: 'pressed', via: 'auto', cardId, label }, run, cardId)
+      }
     }
     // u9 (D25): a link to ANOTHER site (outside the conversation's sites). The person's consent for that is the site question the Card already asks (egdesk_browser_request_site: "Agent가 이 대화에서 … 사이트도
     // 열려고 합니다. 허용할까요?"), so the tool asks it ITSELF, in this run on this Card, instead of leaving the engine to call it (a Claude run's question stayed unanswered for its whole 55 s: nobody saw it) or

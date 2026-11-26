@@ -5,6 +5,7 @@ import { hostOf, hrefIdentifiers, identifiersOf, labelKey, outcomeCandidate, pri
 import { decideOpenItem, settledNote } from './egdesk-browser-open-items.mjs'
 import { choiceContextLine } from './egdesk-browser-choice-reply.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
+import { candidateSpans, pickFieldText } from './egdesk-browser-field-text.mjs'
 
 // Direct chat -> objective browser entry (L8 cycle 6; DECISION_MODEL_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
 //
@@ -528,7 +529,10 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
 // cardTextInEntry(): whether the entry may quote what each card shows (the run's egress gate, page_text); off by default.
 // inRunChange(): whether a message that replaces the task is recognised (the in-run messages flag); off by default.
 // onStepEvent(run, event) (a1, optional): each page action as the step event contract (taskStepEvent); an observer only, it never changes the task.
-export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false, onStepEvent = null } = {}) {
+// fieldText() (a1, default off; Main 16:5x, real window: the entry entered the DuckDuckGo card and stopped at its first step because nobody gave the search text): a field the loop
+// needs text for is filled with a span of the person's own message the decision model CHOOSES (egdesk-browser-field-text.mjs; none = the pause as before), the chosen text is typed
+// before the next step's choice, and a search box that announces itself as a combobox (Google's) is a text field. Off: everything as before.
+export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false, onStepEvent = null, fieldText = () => false } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -575,8 +579,30 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
     try { const event = taskStepEvent(task, info, { seq: (task.eventSeq ?? 0) + 1 }); if (event) { task.eventSeq = event.seq; onStepEvent(run, event) } } catch { /* an observer never affects the task */ }
   }
 
+  const fieldTextOn = () => { try { return fieldText() === true } catch { return false } }
+  // a1: the text for the field the step needs, chosen among the spans of the person's message (the task's goal) and what they said since. null: pause as before.
+  async function chosenText(run, task, result) {
+    const fields = Array.isArray(result.fields) ? result.fields : []
+    const field = typeof result.field === 'string' && result.field ? result.field : fields.length === 1 ? fields[0] : null
+    if (!field) return null
+    const label = typeof result.label === 'string' && result.label ? result.label : String(field).replace(/^\[[A-Z]\d+\]\s*/, '')
+    task.fieldTried ??= []
+    if (task.fieldTried.includes(label)) return null
+    task.fieldTried.push(label)
+    const spans = candidateSpans([task.goal, ...(task.userContext || []).slice(-2)])
+    if (!spans.length) return null
+    try {
+      const scope = provider.reflexScope(run, { callId: `${task.taskId}.text`, namespace: null }, task.cardId)
+      if (!scope?.client) return null
+      const picked = await pickFieldText({ client: scope.client, goal: task.goal, field: label, host: task.cardHost ?? null, spans, thresholds, timeoutMs, authorizeDispatch: scope.authorizeDispatch })
+      if (typeof scope.isDecisionCurrent === 'function' && !scope.isDecisionCurrent()) return null
+      return picked.text ? { [field]: picked.text } : null
+    } catch { return null }
+  }
+
   async function loop(run, task, hosts) {
     if (!task.cardHost && typeof hosts?.[task.cardId] === 'string') task.cardHost = hosts[task.cardId].toLowerCase() // the card's host, for the brief
+    let values = null // a1 fieldText: the chosen text, given to the next segment once (the loop keeps what is still to type in its state)
     // Segments of a few steps; the task's total budget survives pauses.
     for (;;) {
       const remaining = MAX_TASK_STEPS - task.steps
@@ -585,8 +611,10 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       task.replan = false
       const controller = new AbortController()
       task.abort = controller
+      const extra = fieldTextOn() ? { ...(values ? { values } : {}), valuesFirst: true, textComboboxes: true } : {}
+      values = null
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
-        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => { store.progress?.(task, info); stepEvent(run, task, info) }, today: localDay(now()), signal: controller.signal })
+        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => { store.progress?.(task, info); stepEvent(run, task, info) }, today: localDay(now()), signal: controller.signal, ...extra })
       if (task.abort === controller) task.abort = null
       task.liveStep = 0
       recordSteps(result)
@@ -596,6 +624,10 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       // c23: whatever this segment ended with (even a pause or done) was about the OLD goal: the person changed it meanwhile, so plan again
       if (task.replan && result.outcome !== 'fallback' && task.status === 'running') continue
       if (result.outcome === 'max_steps' && result.reason !== 'step_rejected') continue
+      if (result.outcome === 'needs_free_text' && fieldTextOn() && task.status === 'running') {
+        const chosen = await chosenText(run, task, result)
+        if (chosen) { values = chosen; continue }
+      }
       return fromResult(task, result)
     }
   }
