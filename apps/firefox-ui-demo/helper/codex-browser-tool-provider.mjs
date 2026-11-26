@@ -29,6 +29,7 @@ const HOST_PATTERN = /^[a-z0-9.:\[\]-]{1,253}$/i
 function publicBrowserErrorDetail(error) {
   if (!error || typeof error !== 'object') return {}
   const detail = {}
+  if (error.code === 'INVALID_BROWSER_TOOL' && error.invalidBy === 'navigation-postcondition-kind') detail.invalidBy = error.invalidBy
   if (DISPATCH_PHASES.has(error.dispatchPhase)) detail.dispatchPhase = error.dispatchPhase
   if ([true, false, 'unknown'].includes(error.dispatched)) detail.dispatched = error.dispatched
   if (typeof error.obscuredBy === 'string' && /^[A-Za-z0-9 #._=:/-]{1,160}$/.test(error.obscuredBy)) detail.obscuredBy = error.obscuredBy
@@ -284,8 +285,10 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
       } catch (error) {
         if (run.executionPolicy?.mode === FIXTURE_BROWSER_QA) fixtureAttestations.delete(run.answerId)
         const failure = classifyPublicToolError(error, { browser: true })
+        const detail = publicBrowserErrorDetail(error)
         const selected = run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
         this.emit(run, 'browser.tool.failed', { callId: event.callId, code: failure.code, cardId: selected?.cardId || null,
+          ...(detail.invalidBy ? { invalidBy: detail.invalidBy } : {}),
           ...(BROWSER_STALE_REASONS.includes(error?.staleBy) ? { staleBy: error.staleBy } : {}),
           ...(BROWSER_INPUT_DENIED_REASONS.includes(error?.inputDeniedBy) ? { inputDeniedBy: error.inputDeniedBy } : {}),
           ...(BROWSER_TARGET_REASONS.includes(error?.targetBy) ? { targetBy: error.targetBy } : {}),
@@ -293,7 +296,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
           ...(selected?.sourceId ? { sourceId: selected.sourceId } : {}),
           ...(selected?.cardEpoch ? { targetCardEpoch: selected.cardEpoch } : {}) }, event.callId)
-        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...publicBrowserErrorDetail(error) }, forYouOnly: BROWSER_ERROR_NOTE }) }] }
+        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...detail }, forYouOnly: BROWSER_ERROR_NOTE }) }] }
       }
     },
     // Each reflex step goes through this provider's own dispatch for the same

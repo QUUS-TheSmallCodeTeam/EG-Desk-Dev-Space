@@ -2022,3 +2022,24 @@ test('c34: a card on an AI provider\'s sign-in domain cannot be observed, screen
     assert.equal((await other.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })).status, 'observed')
   } finally { if (saved === undefined) delete process.env.EGDESK_TERMINAL_OPEN_URL; else process.env.EGDESK_TERMINAL_OPEN_URL = saved }
 })
+
+test('navigate with only its destination derives an exact URL assertion, not an authority grant', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const url = 'https://example.test/?q=fixture'
+  const base = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: seen.snapshot.revision, url }
+  const go = patch => f.dispatch('egdesk_browser_navigate', { ...base, ...patch })
+  await assert.rejects(go({ postcondition: { kind: 'visible-text', value: 'fixture' } }), { code: 'INVALID_BROWSER_TOOL', invalidBy: 'navigation-postcondition-kind' })
+  for (const patch of [{ url: 'file:///tmp' }, { url: 'https://user@example.test/' }, { postcondition: null }, { extra: true }]) await assert.rejects(go(patch), { code: 'INVALID_BROWSER_TOOL' })
+  for (const url of ['https://other.test/', 'http://example.test/']) await assert.rejects(go({ url }), { code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE' })
+  await assert.rejects(go({ expectedRevision: base.expectedRevision + 1 }), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(f.acts().length, 0)
+  f.setAct(request => {
+    assert.deepEqual(request.postcondition, { kind: 'url', value: url })
+    f.current = guardedSnapshot({ documentId: 'document-2', revision: 1, url })
+    return f.acted(request, f.current, actorReceipt())
+  })
+  assert.equal((await go({})).status, 'postcondition-observed')
+  assert.equal(f.acts().length, 1)
+})

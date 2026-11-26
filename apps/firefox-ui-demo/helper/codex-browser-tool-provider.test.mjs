@@ -267,6 +267,11 @@ test('Codex transport records parent and lease refusals without copying free tex
     sourceRef: { viewId: 'card-1', profileId: 'firefox-default', accountId: '', uri: url } }
   const run = { answerId: 'native-thread/native-turn', runId: 'native-turn', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
   await provider.bindRun(run, provider.prepare({ selectedSources: [source], clientThreadId: run.clientThreadId, effectiveExecutionPolicy: 'browserBounded', browserTransportId: transportId }))
+  const malformed = await provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'wrong-postcondition', arguments: {
+    cardId: 'card-1', observationId: 'seen', expectedRevision: 1, url, postcondition: { kind: 'visible-text', value: 'private-text' } } })
+  assert.equal(JSON.parse(malformed.contentItems[0].text).error.invalidBy, 'navigation-postcondition-kind')
+  assert.equal(events.at(-1).detail.invalidBy, 'navigation-postcondition-kind')
+  assert.ok(!JSON.stringify(events.at(-1)).includes('private-text'))
   for (const [word, lease, want] of [['missing-authorizer', null, 'missing-authorizer'], ['ui-denied', 'selection-run-mismatch', 'selection-run-mismatch'], ['private-text', 'private-text', undefined]]) {
     refusal = { error: 'Browser action authority was revoked before input [' + word + ']', inputDeniedBy: lease }
     const obs = await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'obs-' + word, arguments: { cardId: 'card-1' } })

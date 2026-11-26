@@ -1,3 +1,5 @@
+import { PAGE_TOOLS_PROVIDER_ID } from './egdesk-page-tools.mjs'
+import { BROWSER_TASK_TOOL_SPEC } from './egdesk-browser-task-tool.mjs'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
@@ -43,4 +45,25 @@ test('mode on: reflex is visible exactly where interaction tools are, and record
   const verified = verifiedManifestOwners(recordedOff, current.manifest, current.owners)
   assert.equal(verified.status, 'verified')
   assert.equal([...verified.owners.keys()].some(key => key.endsWith(BROWSER_REFLEX_TOOL_NAME)), false, 'an old thread is not granted the new tool')
+})
+
+test('task replaces reflex only in a newly offered catalog, not in manifest verification', () => {
+  const browser = { providerId: 'egdesk-browser', specs: () => [...BROWSER_TOOL_SPECS, BROWSER_REFLEX_TOOL_SPEC] }
+  let taskOn = false
+  const page = { providerId: PAGE_TOOLS_PROVIDER_ID, specs: () => taskOn ? [BROWSER_TASK_TOOL_SPEC] : [] }
+  for (const providers of [[page, browser], [browser, page]]) {
+    taskOn = false
+    const chat = new CodexChatRuntime({ request: async () => ({}), respond: () => {}, toolProviders: providers })
+    const catalog = () => chat.collectToolSpecs('browserBounded', { browserInteraction: true })
+    const old = catalog()
+    assert.ok(names(old).includes(BROWSER_REFLEX_TOOL_NAME))
+    taskOn = true
+    const offered = catalog()
+    assert.ok(names(offered).includes(BROWSER_TASK_TOOL_SPEC.name))
+    assert.ok(!names(offered).includes(BROWSER_REFLEX_TOOL_NAME))
+    assert.ok(![...offered.owners.keys(), ...offered.manifest.map(m => m.key)].some(key => key.endsWith(BROWSER_REFLEX_TOOL_NAME)))
+    const current = chat.collectToolSpecs(null, { forManifest: true })
+    assert.equal(verifiedManifestOwners(old.manifest, current.manifest, current.owners).status, 'verified')
+    assert.equal(verifiedManifestOwners(offered.manifest, current.manifest, current.owners).status, 'verified')
+  }
 })
