@@ -496,8 +496,9 @@ export function createClaudeEngineAdapter(options = {}) {
   }
 
   function ensureProcess(session, assertDispatch = () => {}) {
-    if (session.proc && !session.proc.exited) return Promise.resolve(session.proc)
+    // a start in flight first: its process is already session.proc before the CLI has started, and a caller must not write to it until the start is done (a1: prepareTurn)
     if (session.starting) return session.starting
+    if (session.proc && !session.proc.exited) return Promise.resolve(session.proc)
     session.starting = (async () => {
       await makeRoom(session)
       const lease = await leaseProcess(session)
@@ -716,6 +717,37 @@ export function createClaudeEngineAdapter(options = {}) {
       session.dispatchEpoch++
       await closeProcess(session)
       return { status: 'unsubscribed' }
+    },
+
+    // a1 (교대): start this conversation's process for the turn about to come, with the spec that turn will carry (model, effort), and send nothing, so a turn that
+    // first waits for EG-Desk's own pre-turn work (the browser entry) does not then also wait for the CLI to start. Best effort and never in the way: it does nothing
+    // while a turn starts or runs, never closes or replaces a live process, never moves the folder; a refusal here is the turn's own, later. An unused process idles
+    // out like one after a turn. -> { status: 'started' | 'ready' | 'skipped' }
+    async prepareTurn(params = {}) {
+      const threadId = typeof params?.threadId === 'string' ? params.threadId.toLowerCase() : ''
+      const session = sessions.get(threadId)
+      if (!session || !session.loaded || session.activeTurn || session.turnStarting) return { status: 'skipped' }
+      if (session.proc && !session.proc.exited) return { status: 'ready' }
+      const next = { ...session.spec }
+      try {
+        assertUsable()
+        assertApiKeyEnv()
+        if (params.model !== undefined && params.model !== null) next.model = checkedModel(params.model)
+        if (params.effort !== undefined && params.effort !== null) { if (!CLAUDE_EFFORT_LEVELS.includes(params.effort)) return { status: 'skipped' }; next.effort = params.effort }
+        if (params.cwd !== undefined && params.cwd !== null && params.cwd !== session.spec.cwd) return { status: 'skipped' }
+      } catch { return { status: 'skipped' } }
+      const expectedOwner = ownerKey(), expectedEpoch = ownerEpoch, externalEpoch = getEpoch(), dispatchEpoch = session.dispatchEpoch
+      const assertCurrent = () => {
+        if (ownerKey() !== expectedOwner || ownerEpoch !== expectedEpoch || getEpoch() !== externalEpoch || !session.loaded || session.dispatchEpoch !== dispatchEpoch || sessions.get(threadId) !== session) {
+          throw definite(chatError('READ_CANCELLED', 'Claude preparation was stopped', 409))
+        }
+        assertUsable()
+        assertApiKeyEnv()
+      }
+      session.spec = next
+      try { await ensureProcess(session, assertCurrent) } catch { return { status: 'skipped' } }
+      if (!session.activeTurn && !session.turnStarting) scheduleIdle(session)
+      return { status: 'started' }
     },
 
     async startTurn(params = {}) {
