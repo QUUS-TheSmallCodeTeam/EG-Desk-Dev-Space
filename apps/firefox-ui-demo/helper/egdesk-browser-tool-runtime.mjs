@@ -136,11 +136,20 @@ function reject(code, message) { throw Object.assign(new Error(message), { code 
 export const BROWSER_STALE_REASONS = Object.freeze(['observation', 'document', 'revision', 'viewport', 'focus', 'url', 'identity', 'scroll', 'frame',
   'site-rule', 'target', 'binding', 'card-generation', 'card-busy', 'budget', 'user-hold', 'input-authority', 'reply-lost', 'other'])
 // With input-authority: which check of the Card's last-moment authorization denied the input (browserToolAuthorizePhysicalAction's deny words).
-export const BROWSER_INPUT_DENIED_REASONS = Object.freeze(['lease-already-used', 'request-id-mismatch', 'deadline-mismatch', 'deadline-expired',
+// A parent/actor refusal can precede the lease callback, so it has no lease.deniedBy.
+// Both engines use this same list; never store the actor's free-form error.
+const ACTOR_INPUT_DENIED_REASONS = ['missing-browsing-context', 'missing-embedder', 'missing-authorizer',
+  'ui-denied', 'parent-callback-error', 'deadline-expired-after-approval', 'unknown']
+export const BROWSER_INPUT_DENIED_REASONS = Object.freeze([...ACTOR_INPUT_DENIED_REASONS, 'lease-already-used', 'request-id-mismatch', 'deadline-mismatch', 'deadline-expired',
   'browser-identity-mismatch', 'browsing-context-identity-mismatch', 'window-global-identity-mismatch', 'window-global-not-current',
   'inner-window-id-mismatch', 'browsing-context-id-mismatch', 'run-binding-changed', 'run-cancelled', 'run-stopped', 'card-lease-changed', 'card-closed',
   'card-browser-mismatch', 'interaction-not-granted', 'selection-run-mismatch', 'action-type-mismatch', 'action-ref-mismatch', 'action-url-mismatch',
   'live-binding-changed', 'live-binding-unavailable'])
+export function inputDeniedReasonOf(response) {
+  const match = /^Browser action authority was revoked before input \[([a-z-]{1,40})\]$/.exec(typeof response.error === 'string' ? response.error : '')
+  if (BROWSER_INPUT_DENIED_REASONS.includes(response.inputDeniedBy)) return response.inputDeniedBy
+  return ACTOR_INPUT_DENIED_REASONS.includes(match?.[1]) ? match[1] : null
+}
 // With target (L6 a1b): which check of the page actor refused the observed element: a field that moved (role, label, href, value, tag), not a listed control any more
 // (candidate), another element under that ref (reference), gone from the page, hidden, disabled, or not an editable field.
 export const BROWSER_TARGET_REASONS = Object.freeze(['role', 'label', 'href', 'value', 'tag', 'candidate', 'reference', 'gone', 'hidden', 'disabled', 'not-editable'])
@@ -1018,10 +1027,11 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
       // Not sent: only this observation is spent; no lock, no retry. The
       // model re-observes and may decide again under a new call ID.
       if (provenNotDispatched(response) && !response.dialog) {
+        const inputDeniedBy = inputDeniedReasonOf(response)
         restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
           { code: 'BROWSER_OBSERVATION_STALE', staleBy: staleReasonOf(response.error), dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
-            ...(BROWSER_INPUT_DENIED_REASONS.includes(response.inputDeniedBy) ? { inputDeniedBy: response.inputDeniedBy } : {}),
+            ...(inputDeniedBy ? { inputDeniedBy } : {}),
             ...(targetReasonOf(response.error) ? { targetBy: targetReasonOf(response.error) } : {}),
             ...(obscuredBy ? { obscuredBy } : {}) })
       }

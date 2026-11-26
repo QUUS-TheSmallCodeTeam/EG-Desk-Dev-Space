@@ -26374,7 +26374,7 @@
     });
     if (options.fixedLogicalHeight) card._fixedLogicalHeight = options.fixedLogicalHeight;
     let xulBrowser = null;
-    let unregisterBrowserAuthorizer = null;
+    let unregisterBrowserAuthorizer = null, registeredBrowserContextId = null;
     // BRW-05 (D-B1 commit layer): set while an Agent-started load is landing.
     let agentNavigationGuard = null;
     let browserLoadTimer = 0;
@@ -28234,12 +28234,20 @@
       if (!card.isConnected || !xulBrowser?.isConnected || !xulBrowser?.browsingContext?.currentWindowGlobal) {
         throw new Error('Selected Browser Card is unavailable');
       }
+      // The parent registry is keyed by BrowsingContext id, not the Card element.
+      // A context replacement on a surviving browser must retire the old entry.
+      const contextId = xulBrowser.browsingContext.id;
+      if (unregisterBrowserAuthorizer && registeredBrowserContextId !== contextId) {
+        unregisterBrowserAuthorizer();
+        unregisterBrowserAuthorizer = null;
+      }
       if (!unregisterBrowserAuthorizer) {
         if (!ensureBrowserAgentActor()) throw new Error('Browser actor registration failed');
         const { registerBrowserActionAuthorizer } = ChromeUtils.importESModule(
           'chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
         unregisterBrowserAuthorizer = registerBrowserActionAuthorizer(
           xulBrowser, window, browserToolAuthorizePhysicalAction);
+        registeredBrowserContextId = contextId;
       }
       const profileId = card._sourceRef?.profileId || state.sourceRefs.defaultProfileId;
       const accountId = card._sourceRef?.accountId || '';

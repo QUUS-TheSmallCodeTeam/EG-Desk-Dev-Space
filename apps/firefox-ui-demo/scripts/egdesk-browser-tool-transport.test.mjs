@@ -266,12 +266,12 @@ function fixture() {
   const req = (kind, extra = {}) => ({ version: 1, requestId: `request-${++sequence}`,
     deadlineMs: clockMs + 10000, runId: 'run-a', clientThreadId: 'thread-a', cardId: 'browser-a',
     targetCardEpoch: 'card-generation-a', kind, ...extra })
-  const selection = (permission = 'interact') => {
+  const selection = (permission = 'interact', clientThreadId = 'thread-a', selectionToken = 'explicit-selection-a') => {
     const value = { cardId: 'browser-a', cardEpoch: current.cardEpoch,
       profileId: current.profileId, accountId: current.accountId,
       userContextId: current.userContextId, engineAccountKey: current.engineAccountKey,
       authorityEpoch: current.authorityEpoch, selectedUrl: current.url, permission,
-      selectionToken: 'explicit-selection-a', clientThreadId: 'thread-a', sourceId: 'selected-source-a' }
+      selectionToken, clientThreadId, sourceId: 'selected-source-a' }
     userSelections.set(value.selectionToken, { ...value, token: value.selectionToken,
       threadId: value.clientThreadId, usedRunId: null })
     return value
@@ -605,7 +605,7 @@ test('production Card binding registers and disposes its exact chrome Browser co
   const controller = request => request.browser === xulBrowser && request.leaseId === 'exact-lease'
   const install = new Function('card', 'xulBrowser', 'window', 'ChromeUtils', 'ensureBrowserAgentActor',
     'browserToolAuthorizePhysicalAction', 'state', 'ChatState', 'browserToolAuthorityEpoch',
-    'agentBridgeId', 'browserCardState', `let unregisterBrowserAuthorizer = null;\n${toolBindingSource}\n` +
+    'agentBridgeId', 'browserCardState', `let unregisterBrowserAuthorizer = null, registeredBrowserContextId = null;\n${toolBindingSource}\n` +
     'return {browserToolBinding, dispose: () => unregisterBrowserAuthorizer?.()};')(
     card, xulBrowser, ownerWindow, { importESModule(uri) {
       assert.equal(uri, 'chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs')
@@ -622,7 +622,24 @@ test('production Card binding registers and disposes its exact chrome Browser co
   parent.manager = windowGlobal
   assert.deepEqual(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'exact-lease' } }),
     { authorized: true, reason: 'approved' })
+  // The chrome browser survives a Gecko browsing-context replacement. A later binding
+  // must register only the new context; retaining the old dispose handle is not enough.
+  const nextGlobal = { innerWindowId: 202 }
+  const nextContext = { ...context, id: 102, currentWindowGlobal: nextGlobal }
+  nextContext.top = nextContext
+  nextGlobal.browsingContext = nextContext
+  xulBrowser.browsingContext = nextContext
+  const nextParent = new EGDeskBrowserAgentRuntimeParent()
+  nextParent.browsingContext = nextContext
+  nextParent.manager = nextGlobal
+  const ask = (actor, leaseId) => actor.receiveMessage({ name: 'authorizeAct', data: { leaseId } })
+  assert.equal(ask(nextParent, 'exact-lease').reason, 'missing-authorizer')
+  install.browserToolBinding()
+  assert.equal(ask(nextParent, 'exact-lease').authorized, true, 'rebind exact current context after replacement')
+  assert.equal(ask(nextParent, 'ungranted-lease').authorized, false)
+  assert.equal(ask(parent, 'exact-lease').authorized, false, 'old context stays revoked')
   install.dispose()
+  assert.equal(ask(nextParent, 'exact-lease').authorized, false)
   assert.equal(listeners.size, 0)
   assert.equal(parent.receiveMessage({ name: 'authorizeAct', data: { leaseId: 'exact-lease' } }).authorized, false)
   assert.match(source, /const cleanupCard = \(\) => \{\s*try \{ unregisterBrowserAuthorizer\?\.\(\)/)
@@ -651,6 +668,25 @@ test('UI dispatch binds only exact Card/profile/account/epoch and deduplicates o
   const changed = await f.dispatch(f.req('observe', { binding: bind.binding }))
   assert.equal(changed.status, 'rejected')
   assert.equal(f.runBindings.size, 0)
+})
+
+test('same Card across conversations: old token cannot grant; fresh selection acts once; stopped run stays refused', async () => {
+  const f = fixture()
+  const guard = { documentId: 'doc-1', revision: 2 }, action = { type: 'click', ref: 'el_1' }
+  const first = f.selection()
+  const bind1 = await f.dispatch(f.req('bind', { selection: first }))
+  assert.equal((await f.dispatch(f.req('act', { binding: bind1.binding, guard, action }))).status, 'acted')
+  await f.dispatch(f.req('cancel'))
+  const next = { runId: 'run-b', clientThreadId: 'thread-b' }
+  assert.equal((await f.dispatch(f.req('bind', { ...next, selection: first }))).status, 'rejected')
+  assert.equal((await f.dispatch(f.req('act', { ...next, binding: bind1.binding, guard, action }))).status, 'rejected')
+  const selection = f.selection('interact', next.clientThreadId, 'token-b')
+  const bind2 = await f.dispatch(f.req('bind', { ...next, selection }))
+  assert.equal(bind2.status, 'bound')
+  assert.equal((await f.dispatch(f.req('act', { ...next, binding: bind2.binding, guard, action }))).status, 'acted')
+  f.stoppedRuns.add(JSON.stringify([next.runId, next.clientThreadId]))
+  assert.equal((await f.dispatch(f.req('act', { ...next, binding: bind2.binding, guard, action }))).status, 'rejected')
+  assert.equal(f.domEffects, 2)
 })
 
 test('read-only, expired, cancelled and late bind requests fail closed', async () => {
