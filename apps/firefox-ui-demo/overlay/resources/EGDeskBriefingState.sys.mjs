@@ -145,8 +145,17 @@ export function briefingStepFocus(session, resolved = [], { overview = false, ca
 // or last step reopens from the start without asking.
 export const BRIEFING_RESUME_MAX = 40;
 const resumeKey = briefing => JSON.stringify([briefing?.conversationId ?? null, briefing?.runId ?? null, briefing?.answerId ?? null, briefing?.id ?? null]);
+// The caller's Map is made in the window, another global than this shared
+// module, where `instanceof Map` is false (as in EGDeskViewportExtras). The
+// intrinsic size getter checks the internal slot instead: a Map from any
+// realm passes, a look-alike object or a Set does not.
+const mapSize = Object.getOwnPropertyDescriptor(Map.prototype, 'size').get;
+const isMap = value => {
+  if (!value || typeof value !== 'object') return false;
+  try { mapSize.call(value); return true; } catch { return false; }
+};
 export function rememberBriefingStep(memory, session) {
-  if (!(memory instanceof Map) || !session?.briefing || !Number.isInteger(session.index)) return;
+  if (!isMap(memory) || !session?.briefing || !Number.isInteger(session.index)) return;
   // An unanswered "이어보기 / 처음부터" choice is not a new reading position.
   if (session.resumeOffer) return;
   const key = resumeKey(session.briefing), steps = session.briefing.steps;
@@ -156,10 +165,10 @@ export function rememberBriefingStep(memory, session) {
   while (memory.size > BRIEFING_RESUME_MAX) memory.delete(memory.keys().next().value);
 }
 export function forgetBriefingStep(memory, briefing) {
-  if (memory instanceof Map) memory.delete(resumeKey(briefing));
+  if (isMap(memory)) memory.delete(resumeKey(briefing));
 }
 export function briefingResumeOffer(memory, briefing) {
-  if (!(memory instanceof Map) || !validBriefing(briefing)) return null;
+  if (!isMap(memory) || !validBriefing(briefing)) return null;
   const kept = memory.get(resumeKey(briefing)), steps = briefing.steps;
   if (!kept || !Number.isInteger(kept.index) || kept.index <= 0 || kept.index >= steps.length - 1
       || kept.stepIds?.length !== steps.length || kept.stepIds.some((id, index) => id !== steps[index].id)) return null;
