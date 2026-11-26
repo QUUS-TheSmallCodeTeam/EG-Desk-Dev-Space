@@ -272,29 +272,51 @@ for (const phase of ['page_state', 'field_0']) {
   })
 }
 
-test('a stale guarded fill is refused and not retried against another observation', async () => {
+// L6 a1b (real window 11-26 17:16: the task's first fill was refused as not sent and the task ended there): a stale guarded fill is still never sent again against
+// another observation with the decision made on the first one. Nothing was typed, so the value's binding is dropped and the next step decides anew on a new
+// observation, once per value; a refusal that repeats ends the task as before (the next test).
+test('a stale guarded fill is not re-sent against another observation: the value is decided anew on a new observation, once', async () => {
   const snap = page('https://example.invalid/form', [element('f_1', 'email', 'Email')])
   const observed = tools([snap]), attempts = [], effects = []
-  let liveRevision = 1
+  let liveRevision = 1, decided = 0
   const { client } = decisions(question => {
     if (question.name === 'page_state') { liveRevision = 2; return choice('content') }
-    if (question.name === 'next_step') return choice('[F1] Email')
+    if (question.name === 'next_step') { decided++; return choice('[F1] Email') }
     return { type: 'predicate', probability: 0.1 }
   })
   const callTool = async (name, args) => {
     if (name === 'egdesk_browser_observe') return observed.callTool(name, args)
-    attempts.push({ name, args })
+    attempts.push({ name, args, decided })
     if (args.expectedRevision !== liveRevision) throw Object.assign(new Error('stale fixture'), { code: 'BROWSER_OBSERVATION_STALE' })
     effects.push(name)
     return { status: 'postcondition-observed' }
   }
   const result = await runBrowserReflex({ cardId: 'c', goal: 'Fill public form', values: { '[F1] Email': 'fixture-only' }, callTool, client })
+  assert.deepEqual(attempts.map(({ name, args, decided: at }) => [name, args.observationId, args.expectedRevision, args.ref, at]), [
+    ['egdesk_browser_fill', 'obs-1', 1, 'f_1', 1],
+    ['egdesk_browser_fill', 'obs-2', 2, 'f_1', 2],
+  ], 'the second fill is on a new observation, after a new decision')
+  assert.deepEqual(effects, ['egdesk_browser_fill'], 'typed once')
+  assert.equal(result.steps[0].rule, 'fill_not_sent')
+})
+
+test('a stale guarded fill that is refused again ends the task: two attempts, nothing typed', async () => {
+  const snap = page('https://example.invalid/form', [element('f_1', 'email', 'Email')])
+  const observed = tools([snap]), attempts = []
+  const { client } = decisions(question => {
+    if (question.name === 'page_state') return choice('content')
+    if (question.name === 'next_step') return choice('[F1] Email')
+    return { type: 'predicate', probability: 0.1 }
+  })
+  const callTool = async (name, args) => {
+    if (name === 'egdesk_browser_observe') return observed.callTool(name, args)
+    attempts.push([name, args.observationId])
+    throw Object.assign(new Error('stale fixture'), { code: 'BROWSER_OBSERVATION_STALE' })
+  }
+  const result = await runBrowserReflex({ cardId: 'c', goal: 'Fill public form', values: { '[F1] Email': 'fixture-only' }, callTool, client })
   assert.deepEqual([result.outcome, result.reason, result.code], ['escalated', 'tool_failed', 'BROWSER_OBSERVATION_STALE'])
-  assert.deepEqual(attempts.map(({ name, args }) => [name, args.observationId, args.expectedRevision, args.ref]), [
-    ['egdesk_browser_fill', 'obs-1', 1, 'f_1'],
-  ])
-  assert.equal(observed.calls.length, 1)
-  assert.deepEqual(effects, [])
+  assert.deepEqual(attempts, [['egdesk_browser_fill', 'obs-1'], ['egdesk_browser_fill', 'obs-2']])
+  assert.equal(observed.calls.length, 2)
 })
 
 for (const variant of ['handoff', 'ordinary', 'changed ref', 'changed URL', 'changed document', 'missing document']) {
