@@ -102,7 +102,7 @@ import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-f
 import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { markStage, stagesOf } from './egdesk-upper-bundle.mjs' // u1: the order of a turn (memory/action, engine, check) as state
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
-import { claudeBoundedHarnessInstructions, claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1; a1 (D27): a browser thread's instructions
+import { REPLY_LANGUAGE, claudeBoundedHarnessInstructions, claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1; a1 (D27): a browser thread's instructions
 import { OBSERVE_RESULT_KEY, observeOptions, runObserveOption } from './egdesk-observe-first.mjs' // u5: read-only computer viewing, picked by the decision model and run by code before the engine
 import { claudeBrowserLive } from './egdesk-claude-browser-route.mjs' // u5
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
@@ -3121,6 +3121,7 @@ export class CodexChatRuntime {
       const withOpen = openContext ? { ...(turnAdditionalContext || {}), ...openContext } : turnAdditionalContext
       const dfContext = dfLocal?.context ? { ...(withOpen || {}), [dfLocal.contextKey ?? COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : withOpen
       const engineShape = this.shapeEngineContext(dfContext)
+      const engineContext = this.claudeBrowserTurnContext(engine, policy, engineShape.context)
       turnStartAttempted = context.turnStartAttempted = true
       if (!dfLocal?.finished) this.markTurnStage(context.requestId, 'engine') // u1: the engine speaks once, after the layers above
       const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await this.startTurnWatched(engine, {
@@ -3129,7 +3130,7 @@ export class CodexChatRuntime {
         clientUserMessageId: context.requestId,
         ...(bounded ? QA_TURN_OVERRIDES : {}),
         ...(ownTools && engine.id === 'codex' ? OWN_TOOLS_TURN_OVERRIDES : {}),
-        ...(engineShape.context ? { additionalContext: engineShape.context } : {}),
+        ...(engineContext ? { additionalContext: engineContext } : {}),
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(effort !== undefined ? { effort } : {}),
@@ -5796,9 +5797,10 @@ export class CodexChatRuntime {
     this.pendingStarts.set(cid, pending)
     try {
       const context = note ? { ...(hold.additionalContext || {}), egdesk_browser_task: { kind: 'application', value: this.browserTaskTurnNote(note, { toolOffered: hold.taskToolOffered === true }) } } : hold.additionalContext
+      const engineContext = this.claudeBrowserTurnContext(engine, BROWSER_BOUNDED, context)
       const checkTurn = this.draftCheckTurns.get(run)
       if (checkTurn && note) checkTurn.browserNote = note // the answer of this turn reports the task: its outcome note is evidence for the check
-      const result = await engine.startTurn({ ...hold.base, input: [{ type: 'text', text: message, text_elements: [] }], clientUserMessageId: requestId, ...(context ? { additionalContext: context } : {}) }, slot)
+      const result = await engine.startTurn({ ...hold.base, input: [{ type: 'text', text: message, text_elements: [] }], clientUserMessageId: requestId, ...(engineContext ? { additionalContext: engineContext } : {}) }, slot)
       const turnId = idText(result?.turn?.id)
       if (!turnId) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
       if (hold.cancelled || run.status !== 'inProgress') { await engine.interruptTurn(cid, turnId, slot).catch(() => {}); return }
@@ -7595,6 +7597,11 @@ export class CodexChatRuntime {
   claudeBoundedOverrides(policy, base = null) {
     const own = claudeBoundedThreadOverrides(policy, { relaxed: this.claudeBrowserLive() })
     return this.claudeHarness() !== null ? { ...own, developerInstructions: claudeBoundedHarnessInstructions(base) } : own
+  }
+  // D27: beside this turn's human input, after any English entry report. Also used for a reply inside a still-open browser run.
+  claudeBrowserTurnContext(engine, policy, context) {
+    if (engine.id !== 'claude' || policy !== BROWSER_BOUNDED || !this.claudeHarness()) return context
+    return { ...context, egdesk_reply_language: { kind: 'application', value: REPLY_LANGUAGE } }
   }
   /** u5: the Claude browser capability is live (harness on and the page tools provider registered) */
   claudeBrowserLive() { try { return claudeBrowserLive({ harness: this.claudeHarness(), toolProviders: this.toolProviders }) } catch { return false } }
