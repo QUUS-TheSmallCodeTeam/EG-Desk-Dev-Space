@@ -195,7 +195,7 @@ test('a2 the typed-search rule needs the search to be the top choice: a short pa
 for (const [what, opts, goal, expected] of [
   ['search alone', {}, MESSAGE, 'done'],
   ['more browser work', { more: true }, MESSAGE + ', 아래로 내려줘', 'max_steps'],
-  ['wrong query landed', { mismatch: true }, MESSAGE, 'needs_user_context'],
+  ['wrong query landed', { mismatch: true }, MESSAGE, 'escalated'],
 ]) test(`b verified GET landing: ${what}`, async () => {
   const w = duckCard({ goalOnResults: false, ...opts })
   const out = await w.provider.runDirectTask(w.run, { cardId: 'card', goal, maxSteps: 3, values: { [FIELD]: QUERY }, valuesFirst: true, textComboboxes: true, pageText: false })

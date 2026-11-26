@@ -389,6 +389,7 @@ let browserDecisionGeneration = 0
 const slotReadiness = createSlotReadiness({ shared: () => ({ schemaMatch: nativeCapabilities.schemaMatch, qaReadOnly: nativeCapabilities.qaReadOnly, ready: appServerReady }),
   profiles: { capabilities: id => codexProfileServers.capabilities(id) } })
 const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: browserSchemaReady({ claudeLive: () => { try { return chat.claudeBrowserLive() === true } catch { return false } }, claudeReady: () => claudeEngine.isReady() && claudeEngine.capabilities().has('boundedQa'), codexReady: route => slotReadiness.qaReady(route?.engineProfileId) }), fixtureQa: fixtureBrowserQaFromEnv(process.env),
+  watchPopupLoad: (cardId, url) => workflow?.watchPopupLoad(cardId, url),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
   decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
     recipient: () => recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model),
