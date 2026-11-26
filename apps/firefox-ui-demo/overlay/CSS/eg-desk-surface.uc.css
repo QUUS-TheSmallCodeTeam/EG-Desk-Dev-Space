@@ -537,6 +537,44 @@
   user-select: none;
 }
 .egd-browser-agent-target[hidden] { display: none !important; }
+/* a1 (L1): the frame around the target of the request the Card just carried out (percent of the observed content
+   viewport, like the dot), and its caption at the Card body's lower edge, above the capture layer. Display only. */
+.egd-browser-step-box {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  border: 3px solid var(--egd-primary);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--egd-primary) 10%, transparent);
+  pointer-events: none !important;
+  user-select: none;
+}
+.egd-browser-step-box[data-by="model"] {
+  border-color: var(--egd-chat-accent-strong);
+  background: color-mix(in srgb, var(--egd-chat-accent-strong) 10%, transparent);
+}
+.egd-browser-step-caption {
+  position: absolute;
+  z-index: 13;
+  left: 10px;
+  bottom: 10px;
+  box-sizing: border-box;
+  max-width: calc(100% - 20px);
+  padding: 4px 10px;
+  border: 1px solid var(--egd-outline-variant);
+  border-radius: 999px;
+  background: var(--egd-surface-elevated);
+  color: var(--egd-on-surface);
+  font: 600 12px/1.35 var(--egd-font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none !important;
+  user-select: none;
+}
+.egd-browser-step-caption[data-by="decision"] { border-color: var(--egd-primary); }
+.egd-browser-step-box[hidden],
+.egd-browser-step-caption[hidden] { display: none !important; }
 /* BRW-13 (REA 5, inferred): the dot glides from the Card's previous target
    (200 ms ease-out). Reduced motion places it at once through the shared
    [class*="egd-"] transition: none rule below. Display only. */
@@ -10462,6 +10500,40 @@ button.egd-plan-confirm-go[aria-disabled="true"] { opacity: var(--egd-opacity-di
 .egd-codex-browser-control-mark { flex: none; width: 14px; height: 14px; color: var(--egd-warning-ink); }
 .egd-codex-browser-control-text { min-width: 0; color: var(--egd-on-surface); overflow-wrap: anywhere; }
 .egd-codex-browser-control-detail { min-width: 0; overflow-wrap: anywhere; }
+/* a1 (L1): a Browser task's steps between the messages, who did what (developer flag EGDESK_BROWSER_STEPS_UI).
+   Quiet like the control notice above; the Decision model's lines and the conversation model's differ by the name's ink. */
+.egd-codex-browser-steps {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 2px 12px 4px;
+  color: var(--egd-on-surface-variant);
+  font: 12px/1.5 var(--egd-font);
+}
+.egd-codex-browser-steps-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.egd-codex-browser-steps-mark { flex: none; width: 14px; height: 14px; color: var(--egd-primary); }
+.egd-codex-browser-steps-summary { min-width: 0; color: var(--egd-on-surface); overflow-wrap: anywhere; }
+.egd-codex-browser-steps-toggle {
+  flex: none;
+  margin-inline-start: auto;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--egd-radius-xs);
+  background: transparent;
+  color: var(--egd-primary);
+  font: 600 12px/1.5 var(--egd-font);
+  cursor: pointer;
+}
+.egd-codex-browser-steps-toggle:hover { background: var(--egd-card-hover-bg); }
+.egd-codex-browser-steps-list { display: grid; gap: 1px; margin: 2px 0 0; padding: 0 0 0 20px; list-style: none; }
+.egd-codex-browser-step { display: flex; flex-wrap: wrap; gap: 0 6px; min-width: 0; }
+.egd-codex-browser-step-who { flex: none; font-weight: 600; color: var(--egd-primary); }
+.egd-codex-browser-step[data-by="model"] .egd-codex-browser-step-who { color: var(--egd-chat-accent-ink); }
+.egd-codex-browser-step-text { min-width: 0; overflow-wrap: anywhere; }
+.egd-codex-browser-step[data-by="handoff"] .egd-codex-browser-step-text { color: var(--egd-on-surface); font-weight: 600; }
+.egd-codex-browser-step[data-ok="false"] .egd-codex-browser-step-text { color: var(--egd-danger-ink); }
+.egd-codex-browser-step-time { flex: none; font-variant-numeric: tabular-nums; }
 
 /* AGENT-04 tool section of the Agent form: a switch, then one segmented row per
    tool kind. The pending '묻지 않고 실행' stays visible but cannot be picked. */
