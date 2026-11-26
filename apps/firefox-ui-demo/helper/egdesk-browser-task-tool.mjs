@@ -1,7 +1,7 @@
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { NO_FIELD_TEXT, candidateSpans, pickFieldText } from './egdesk-browser-field-text.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
-import { buildReflexCandidates, localDay, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-browser-task.mjs'
 
 // L8 a1 ('교대' round, owner 2026-11-26: "decision model 이랑 대화형 모델이 같은 세션에서 같은 맥락으로 번갈아가면서 사용자 요청을 빠르게 수행"): the browser task as ONE tool
@@ -204,9 +204,18 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       await scope.callTool(planned.tool, planned.args)
       emit({ action: planned.tool, ok: true, stepMs: clock() - t0, ...meta }, 'model')
     } catch (error) {
-      const code = CODE.test(error?.code ?? '') ? error.code : 'TOOL_FAILED'
-      emit({ failed: planned.tool, ok: false, stepMs: clock() - t0, code, ...meta }, 'model')
-      return { outcome: 'escalated', reason: 'tool_failed', code }
+      // a navigation the site redirected or extended: the page that loaded decides (the same rule as the loop's steps and the page tools)
+      let landed = false
+      if (planned.tool === 'egdesk_browser_navigate') {
+        try { await scope.callTool('egdesk_browser_wait', { cardId: task.cardId, for: 'load', timeoutMs: 5000 }) } catch { /* observe as it is */ }
+        try { landed = navigationLanded({ actual: (await scope.callTool('egdesk_browser_observe', { cardId: task.cardId }))?.snapshot?.url, expected: planned.args.url, from: snapshot.url, submitted: match.item.readOnly?.kind === 'get_form' }) } catch { landed = false }
+      }
+      if (!landed) {
+        const code = CODE.test(error?.code ?? '') ? error.code : 'TOOL_FAILED'
+        emit({ failed: planned.tool, ok: false, stepMs: clock() - t0, code, ...meta }, 'model')
+        return { outcome: 'escalated', reason: 'tool_failed', code }
+      }
+      emit({ action: planned.tool, ok: true, stepMs: clock() - t0, ...meta }, 'model')
     }
     try { await scope.callTool('egdesk_browser_wait', match.item.kind === 'navigate' || match.item.readOnly?.kind === 'get_form' ? { cardId: task.cardId, for: 'load', timeoutMs: 10000 } : { cardId: task.cardId, for: 'idle', timeoutMs: 5000 }) } catch { /* the next observation shows the page as it is */ }
     task.userContext.push(`Chosen in the chat for this task: ${offered.label}`)
@@ -286,7 +295,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     const args = record(event?.arguments) ? event.arguments : {}
     const invalid = validateTaskArgs(args)
     if (invalid) return reply({ status: 'cannot', code: 'TASK_ARGS_INVALID', detail: invalid })
-    // a1 (L5): the conversation as the direct entry keys its tasks (the person's chat id first), so a call without a goal finds the task the entry stopped
+    // the person's chat id first: the direct entry keeps its tasks under it (runBrowserEntryOn: context.clientThreadId), so a call without goal finds the task the entry left (L5 a1)
     const conversationKey = run?.clientThreadId ?? run?.conversationId ?? null
     if (!conversationKey) return reply({ status: 'cannot', code: 'TASK_NO_CONVERSATION' })
     const cards = Array.isArray(run?.browserBinding?.cards) ? run.browserBinding.cards : []
