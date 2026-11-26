@@ -14,6 +14,13 @@ const PARTICLE = ['이라고', '라고', '에서', '에게', '한테', '으로',
 const EDGE_PUNCTUATION = /^[\s.,!?~…·:;()[\]{}<>]+|[\s.,!?~…·:;()[\]{}<>]+$/g
 const stripParticle = word => { for (const p of PARTICLE) if (word.length - p.length >= 2 && word.endsWith(p)) return word.slice(0, -p.length); return null }
 export const NO_FIELD_TEXT = 'none of these'
+// a1/a2: the field an UNDECIDED step (the loop's 'uncertain' escalation) is about, for the callers that fill a field with the person's own words: a text field among the step's top two
+// choices (a1), else the page's only text field (a2, soleField: the real DuckDuckGo step spread over 47 options and ranked none in its top two). null: none (the step pauses as before).
+export function undecidedField(result) {
+  const ranked = (Array.isArray(result?.ranked) ? result.ranked : []).slice(0, 2).map(row => row?.value).find(value => /^\[F\d+\]/.test(value ?? ''))
+  if (ranked) return ranked
+  return typeof result?.soleField === 'string' && /^\[F\d+\]/.test(result.soleField) ? result.soleField : null
+}
 /**
  * candidateSpans(texts) -> up to FIELD_TEXT_LIMITS.spans distinct spans, best first: quoted text, then for each segment (between action words) its word
  * runs of 1 to FIELD_TEXT_LIMITS.spanWords words, longest first, each also without a trailing particle ("차민수라고" -> "차민수"). Code only: nothing is judged here.

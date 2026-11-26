@@ -1,5 +1,5 @@
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
-import { NO_FIELD_TEXT, candidateSpans, pickFieldText } from './egdesk-browser-field-text.mjs'
+import { NO_FIELD_TEXT, candidateSpans, pickFieldText, undecidedField } from './egdesk-browser-field-text.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { PAGE_TEXT_FLAG, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-browser-task.mjs'
@@ -272,7 +272,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       }
       // an undecided step whose top choices hold a text field, with nothing left to type: the step is about the text for that field (the same span choice)
       const pendingText = Array.isArray(task.state?.pending) && task.state.pending.length > 0
-      const rankedField = out?.outcome === 'escalated' && out.reason === 'uncertain' && !pendingText ? (out.ranked || []).slice(0, 2).map(row => row?.value).find(value => /^\[F\d+\]/.test(value ?? '')) : null
+      const rankedField = out?.outcome === 'escalated' && out.reason === 'uncertain' && !pendingText ? undecidedField(out) : null
       if (rankedField) {
         const found = await textFromSpans(run, event, task, { field: rankedField }, page)
         if (found) { values = found; continue }
