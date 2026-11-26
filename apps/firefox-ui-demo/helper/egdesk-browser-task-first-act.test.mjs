@@ -7,6 +7,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { GOOGLE_HOST, GOOGLE_PAGES, callTool, world } from './egdesk-claude-browser-world.fixture.mjs'
 import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
+import { runBrowserReflex } from './egdesk-browser-reflex.mjs'
+import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
 
 const pick = (question, match) => question.choices.find(option => match(option.value))?.value ?? question.choices.at(-1).value
 const choice = (name, value, p = 0.95) => ({ name, type: 'choice', choice: value, confidence: p, probabilities: [{ value, probability: p }] })
@@ -39,7 +41,7 @@ function card(w, refuse) {
 }
 const stepsOf = out => (out.steps ?? []).map(step => [step.op, step.ok])
 
-test('a1b: the task tool\'s first action, refused by the Card as not sent, is typed once more on a new observation and the task goes on to done', async t => {
+test('a1b: the task tool\'s first action, refused by the Card as not sent on the same document, is decided anew on a new observation (typed once) and the task goes on to done', async t => {
   const w = world(t, { host: GOOGLE_HOST, pages: GOOGLE_PAGES, start: '/', hold: true, init: 'real', taskDecide: searchLoop, cardSites: 'window' })
   const seen = card(w, 1)
   const sent = await w.browserSend('구글 카드에서 장화 신은 고양이 검색해줘'); await w.drain()
@@ -70,6 +72,49 @@ test('a1b: a refusal that repeats still ends the task: two attempts at most, not
   const read = await callTool(w, 'egdesk_card_read', { mode: 'structure' })
   assert.equal(read.status, 'read')
   w.transports.at(-1).finish(); await w.settled(sent)
+})
+
+// the loop alone (the provider's step error carries the closed staleBy word): which refusals are decided once more, and which still end the task at once
+function loopRun(staleBy, { refuse = 1 } = {}) {
+  const snap = { url: 'https://example.invalid/form', documentId: 'doc-1', revision: 1, text: ['Form'], interactiveElements: [{ ref: 'f_1', role: 'textbox', label: 'Email', tag: 'input', href: '', value: '', disabled: false }], viewport: { width: 1280, height: 800 } }
+  const usage = { inputTokens: 1, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, totalTokens: 1 }
+  let observed = 0, decided = 0
+  const fills = [], effects = []
+  const answer = value => ({ type: 'choice', choice: value, confidence: 0.9, probabilities: [{ value, probability: 0.9 }, { value: '__other', probability: 0.05 }] })
+  const client = { async decide(request) {
+    const answers = Object.create(null)
+    for (const q of request.questions) {
+      if (q.name.startsWith('ps_')) { answers[q.name] = pageStateAnswers('content', 0.9)[q.name]; continue }
+      if (q.name === 'next_step') { decided++; answers[q.name] = answer('[F1] Email'); continue }
+      answers[q.name] = { type: 'predicate', probability: q.name === 'goal_met' && effects.length ? 0.96 : 0.05 }
+    }
+    return { answers, model: 'gpt-6-luna', usage, latencyMs: 100 }
+  } }
+  const callTool = async (name, args) => {
+    if (name === 'egdesk_browser_observe') { observed++; return { status: 'observed', cardId: args.cardId, observationId: `obs-${observed}`, snapshot: { ...snap, revision: observed } } }
+    fills.push([args.observationId, decided])
+    if (fills.length <= refuse) throw Object.assign(new Error('Browser reflex step failed'), { code: 'BROWSER_OBSERVATION_STALE', ...(staleBy ? { staleBy } : {}) })
+    effects.push(name)
+    return { status: 'postcondition-observed' }
+  }
+  return runBrowserReflex({ cardId: 'c', goal: 'Fill the form', values: { '[F1] Email': 'synthetic' }, callTool, client, maxSteps: 4 }).then(result => ({ result, fills, effects, observed: () => observed }))
+}
+
+test('a1b, the loop: a fill refused on the same document (target, revision, viewport, focus, observation) is decided anew on a new observation, once; typed once', async () => {
+  for (const word of ['target', 'revision', 'viewport', 'focus', 'observation']) {
+    const { result, fills, effects } = await loopRun(word)
+    assert.deepEqual(fills, [['obs-1', 1], ['obs-2', 2]], `${word}: the second fill is on a new observation, after a new decision`)
+    assert.deepEqual(effects, ['egdesk_browser_fill'], word)
+    assert.equal(result.steps[0].rule, 'fill_not_sent', word)
+  }
+})
+
+test('a1b, the loop, unchanged: a replaced document, a refusal of another kind or an unnamed one ends the task at once (one fill, nothing typed)', async () => {
+  for (const word of ['document', 'identity', 'url', 'site-rule', 'binding', 'input-authority', 'other', null]) {
+    const { result, fills, effects } = await loopRun(word)
+    assert.deepEqual([result.outcome, result.reason, result.code], ['escalated', 'tool_failed', 'BROWSER_OBSERVATION_STALE'], String(word))
+    assert.equal(fills.length, 1, String(word)); assert.deepEqual(effects, [], String(word))
+  }
 })
 
 test('a1b, unchanged: a first fill the Card accepts is typed once, with no extra observation', async t => {

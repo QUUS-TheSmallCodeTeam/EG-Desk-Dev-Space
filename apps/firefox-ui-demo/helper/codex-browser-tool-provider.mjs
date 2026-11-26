@@ -61,10 +61,15 @@ function reflexEnabled(decision) {
   catch { return false }
 }
 function reflexStepError(text) {
-  let code = 'TOOL_FAILED'
-  try { const parsed = JSON.parse(text); if (typeof parsed?.error?.code === 'string') code = parsed.error.code } catch {}
+  let code = 'TOOL_FAILED', staleBy = null
+  try {
+    const parsed = JSON.parse(text)
+    if (typeof parsed?.error?.code === 'string') code = parsed.error.code
+    if (BROWSER_STALE_REASONS.includes(parsed?.error?.staleBy)) staleBy = parsed.error.staleBy
+  } catch {}
   const error = new Error('Browser reflex step failed')
   error.code = code
+  if (staleBy) error.staleBy = staleBy // L6 a1b: which observed fact made the step "not sent" (one closed word), for the loop's same-document retry
   return error
 }
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
