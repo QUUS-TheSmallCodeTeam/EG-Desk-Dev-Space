@@ -624,8 +624,11 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       // c23: whatever this segment ended with (even a pause or done) was about the OLD goal: the person changed it meanwhile, so plan again
       if (task.replan && result.outcome !== 'fallback' && task.status === 'running') continue
       if (result.outcome === 'max_steps' && result.reason !== 'step_rejected') continue
-      if (result.outcome === 'needs_free_text' && fieldTextOn() && task.status === 'running') {
-        const chosen = await chosenText(run, task, result)
+      if (fieldTextOn() && task.status === 'running') {
+        // the step needs text for a field (or was undecided with a text field among its top two choices, nothing left to type): the span choice, then the loop goes on
+        const pendingText = Array.isArray(task.state?.pending) && task.state.pending.length > 0
+        const rankedField = result.outcome === 'escalated' && result.reason === 'uncertain' && !pendingText ? (result.ranked || []).slice(0, 2).map(row => row?.value).find(value => /^\[F\d+\]/.test(value ?? '')) : null
+        const chosen = result.outcome === 'needs_free_text' ? await chosenText(run, task, result) : rankedField ? await chosenText(run, task, { field: rankedField }) : null
         if (chosen) { values = chosen; continue }
       }
       return fromResult(task, result)

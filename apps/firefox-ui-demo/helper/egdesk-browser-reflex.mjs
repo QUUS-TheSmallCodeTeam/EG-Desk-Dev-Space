@@ -224,6 +224,21 @@ export function formResultLanded(actual, expected) {
   const submitted = [...e.searchParams].filter(([, value]) => value !== '')
   return submitted.length > 0 && submitted.every(([name, value]) => a.searchParams.getAll(name).includes(value))
 }
+// a1 (Main 16:55, D33: a link to about.google opened after the site was allowed, yet the call read a failure: the site redirected and added fg and utm parameters). One rule for the
+// loop's steps and the page tools' presses: navigationLanded({ actual, expected, from?, submitted? }) -> the page that loaded is where the navigation we asked for went.
+//   submitted (a read-only GET search): formResultLanded (the form's own parameters with their values are there; added ones are the site's).
+//   a link: not still where it started (from, exactly), and either the same host and path as the link (its query and fragment are the site's), or a redirect inside the link's
+//   own site (sameSiteNavigation). Code only, after the call already read a failure; it never turns a refused or unsent action into a success.
+export function navigationLanded({ actual, expected, from = null, submitted = false } = {}) {
+  if (submitted === true) return formResultLanded(actual, expected)
+  let a, e
+  try { a = new URL(actual); e = new URL(expected) } catch { return false }
+  if (!['http:', 'https:'].includes(a.protocol)) return false
+  if (from) { try { if (new URL(from).href === a.href) return false } catch { /* no start to compare */ } }
+  const path = url => url.pathname.replace(/\/+$/, '') || '/'
+  if (a.host === e.host && path(a) === path(e)) return true
+  try { return sameSiteNavigation(e.href, a.href) === true } catch { return false }
+}
 export const MORE_BELOW_PX = 16
 export const MAX_OFF_SITE = 6
 export function contentBelow(snapshot) {
@@ -630,12 +645,12 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       return { ok: true, result }
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'TOOL_FAILED'
-      // a1: a GET search whose address the site extended: the page that loaded proves it (formResultLanded on a fresh observation); then it is done, as the call would have said
+      // a1: a navigation whose address the site changed (a redirect, added parameters): the page that loaded proves it (navigationLanded on a fresh observation); then it is done
       if (typeof meta.landed === 'function' && await meta.landed().catch(() => false) === true) {
-        entry.actions.push({ tool, ok: true, status: 'form-result-observed' })
+        entry.actions.push({ tool, ok: true, status: meta.landedStatus ?? 'navigation-observed' })
         tell({ step: entry.step, action: tool, ok: true, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...described(tool, meta) })
         lastFailure = null
-        return { ok: true, result: { status: 'form-result-observed' } }
+        return { ok: true, result: { status: meta.landedStatus ?? 'navigation-observed' } }
       }
       entry.actions.push({ tool, ok: false, code })
       tell({ step: entry.step, failed: tool, ok: false, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...(PUBLIC_CODE.test(code) ? { code } : {}), ...described(tool, meta) })
@@ -856,13 +871,15 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
           return finish('escalated', { reason: action.escalate, observationId,
             suggestion: { ref: option.item.element.ref, option: option.value, expectedTarget: expectedTargetOf(option.item.element) } })
         }
-        const readOnlyUrl = option.item.readOnly?.kind === 'get_form' ? option.item.readOnly.url : null
-        const landed = readOnlyUrl ? async () => {
+        // a navigation (a link, a read-only GET search) whose url postcondition read a failure: the page that loaded decides (navigationLanded)
+        const submitted = option.item.readOnly?.kind === 'get_form'
+        const expectedUrl = action.tool === 'egdesk_browser_navigate' ? action.args.url : null
+        const landed = expectedUrl ? async () => {
           try { await callTool('egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 5000 }) } catch { /* observe the page as it is */ }
           const seen = await callTool('egdesk_browser_observe', { cardId })
-          return formResultLanded(seen?.snapshot?.url, readOnlyUrl)
+          return navigationLanded({ actual: seen?.snapshot?.url, expected: expectedUrl, from: snapshot.url, submitted })
         } : null
-        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed } : {}) })
+        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (!done.ok) {
           if (done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue
