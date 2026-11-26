@@ -104,8 +104,8 @@ test('entry questions: the request predicate always; one per card quoting that p
   assert.deepEqual(qs.map(q => [q.name, q.type]), [['browser_entry', 'predicate'], ['browser_entry_answer', 'predicate'], ['browser_entry_card_0', 'predicate'], ['browser_entry_card_1', 'predicate']])
   assert.equal(qs[0].instructions, ENTRY_WEB_ASK) // c27: the question says what counts as a web task (the evidence now lists the open pages)
   assert.equal(qs[1].instructions, ENTRY_ANSWER_ASK) // c29
-  assert.equal(qs[2].instructions, 'Does this request need to be done on this open page: "주문 내역 | 쇼핑" at "shop.example.test"?')
-  assert.equal(qs[3].instructions, 'Does this request need to be done on this open page: the page at "account.example.test"?')
+  assert.equal(qs[2].instructions, 'Does the request specifically match the identity or known contents of "주문 내역 | 쇼핑" at "shop.example.test"?')
+  assert.equal(qs[3].instructions, 'Does the request specifically match the identity or known contents of the page at "account.example.test"?')
   assert.doesNotMatch(qs[2].instructions, /account/, 'one page per predicate')
   assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry', 'browser_entry_answer'])
 })

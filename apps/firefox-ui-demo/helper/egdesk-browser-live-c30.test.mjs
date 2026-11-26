@@ -8,7 +8,7 @@ import { runLive, estimateLive, loadLivePlan, FAMILY_PLAN_FILES } from './egdesk
 import { familyAnswers } from './egdesk-browser-live-families.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
-import { ENTRY_ANSWER_ASK, ENTRY_WEB_ASK } from './egdesk-browser-task.mjs'
+import { ENTRY_ANSWER_ASK, ENTRY_OPERATION_ASK, ENTRY_WEB_ASK } from './egdesk-browser-task.mjs'
 import { pageTextFor } from './egdesk-page-text.fixture.mjs'
 pageTextFor(["holdout2-v2: the membership request, entry then step, under ","the first steps of the five families are byte-identical to s"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
@@ -45,7 +45,7 @@ test('regression-v1: the five families\' entry requests (the new bytes) under 4k
   assert.ok(out.requests.length === 5 && out.requests.every(r => r.stage === 'entry'), 'entry only: no step request')
   for (const body of seen) {
     assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
-    assert.deepEqual(body.questions.slice(0, 2).map(q => [q.name, q.instructions]), [['browser_entry', ENTRY_WEB_ASK], ['browser_entry_answer', ENTRY_ANSWER_ASK]])
+    assert.deepEqual(body.questions.slice(0, 2).map(q => [q.name, q.instructions]), [['browser_entry', body.input[1].content.split('\n').filter(line => line.startsWith('- ')).length === 1 && body.input[1].content.includes(' has the controls ') ? ENTRY_OPERATION_ASK : ENTRY_WEB_ASK], ['browser_entry_answer', ENTRY_ANSWER_ASK]])
   }
   assert.deepEqual(out.phases.map(p => [p.id, p.first.handled]), [['rg-st', true], ['rg-dv', true], ['rg-se', true], ['rg-inv', true], ['rg-ig', true]])
 })
