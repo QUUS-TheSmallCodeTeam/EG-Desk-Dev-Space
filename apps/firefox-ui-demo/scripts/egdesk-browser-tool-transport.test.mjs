@@ -1319,6 +1319,18 @@ test('refusals before any lease or actor work are not-dispatched and carry the r
   }
 })
 
+test('pause during an in-flight act keeps the person-only reason only for proven unsent input', async () => {
+  for (const phase of ['not-dispatched', 'unknown']) {
+    const f = fixture(), bound = await f.dispatch(f.req('bind', { selection: f.selection('interact') }))
+    actorLike(f, { afterAuthorization: () => {
+      f.card._browserControls.toolUserHold = () => true
+      return Object.assign(new Error('Browser action authority was revoked before input [ui-denied]'), { browserToolActor: { dispatchPhase: phase, timing: phase === 'not-dispatched' ? { performCallsBefore: 4, performCallsAfter: 4 } : {} } })
+    } })
+    const refused = await f.dispatch(actRequest(f, bound))
+    assert.equal(refused.dispatchPhase, phase); assert.equal(/operating this Browser Card directly/.test(refused.error), phase === 'not-dispatched')
+  }
+})
+
 test('an actor refusal is not-dispatched only without lease approval or with an unchanged perform count', async () => {
   const expectations = {
     'denied-identity': 'not-dispatched', 'before-authorization': 'not-dispatched',

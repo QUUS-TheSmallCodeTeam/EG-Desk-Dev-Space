@@ -873,6 +873,10 @@ export class CodexChatRuntime {
           const failure = classifyPublicToolError({ code: rawError?.code, staleBy: rawError?.staleBy }, { browser: pending.provider?.providerId === 'egdesk-browser', context: pending.provider === this.contexts })
           result = { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
         }
+        // MCP tool results are new model inputs after the human turn. Keep the result intact; the reminder is a separate app block.
+        if (this.runEngine(pending.run) === 'claude' && pending.run.executionPolicy?.mode === BROWSER_BOUNDED && this.claudeHarness()) {
+          result = { ...result, contentItems: [...result.contentItems, { type: 'inputText', text: REPLY_LANGUAGE }] }
+        }
       }
       // Adapter RPC IDs are not Codex RPC IDs. Even a late Claude response
       // must never fall through to the Codex responder after its broker closes.

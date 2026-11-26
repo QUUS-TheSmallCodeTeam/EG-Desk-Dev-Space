@@ -120,7 +120,7 @@ test('a2 typedSearch: only a read-only GET search that submits exactly a text th
 })
 
 // ---- the real-window request through the alternate entry (fieldText on), the real loop, page text off; answers shaped like the measured real ones ----
-function duckCard({ crowded = false, searchTop = 0.74, goalOnResults = true, more = false, mismatch = false } = {}) {
+function duckCard({ crowded = false, searchTop = 0.74, goalOnResults = true, more = false, mismatch = false, settledIntent = false } = {}) {
   let cur = { url: `${D}/`, revision: 1, value: '' }
   const calls = [], requests = []
   const extra = crowded ? Array.from({ length: 34 }, (_, i) => (i % 2 ? { ref: `b${i}`, role: 'button', tag: 'button', label: `도움말 ${i}`, href: '', value: '', nav: { type: 'button', sensitiveRegion: false, regionLabel: '', form: null, controls: null } }
@@ -157,7 +157,8 @@ function duckCard({ crowded = false, searchTop = 0.74, goalOnResults = true, mor
         // measured (real gpt-6-luna, l8b-a2): home 0.61 / 0.49 (crowded) for the field; after typing the search at 0.74 (short page) / 0.92 (crowded); the results page: goal met
         const pick = onResults ? (more ? [['scroll_more', 0.98], [FIELD, 0.01]] : [['goal_met', 0.61], [FIELD, 0.16]]) : typed ? [['[B2] 검색', crowded ? 0.92 : searchTop], [FIELD, 0.14]] : [[FIELD, crowded ? 0.49 : 0.61], ['[B1] react-search-form', 0.15]]
         answers.push(ranked('next_step', pick), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onResults && goalOnResults ? 0.97 : 0.01 })
-        if (names.includes('arrival_finishes')) answers.push({ name: 'arrival_finishes', type: 'predicate', probability: more ? 0.01 : 0.98 })
+        if (names.includes('search_only')) answers.push({ name: 'search_only', type: 'predicate', probability: settledIntent && !more ? .99 : .01 })
+        if (names.includes('arrival_finishes')) answers.push({ name: 'arrival_finishes', type: 'predicate', probability: more || settledIntent ? 0.01 : 0.98 })
         for (const q of request.questions.filter(item => /^step_/.test(item.name))) answers.push(ranked(q.name, [[q.choices[0].value, 0.6], [q.choices[1].value, 0.2]]))
       } else for (const q of request.questions) answers.push(q.type === 'choice' ? ranked(q.name, [[q.choices[0].value, 0.9]]) : { name: q.name, type: 'predicate', probability: 0.02 })
       return { ok: true, text: async () => JSON.stringify({ answers }) }
@@ -194,12 +195,14 @@ test('a2 the typed-search rule needs the search to be the top choice: a short pa
 
 for (const [what, opts, goal, expected] of [
   ['search alone', {}, MESSAGE, 'done'],
+  ['resolved value, landing judgment undecided', { settledIntent: true }, '비 올 때 쓰는 거 검색해줘', 'done'],
   ['more browser work', { more: true }, MESSAGE + ', 아래로 내려줘', 'max_steps'],
-  ['wrong query landed', { mismatch: true }, MESSAGE, 'escalated'],
+  ['wrong query landed', { mismatch: true, settledIntent: true }, MESSAGE, 'escalated'],
 ]) test(`b verified GET landing: ${what}`, async () => {
   const w = duckCard({ goalOnResults: false, ...opts })
-  const out = await w.provider.runDirectTask(w.run, { cardId: 'card', goal, maxSteps: 3, values: { [FIELD]: QUERY }, valuesFirst: true, textComboboxes: true, pageText: false })
+  const out = await w.provider.runDirectTask(w.run, { cardId: 'card', goal, maxSteps: 3, ...(opts.settledIntent ? { resumeState: { pending: [] } } : {}), values: { [FIELD]: opts.settledIntent ? '우산' : QUERY }, valuesFirst: true, textComboboxes: true, pageText: false })
   assert.equal(out.outcome, expected)
+  if (opts.settledIntent && !opts.mismatch) assert.equal(new URL(w.cur.url).searchParams.get('q'), '우산')
   if (opts.more) assert.ok(w.calls.includes('egdesk_browser_scroll'))
   assert.equal(out.steps.some(s => s.rule === 'search_arrived'), expected === 'done')
   assert.equal(w.requests.some(r => r.questions.some(q => q.name === 'arrival_finishes')), !opts.mismatch)
@@ -246,7 +249,7 @@ for (const [receipt, code] of [['site-allowed', undefined], ['site-refused', 'si
       const next = req.questions.find(q => q.name === 'next_step')
       const picked = next.choices.find(c => c.value.endsWith('] ' + title))
       return { next_step: ranked('next_step', [[landed ? 'goal_met' : picked?.value ?? 'needs_user_context', 0.98]]),
-        goal_met: { type: 'predicate', probability: 0.02 }, ...(landed ? { arrival_finishes: { type: 'predicate', probability: 0.98 } } : {}) }
+        goal_met: { type: 'predicate', probability: 0.02 }, ...(landed ? { arrival_finishes: { type: 'predicate', probability: 0.45 } } : { open_only: { type: 'predicate', probability: 0.99 } }) }
     })
     const callTool = async (name, args) => {
       calls.push(name.replace('egdesk_browser_', ''))

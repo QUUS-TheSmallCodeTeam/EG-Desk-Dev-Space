@@ -543,7 +543,7 @@ function fannedChoice(next, answers, fan, thresholds) {
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, directEntry = false, popupProof = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, directEntry = false, popupProof = false, typedSearchOffered = false, finalArrival = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const motion = requestedMotion(goal)
   const fan = !motion && crowdedStep(options, entrySiteLinks)
   const choices = motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
@@ -568,6 +568,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
       ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person explicitly request the exact named choice AND state of the selected check/uncheck/list action? No if merely inferred or unspecified.')] : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
+      ...(typedSearchOffered ? [predicateQuestion('search_only', 'Is running a search with the resolved field value the entire browser request? No if the person wants to open a result, filter, select, or take any further browser action.')] : []),
       ...(popupProof ? [predicateQuestion('open_only', 'Is opening the selected link itself the whole request, with no reading, typing or other action requested on the destination?')] : []),
       ...(directEntry && !arrived && !pendingValues.length && !motion ? [predicateQuestion('read_here', 'Is the request only for information from this current page (such as its first result title or a table cell), with no browser action needed before the chat model reads it? No for a request to open, search, change, submit, or visit anything, or if there is no evidence this is the requested page.')] : []),
       ...(arrived ? [predicateQuestion('arrival_finishes', arrived === 'search' ? 'Is displaying the results of this search the ONLY requested browser outcome? No if a result still needs to be opened, or anything else selected, filtered or visited.' : 'Was opening this selected link the last requested browser action, with at most reading this page for a chat answer left? No if another page or control is needed.')] : []),
@@ -579,6 +580,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   const asked = readChoice(result.answers, 'next_step', { minConfidence: thresholds.choice, minMargin: thresholds.margin })
   const next = fan ? fannedChoice(asked, result.answers, fan, thresholds) : asked
   const out = { pageState: pageState.state, pageChecks: pageState.p,
+    ...(typedSearchOffered && readPredicate(result.answers, 'search_only', thresholds.done).state === 'yes' ? { searchOnly: true } : {}),
     next: { value: next.value, confidence: next.confidence, margin: next.margin, state: next.state, ...(next.fan ? { fan: next.fan } : {}) },
     goalMet: goalMet.probability, ranked: next.ranked, usage: result.usage, latencyMs: result.latencyMs }
   if (out.pageState && HANDOFF_STATES.has(out.pageState)) return { kind: 'handoff', ...out }
@@ -586,7 +588,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   if (out.pageState !== 'content') return { kind: 'page_unclear', ...out }
   // A model's goal_met is not a scroll coordinate or a history landing.
   if (motion) return { kind: next.state === 'accepted' && next.value === 'move_' + motion ? 'motion' : 'uncertain', motion, ...out }
-  if (arrived && readPredicate(result.answers, 'arrival_finishes', thresholds.done).state === 'yes') return { kind: 'done', rule: arrived + '_arrived', ...out }
+  if (arrived && (finalArrival || readPredicate(result.answers, 'arrival_finishes', thresholds.done).state === 'yes')) return { kind: 'done', rule: arrived + '_arrived', ...out }
   if (directEntry && !arrived && !pendingValues.length && readPredicate(result.answers, 'read_here', thresholds.done).state === 'yes') return { kind: 'done', rule: 'read_here', ...out }
   if (goalMet.state === 'yes') return { kind: 'done', ...out }
   // c16 (real s10: needs_user_context at 0.70, below the bar, ended as "uncertain" with no candidates): an undecided next step whose top is
@@ -981,12 +983,13 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     if (conflict) entry.historyConflict = true
 
     const arrived = arrival && !pending.size && navigationLanded({ actual: snapshot.url, expected: arrival.expected, from: arrival.from, submitted: arrival.kind === 'search' }) && (!arrival.exact || new URL(snapshot.url).href === new URL(arrival.expected).href) ? arrival.kind : null
+    const finalArrival = !!arrived && arrival.final === true && (arrived === 'search' || new URL(snapshot.url).href === new URL(arrival.expected).href)
     arrival = null // proof is for the immediate landing only (loading steps above do not consume it)
     let decision
     try {
       if (recorded && !arrived) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
       decision = recorded && !arrived ? await decideRecordedStep({ chatTask: valuesFirst, goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: seen, options, history, arrived, popupProof: typeof watchPopupLoad === 'function' && options.some(o => o.item.kind === 'navigate' && !o.item.askSite), directEntry: typeof firstFieldText === 'function', entrySiteLinks: step === 1 && !resumeState && typeof firstFieldText === 'function', pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+        : await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: seen, options, history, arrived, finalArrival, typedSearchOffered: valuesFirst && !arrived && options.some(o => typedSearch(o, typedTexts)), popupProof: !arrived && options.some(o => o.item.kind === 'navigate' && (o.item.askSite ? typeof firstFieldText === 'function' : typeof watchPopupLoad === 'function')), directEntry: typeof firstFieldText === 'function', entrySiteLinks: step === 1 && !resumeState && typeof firstFieldText === 'function', pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
@@ -1162,8 +1165,8 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
           history.push('selected ' + option.value)
           continue // no load wait for an in-place edit; next decision uses a new observation
         }
-        const kind = typedSearch(option, typedTexts) ? 'search' : (option.item.askSite || (typeof firstFieldText === 'function' && option.item.kind === 'navigate')) ? 'link' : null
-        if (kind && expectedUrl) arrival = { kind, goal, from: snapshot.url, expected: expectedUrl, ...(kind === 'link' && !option.item.askSite ? { exact: true } : {}) }
+        const kind = typedSearch(option, typedTexts) ? 'search' : (option.item.askSite || ((valuesFirst || typeof firstFieldText === 'function') && option.item.kind === 'navigate')) ? 'link' : null
+        if (kind && expectedUrl) arrival = { kind, goal, ...((kind === 'search' ? decision.searchOnly : decision.openOnly) ? { final: true } : {}), from: snapshot.url, expected: expectedUrl, ...(kind === 'link' && !option.item.askSite ? { exact: true } : {}) }
         history.push(`opened ${option.value}`)
         entry.opened = { option: option.value, to: action.args.url ?? action.url, ...(recorded && decision.next?.by === 'code' ? { recordedAsked: recorded.item.asked } : {}) } // for the caller's content-minimal task record
         if (signal?.aborted) return finish('aborted')
