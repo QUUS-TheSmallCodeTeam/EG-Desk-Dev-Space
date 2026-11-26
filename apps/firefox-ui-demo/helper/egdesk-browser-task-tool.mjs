@@ -196,6 +196,8 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
   if (!browser || typeof browser.runDirectTask !== 'function' || typeof browser.reflexScope !== 'function') throw new TypeError('the task tool needs the Browser provider (runDirectTask, reflexScope)')
   const t = decisionThresholds(thresholds)
   const busy = new Set()
+  const decisionOff = () => typeof browser.directEntryEnabled === 'function' && browser.directEntryEnabled() !== true
+  const OFF = Object.freeze({ status: 'cannot', code: 'decision_unavailable', next: 'use_card_tools' })
   let pagePress = null // the page tools' own press (bound by the page tools provider): a link to another site goes through its site question
   const message = run => { try { const text = typeof messageOf === 'function' ? messageOf(run) : null; return typeof text === 'string' && text.trim() ? compactText(text, BROWSER_TASK_LIMITS.message) : null } catch { return null } }
 
@@ -265,8 +267,8 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     return null
   }
 
-  // A link to another site the model chose: found again on the page as it is now (the same address and words), then pressed through the page tools, which ask the person
-  // about the site (the Card's question) and follow it once. Refused or unanswered: nothing moved.
+  // A link to another site the model chose: pressed through the page tools, which find it again by its address on a fresh observation, ask the person about the site (the
+  // Card's question) and follow it once. Refused or unanswered: nothing moved.
   async function outside(run, event, task, offered, scope, onPage, emit, t0) {
     if (typeof pagePress !== 'function') return { outcome: 'escalated', reason: 'outside_site_unavailable' }
     let out = null
@@ -328,7 +330,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     emit({ op: 'end', ok: body.status === 'done', stepMs: elapsedMs }, 'decision', body.status)
     return { ...body, taskId: task.taskId,
       steps: steps.map(step => ({ op: step.op, ...(step.target ? { target: step.target } : {}), ...(step.valueName ? { valueName: step.valueName } : {}), ok: step.ok, ms: step.ms, ...(step.by === 'model' ? { by: 'model' } : {}) })),
-      page: { title: page?.title ?? null, host: page?.host ?? null }, elapsedMs, forYouOnly: BROWSER_TASK_NOTE }
+      page: { title: page?.title ?? null, host: page?.host ?? null }, elapsedMs }
   }
 
   async function handle(run, event) {
@@ -343,7 +345,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     if (typeof args.goal === 'string' && args.goal.trim()) {
       const picked = pickTaskCard(cards, args.cardId)
       if (picked.error) return reply({ status: 'cannot', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}) })
-      if (typeof browser.directEntryEnabled === 'function' && browser.directEntryEnabled() !== true) return reply({ status: 'cannot', code: 'decision_unavailable', next: 'use_card_tools' })
+      if (decisionOff()) return reply(OFF)
       task = store.create({ conversationKey, cardId: picked.cardId, goal: args.goal })
       Object.assign(task, { toolTask: true, offered: [], spanTried: [], eventSeq: 0, lastPage: null })
     } else {
@@ -351,7 +353,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       if (!task || task.toolTask !== true) return reply({ status: 'cannot', code: 'TASK_GOAL_REQUIRED' })
       if (args.cardId && args.cardId !== task.cardId) return reply({ status: 'cannot', code: 'TASK_CARD_MISMATCH' })
       if (!cards.some(card => card?.cardId === task.cardId && card.permission === 'interact')) return reply({ status: 'cannot', code: 'TASK_CARD_NOT_GRANTED' })
-      if (typeof browser.directEntryEnabled === 'function' && browser.directEntryEnabled() !== true) return reply({ status: 'cannot', code: 'decision_unavailable', next: 'use_card_tools' })
+      if (decisionOff()) return reply(OFF)
     }
     if (busy.has(task.taskId)) return reply({ status: 'cannot', code: 'TASK_BUSY' })
     busy.add(task.taskId)
