@@ -3,6 +3,8 @@ import { disabledNativeMcpConfig, readNativeDirectMcpServerIds } from './codex-c
 import { createHash } from 'node:crypto'
 
 const fail = (code, message) => chatError(code, message, 409)
+/** The engine refused to resume an ephemeral thread it keeps no rollout for (-32600 "no rollout found", Codex 0.171): nothing else. */
+export const ephemeralResumeRefused = error => error?.code === -32600 && /no rollout found/i.test(String(error?.message ?? ''))
 
 // A source-reading adapter over the real app-server RPC. No SDK, provider key,
 // daemon, subprocess or fake answer is created by importing this module.
@@ -128,7 +130,15 @@ export class NativeReaderClient {
         this.assertEffectivePolicy(resumed, child.id, configuration)
         await this.assertMcpIsolation(child.id)
       }
-      catch (error) { child.reusable = false; throw error }
+      catch (error) {
+        child.reusable = false
+        // Codex 0.171.0-alpha.13 (measured 2026-11-26, L4 a1): thread/resume of an EPHEMERAL thread fails -32600 "no rollout found", like an
+        // ephemeral fork. The read goes on in a fresh child, proven like every new child (startChild); any other failure still fails the read.
+        if (!ephemeralResumeRefused(error)) throw error
+        await this.request('thread/unsubscribe', { threadId: child.id }).catch(() => {})
+        child = await this.startChild(options, configuration)
+        this.sessions.set(options.readerSessionId, child)
+      }
       this.assertOwner(options.ownerKey, options.signal)
     }
     let resolve, reject

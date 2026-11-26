@@ -59,26 +59,27 @@ const inspect = (version, extra = {}) => inspectNativeCapabilities({ executable:
   probe: () => null, deleteProbe: () => null, steerProbe: () => FP, fingerprint: () => BIN, ...extra })
 
 test('the capability of a binary: steer from its own schema for any identified version; nothing else is granted by it', () => {
-  const native = inspect('0.171.0-alpha.13')
+  // a build EG-Desk does not pin (0.171.0-alpha.13 itself is pinned since L4 a1 and reads steer from its one probe, like 0.162.1 below)
+  const native = inspect('0.171.0-alpha.14')
   assert.match(native.steerContract, HEX)
   assert.equal(native.boardPeerContract, null); assert.equal(native.schemaMatch, false); assert.equal(native.dynamicTools, false)
   // it names the binary, its version and its schema: a different build gets a different proof
   assert.notEqual(inspect('0.172.0').steerContract, native.steerContract)
-  assert.notEqual(inspect('0.171.0-alpha.13', { fingerprint: () => 'c'.repeat(64) }).steerContract, native.steerContract)
-  assert.notEqual(inspect('0.171.0-alpha.13', { steerProbe: () => 'd'.repeat(64) }).steerContract, native.steerContract)
+  assert.notEqual(inspect('0.171.0-alpha.14', { fingerprint: () => 'c'.repeat(64) }).steerContract, native.steerContract)
+  assert.notEqual(inspect('0.171.0-alpha.14', { steerProbe: () => 'd'.repeat(64) }).steerContract, native.steerContract)
   // no capability: schema without it, an unreadable version, a binary that cannot be fingerprinted, a probe that throws
-  assert.equal(inspect('0.171.0-alpha.13', { steerProbe: () => null }).steerContract, null)
-  assert.equal(inspect('0.171.0-alpha.13', { run: () => ({ status: 1, stdout: '' }) }).steerContract, null)
-  assert.equal(inspect('0.171.0-alpha.13', { fingerprint: () => { throw new Error('unreadable') } }).steerContract, null)
-  assert.equal(inspect('0.171.0-alpha.13', { steerProbe: () => { throw new Error('probe failed') } }).steerContract, null)
-  assert.equal(inspect('0.171.0-alpha.13', { steerProbe: () => 'not-a-hash' }).steerContract, null)
+  assert.equal(inspect('0.171.0-alpha.14', { steerProbe: () => null }).steerContract, null)
+  assert.equal(inspect('0.171.0-alpha.14', { run: () => ({ status: 1, stdout: '' }) }).steerContract, null)
+  assert.equal(inspect('0.171.0-alpha.14', { fingerprint: () => { throw new Error('unreadable') } }).steerContract, null)
+  assert.equal(inspect('0.171.0-alpha.14', { steerProbe: () => { throw new Error('probe failed') } }).steerContract, null)
+  assert.equal(inspect('0.171.0-alpha.14', { steerProbe: () => 'not-a-hash' }).steerContract, null)
   // a pinned version reads it from its one probe (no second generation)
   let probes = 0
   const pinned = inspect('0.162.1', { probe: () => { probes++; return { contextContract: true, qaContract: false, schemaFingerprint: FP, boardPeerSchemaFingerprint: 'e'.repeat(64), turnSteerSchemaFingerprint: 'f'.repeat(64) } }, steerProbe: () => { throw new Error('a second generation') } })
   assert.equal(probes, 1); assert.match(pinned.steerContract, HEX); assert.match(pinned.boardPeerContract, HEX); assert.notEqual(pinned.steerContract, pinned.boardPeerContract)
   const caps = capabilitiesOf(native)
   assert.equal(caps.steer, true); assert.equal(caps.steerContract, native.steerContract); assert.equal(caps.turnSteer, false, 'turnSteer is still the board peer contract')
-  assert.equal(capabilitiesOf(inspect('0.171.0-alpha.13', { steerProbe: () => null })).steer, false)
+  assert.equal(capabilitiesOf(inspect('0.171.0-alpha.14', { steerProbe: () => null })).steer, false)
 })
 
 test('the adapter: a plain steer takes the steer proof; additional context takes only the board peer proof; any other proof is refused', async () => {

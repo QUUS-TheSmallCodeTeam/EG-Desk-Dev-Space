@@ -27,6 +27,7 @@ function nativeHarness(options = {}) {
           : [], nextCursor: null }
       }
       if (method === 'thread/start') return { thread: { id: `reader-${++thread}` }, sandbox: { type: options.unsafeSandbox ? 'workspaceWrite' : 'readOnly', networkAccess: options.unsafeNetwork === true }, approvalPolicy: options.unsafeApproval ? 'on-request' : 'never', ...(options.mismatchedThreadModel ? { model: 'another-model' } : {}) }
+      if (method === 'thread/resume' && options.resumeError) throw options.resumeError
       if (method === 'thread/resume') return { thread: { id: options.wrongReuseThread ? 'other-reader' : params.threadId },
         sandbox: { type: options.unsafeReuseSandbox ? 'workspaceWrite' : 'readOnly', networkAccess: options.unsafeReuseNetwork === true },
         approvalPolicy: options.unsafeReuseApproval ? 'on-request' : 'never',
@@ -124,6 +125,31 @@ test('Reader refinement reuses a bounded session and re-enters original source, 
   assert.equal(JSON.parse(turns[1].params.input[0].text).sourceText, h.input.text)
   const third = await h.reader.read(h.input)
   assert.notEqual(third.nativeThreadId, first.nativeThreadId)
+})
+
+test('Codex 0.171: a refused resume of the ephemeral child (no rollout) continues the read in a fresh, proven child; any other resume error still fails it', async () => {
+  const refused = Object.assign(new Error('no rollout found for thread id reader-1'), { code: -32600 })
+  const h = nativeHarness({ resumeError: refused })
+  const first = await h.reader.read(h.input)
+  const second = await h.reader.read({ ...h.input, intent: 'Read the same source from another angle' })
+  assert.notEqual(second.nativeThreadId, first.nativeThreadId)
+  assert.equal(h.calls.filter(call => call.method === 'thread/resume').length, 1)
+  assert.equal(h.calls.filter(call => call.method === 'thread/start').length, 2)
+  assert.ok(h.calls.some(call => call.method === 'thread/unsubscribe' && call.params.threadId === first.nativeThreadId))
+  assert.equal(JSON.parse(h.calls.filter(call => call.method === 'turn/start')[1].params.input[0].text).sourceText, h.input.text)
+  assert.equal(h.reader.sessions.get(h.input.readerSessionId).id, second.nativeThreadId)
+  // the fresh child is checked like any new child: an unsafe start still fails the read
+  const unsafe = nativeHarness({ resumeError: refused, toolsOnReuse: true })
+  await unsafe.reader.read(unsafe.input)
+  await assert.rejects(unsafe.reader.read({ ...unsafe.input, intent: 'Refine' }), error => error.code === 'READER_ISOLATION_UNAVAILABLE')
+  assert.equal(unsafe.calls.filter(call => call.method === 'turn/start').length, 1)
+  for (const other of [Object.assign(new Error('no rollout found for thread id reader-1'), { code: -32603 }), Object.assign(new Error('thread busy'), { code: -32600 })]) {
+    const o = nativeHarness({ resumeError: other })
+    await o.reader.read(o.input)
+    await assert.rejects(o.reader.read({ ...o.input, intent: 'Refine' }), error => error === other)
+    assert.equal(o.calls.filter(call => call.method === 'thread/start').length, 1)
+    assert.equal(o.reader.sessions.get(o.input.readerSessionId).reusable, false)
+  }
 })
 
 test('reused Reader checks MCP isolation again before its next provider turn', async () => {
