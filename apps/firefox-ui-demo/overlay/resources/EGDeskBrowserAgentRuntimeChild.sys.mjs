@@ -1404,16 +1404,17 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       return;
     }
     if (action.type === "scroll") return this.assertScrollGuard(action, guard);
+    // L6 a1b: each refusal of the observed element names, in one closed word, which of these same checks refused it (the helper's targetBy).
     if (!action.ref || action.selector || !guard.target || guard.target.ref !== action.ref) {
-      throw new Error("Browser action requires an observed element reference");
+      throw new Error("Browser action requires an observed element reference [reference]");
     }
     const target = this.guardTarget(action.ref);
     if (!this.isVisible(target) || this.isDisabled(target)) {
-      throw new Error("Browser target is unavailable; observe again");
+      throw new Error(`Browser target is unavailable [${this.isVisible(target) ? "disabled" : "hidden"}]; observe again`);
     }
     if (this.isSensitiveControl(target)) throw new Error("Sensitive fields require the native user path");
     if (action.type === "fill" && !this.isFillableControl(target)) {
-      throw new Error("Browser target is not an editable field; observe again");
+      throw new Error("Browser target is not an editable field [not-editable]; observe again");
     }
     if (action.type === "fill" && (typeof action.text !== "string" || action.text.length > MAX_FILL_TEXT)) {
       throw new Error("Browser fill text exceeds the bounded input; use the native user path");
@@ -1523,15 +1524,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   guardTarget(ref) {
     if (this.frameForRef(ref) === undefined) throw new Error("Browser frame is stale; observe the current page again");
     const target = this.nodeForRef(ref);
-    if (!target) throw new Error("Browser target is unavailable; observe again");
+    if (!target) throw new Error("Browser target is unavailable [gone]; observe again");
     return target;
   }
 
   assertSameTarget(target, ref, expected) {
     const live = this.isCandidate(target) ? this.elementItem(target) : null;
-    if (!live || live.ref !== ref || ["role", "label", "href", "value", "tag"].some(key => live[key] !== expected[key])) {
-      throw new Error("Browser target changed; observe again");
-    }
+    const moved = !live ? "candidate" : live.ref !== ref ? "reference" : ["role", "label", "href", "value", "tag"].find(key => live[key] !== expected[key]);
+    if (moved) throw new Error(`Browser target changed [${moved}]; observe again`);
   }
 
   // Point a click would use: the centre of the part of the element inside its
@@ -1605,10 +1605,10 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const container = action.direction != null;
     if ((container && !boundedDirection) || (!container && action.amount != null) ||
         !guard.target || guard.target.ref !== action.ref) {
-      throw new Error("Browser action requires an observed element reference");
+      throw new Error("Browser action requires an observed element reference [reference]");
     }
     const target = this.guardTarget(action.ref);
-    if (!this.isVisible(target)) throw new Error("Browser target is unavailable; observe again");
+    if (!this.isVisible(target)) throw new Error("Browser target is unavailable [hidden]; observe again");
     this.assertSameTarget(target, action.ref, guard.target);
     if (!container) return;
     const state = this.scrollContainerState(target);

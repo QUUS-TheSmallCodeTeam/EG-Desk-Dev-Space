@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { BROWSER_INPUT_DENIED_REASONS, BROWSER_STALE_REASONS, staleReasonOf } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INPUT_DENIED_REASONS, BROWSER_STALE_REASONS, BROWSER_TARGET_REASONS, staleReasonOf, targetReasonOf } from './egdesk-browser-tool-runtime.mjs'
 import { callTool, world } from './egdesk-claude-browser-world.fixture.mjs'
 
 const actorSource = fs.readFileSync(new URL('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs', import.meta.url), 'utf8')
@@ -58,6 +58,26 @@ test('staleBy: every bracket word the page actor and the Card can write is a kno
   assert.deepEqual(denied, [...BROWSER_INPUT_DENIED_REASONS].sort())
   assert.match(authorizer, /const deny = reason => \{ lease\.deniedBy = reason;/)
   assert.match(surfaceSource, /if \(typeof activityLease\?\.deniedBy === 'string'\) rejected\.inputDeniedBy = activityLease\.deniedBy;/)
+})
+
+test('targetBy (L6 a1b): the page actor\'s element refusal names which of its checks refused, in one closed word; the words cannot drift from the actor', () => {
+  for (const [text, word] of [
+    ['Browser target changed [value]; observe again', 'value'], ['Browser target changed [label]; observe again', 'label'], ['Browser target changed [candidate]; observe again', 'candidate'],
+    ['Browser target is unavailable [hidden]; observe again', 'hidden'], ['Browser target is unavailable [disabled]; observe again', 'disabled'], ['Browser target is unavailable [gone]; observe again', 'gone'],
+    ['Browser target is not an editable field [not-editable]; observe again', 'not-editable'], ['Browser action requires an observed element reference [reference]', 'reference'],
+    ['Browser target changed; observe again', null], ['Browser target changed [made-up]; observe again', null], ['Browser observation is stale [revision]; observe again', null], [undefined, null],
+  ]) assert.equal(targetReasonOf(text), word, String(text))
+  assert.equal(staleReasonOf('Browser target is unavailable [hidden]; observe again'), 'target', 'still the staleBy word target')
+  // every word the actor can write for its element checks is a known one
+  const written = new Set()
+  for (const match of actorSource.matchAll(/Browser (?:target (?:changed|is unavailable|is not an editable field)|action requires an observed element reference) \[([a-z-]+)\]/g)) written.add(match[1])
+  const changed = actorSource.slice(actorSource.indexOf('assertSameTarget(target, ref, expected) {'), actorSource.indexOf('if (moved) throw new Error(`Browser target changed'))
+  for (const match of changed.matchAll(/\? "([a-z-]+)"/g)) written.add(match[1])
+  for (const match of changed.matchAll(/\[("role", "label", "href", "value", "tag")\]/g)) for (const key of JSON.parse(`[${match[1]}]`)) written.add(key)
+  const unavailable = /Browser target is unavailable \[\$\{this\.isVisible\(target\) \? "([a-z-]+)" : "([a-z-]+)"\}\]/.exec(actorSource)
+  assert.ok(unavailable); written.add(unavailable[1]); written.add(unavailable[2])
+  assert.deepEqual([...written].filter(word => !BROWSER_TARGET_REASONS.includes(word)), [])
+  assert.deepEqual([...BROWSER_TARGET_REASONS].filter(word => !written.has(word)), [], 'and no helper word the actor never writes')
 })
 
 test('staleBy end to end: a fill the Card refuses as not sent carries the word to the page tool\'s result and to the browser.tool.failed record', async t => {
