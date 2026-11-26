@@ -28,6 +28,8 @@ const GRAPH = { snapshots: [], edges: [], nodes: [{ id: 'plan', label: 'PostgreS
 const DONE = 'PostgreSQL 마이그레이션 배포 끝났어'
 const NOTE_HEAD = '[noted in this conversation, not confirmed]'
 
+// a1: the stand-in engine records starts[] at once and its start snapshots (atStart, memoAtStart, speechAtStart) after two file reads, so a
+// test that reads a snapshot waits for the last one (speechAtStart) instead of starts[] alone (a loaded machine ran the assertion between them)
 async function world({ confirm = true, consent = true, writeTarget = 'about', writeFirst = true, conflictP = 0.02, holdWrite = false, graph = GRAPH, ctP = 0.97 } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-confirm-')); await chmod(dir, 0o700)
   const w = { dir, now: 1_800_000_000_000, requests: [], starts: [], events: [], turns: 0, threads: 0, clock: createFakeClock(), atStart: [], memoAtStart: [], speechAtStart: [], memoAtReply: [], speechAtReply: [], gate: null }
@@ -189,7 +191,7 @@ test('flag on, budget: a write judgment that is not ready within the loop\'s cap
   const asked = w.ask(DONE)
   await until(() => w.requests.some(r => r.stage === 'write'), 'the write judgment started'); await w.clock.settle()
   await w.clock.advance(2600) // the warm cap (2.5 s) passes with the write still out
-  await until(() => w.starts.length === 2, 'the turn went on without waiting'); assert.equal(settledOf(w, 1), RECORDING_RULE, 'today\'s rule, not a settled state')
+  await until(() => w.starts.length === 2 && w.speechAtStart.length === 2, 'the turn went on without waiting'); assert.equal(settledOf(w, 1), RECORDING_RULE, 'today\'s rule, not a settled state')
   assert.deepEqual(w.atStart[1], [], 'nothing stored when the engine started')
   w.gate.resolve(); const run = await asked
   assert.deepEqual(await w.readings(), [['ontology:plan', 'done', 'pending']], 'stored after the answer')
@@ -290,7 +292,7 @@ test('flag on, budget: a new record whose judgment is not ready within the cap i
   const asked = w.ask(NEWFACT)
   await until(() => w.requests.some(r => r.stage === 'write'), 'the write judgment started'); await w.clock.settle()
   await w.clock.advance(2600)
-  await until(() => w.starts.length === 2, 'the turn went on without waiting'); assert.equal(settledOf(w, 1), RECORDING_RULE); assert.deepEqual(w.memoAtStart[1], [])
+  await until(() => w.starts.length === 2 && w.speechAtStart.length === 2, 'the turn went on without waiting'); assert.equal(settledOf(w, 1), RECORDING_RULE); assert.deepEqual(w.memoAtStart[1], [])
   w.gate.resolve(); await asked
   assert.deepEqual(w.memoAtReply[1], [], 'not stored before the reply: not settled in time'); assert.equal((await w.memos()).length, 1, 'stored once'); assert.equal(w.speechIds().filter(id => id === w.lastUserId()).length, 1)
   w.close()
