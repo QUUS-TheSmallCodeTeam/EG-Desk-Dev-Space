@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { CURRENT_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
-import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
+import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
 
 // Lane A/native adapter: chrome /chat/send includes selectedSources from the
 // submitted Chat draft before it is cleared. Never infer action authority from
@@ -670,7 +670,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     const transitionRecovered = !!(transition &&
       snapshot.documentId !== transition.priorDocumentId &&
       ['interactive', 'complete'].includes(snapshot.readyState) &&
-      !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
+      !transition.wasAlreadyTrue && (checkPostcondition(transition.condition, snapshot, transition.ref) ||
+        (transition.typedGet && formResultLanded(snapshot.url, transition.condition.value))))
     if (transitionRecovered) { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
     if (card.lastFill && card.lastFill.documentId !== snapshot.documentId) card.lastFill = null
     narrowPointerFallback(card, snapshot)
@@ -931,6 +932,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     // A single observation authorizes at most one dispatch. Unknown outcomes are
     // not retried automatically; the next action requires a new observation.
     card.observation = null
+    const previousFill = card.lastFill
     if (!(tool === 'egdesk_browser_press' && card.lastFill?.ref === args.ref)) card.lastFill = null
     // One dispatched press per no-effect click. A proven refusal may restore
     // only the original scope; it never restores the spent observation.
@@ -965,7 +967,14 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
       card.uncertainAction = { action: action.type, timing: { ...trace } }
       if (action.type === 'navigate' ||
           (['click', 'press', 'pointer-click', 'type-text'].includes(action.type) && condition && ['url', 'visible-text'].includes(condition.kind))) {
-        card.pendingTransition = { condition, ref: args.ref || null,
+        // The loop can recognize a GET landing with added site parameters. Its next action must not
+        // remain locked behind an exact-URL mismatch. Require the confirmed fill on this document,
+        // the observed submitter's exact GET destination and a new, ready document (recordObservation).
+        const filled = previousFill?.documentId === observed.snapshot.documentId && observed.snapshot.interactiveElements.find(el => el.ref === previousFill.ref && el.value === previousFill.value)?.value
+        const typedGet = action.type === 'navigate' && condition?.kind === 'url' && args.url === condition.value &&
+          sameSiteNavigation(observed.snapshot.url, args.url) && filled && [...new URL(args.url).searchParams.values()].includes(filled) &&
+          observed.snapshot.interactiveElements.some(el => !el.disabled && el.nav?.form?.method === 'get' && el.nav.form.submitUrl === args.url && !el.nav.form.sensitive && !el.nav.sensitiveRegion && ['submit', 'image'].includes(el.nav.type))
+        card.pendingTransition = { ...(typedGet ? { typedGet: true } : {}), condition, ref: args.ref || null,
           priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue,
           ...(action.type === 'navigate' && observed.snapshot.innerWindowId ? { priorInnerWindowId: observed.snapshot.innerWindowId } : {}) }
       }
@@ -1122,7 +1131,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     // The press reached what the no-effect click could not: the Card's lock
     // from that click ends with an observed postcondition.
     if (matched && action.type === 'pointer-click') { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
-    if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, documentId: observed.snapshot.documentId }
+    if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, value: args.text, documentId: observed.snapshot.documentId }
     return { status: matched ? 'postcondition-observed' : 'postcondition-unverified', ...common,
       postcondition: { ...condition, matched, wasAlreadyTrue },
       ...(action.type === 'navigate' ? { navigationScope, pageLoadVerified: false } : {}),

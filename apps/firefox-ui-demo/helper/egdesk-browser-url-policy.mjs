@@ -285,3 +285,13 @@ export function addAllowedSite(policy, entry, options = {}) {
   return normalizeNavigationPolicy({ ...current.policy, allow: [...current.policy.allow, ...site.patterns],
     block: [...current.policy.block] })
 }
+
+// GET form landing: preserve submitted parameters; the site may add others.
+export function formResultLanded(actual, expected) {
+  let a, e
+  try { a = new URL(actual); e = new URL(expected) } catch { return false }
+  const path = url => url.pathname.replace(/\/+$/, '') || '/'
+  if (a.origin !== e.origin || path(a) !== path(e)) return false
+  const submitted = [...e.searchParams].filter(([, value]) => value !== '')
+  return submitted.length > 0 && submitted.every(([name, value]) => a.searchParams.getAll(name).includes(value))
+}

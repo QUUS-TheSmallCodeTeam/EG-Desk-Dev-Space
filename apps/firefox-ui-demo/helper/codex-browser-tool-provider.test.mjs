@@ -625,3 +625,13 @@ test('egdesk_browser_reflex is appended only with a decision key and mode on; di
   mode = 'off'
   assert.equal(verifiedManifestOwners(recorded, manifestOf(provider.specs()), ownersOf(provider.specs())).status, 'verified')
 })
+
+test('a waiting reflex can distinguish a refused Card site from an unanswered one; neither authorizes movement', async () => {
+  const { provider } = fixture({})
+  const scope = provider.reflexScope({ clientThreadId: 'thread' }, {}, 'card')
+  for (const status of ['site-refused', 'site-pending']) {
+    provider.dispatch = async () => ({ success: false, contentItems: [{ text: JSON.stringify({ status }) }] })
+    assert.deepEqual(await scope.callTool('egdesk_browser_request_site', { cardId: 'card', site: 'example.org' }), { status })
+    await assert.rejects(scope.callTool('egdesk_browser_navigate', {}), { code: 'TOOL_FAILED' })
+  }
+})

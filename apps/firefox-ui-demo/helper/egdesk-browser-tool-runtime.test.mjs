@@ -2022,3 +2022,24 @@ test('c34: a card on an AI provider\'s sign-in domain cannot be observed, screen
     assert.equal((await other.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })).status, 'observed')
   } finally { if (saved === undefined) delete process.env.EGDESK_TERMINAL_OPEN_URL; else process.env.EGDESK_TERMINAL_OPEN_URL = saved }
 })
+
+test('only a confirmed fill + observed GET search recovers the navigation lock on a new document with added parameters', async () => {
+  for (const [land, form, ok] of [['cat', true, true], ['other', true, false], ['cat', false, false]]) {
+    const f = fixture(), cardId = 'browser-1', url = 'https://example.test/?q=cat'
+    const field = { ...snapshot().interactiveElements[0], role: 'textbox', tag: 'input', label: '검색' }
+    const call = (name, args = {}) => f.service.dispatch(run, { tool: `egdesk_browser_${name}`, arguments: { cardId, ...args } })
+    f.setSnapshot(snapshot(3, { interactiveElements: [field] }))
+    f.setNavigationAfterNull(true)
+    await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+    const before = await call('observe')
+    const fill = await call('fill', { observationId: before.observationId, expectedRevision: 3, ref: field.ref, expectedTarget: field, text: 'cat', postcondition: { kind: 'target-value', value: 'cat' } })
+    assert.equal(fill.status, 'postcondition-observed')
+    f.setSnapshot(snapshot(4, { interactiveElements: [{ ...field, value: 'cat' }, { ...snapshot().interactiveElements[0], ref: 'el_2', nav: { type: 'submit', form: { method: form ? 'get' : 'post', fields: ['text'], submitUrl: url } } }] }))
+    const typed = await call('observe')
+    await call('navigate', { observationId: typed.observationId, expectedRevision: 4, url, postcondition: { kind: 'url', value: url } })
+    f.setSnapshot(snapshot(5, { documentId: 'new', url: `https://example.test/?q=${land}&ia=web`, readyState: 'complete' }))
+    const after = await call('observe')
+    assert.equal(after.navigationPostconditionReobserved, ok)
+    assert.equal(Boolean(after.uncertainAction), !ok)
+  }
+})

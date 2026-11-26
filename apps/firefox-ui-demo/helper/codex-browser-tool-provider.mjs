@@ -328,7 +328,15 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
         const output = await this.dispatch(run, { tool: name, arguments: toolArgs,
           callId: `${event.callId || 'reflex'}.reflex-${step}-${randomUUID()}`, namespace: event.namespace || null, ...(actor === 'decision' || actor === 'model' ? { actor } : {}) })
         const text = output?.contentItems?.[0]?.text ?? ''
-        if (!output?.success) throw reflexStepError(text, name)
+        if (!output?.success) {
+          // A negative D25 answer is a closed receipt, not a protocol error. Only the waiting reflex consumes it.
+          if (name === 'egdesk_browser_request_site') {
+            let receipt
+            try { receipt = JSON.parse(text) } catch { /* handled as a tool error below */ }
+            if (!receipt?.error && ['site-refused', 'site-pending'].includes(receipt?.status)) return { status: receipt.status }
+          }
+          throw reflexStepError(text, name)
+        }
         return JSON.parse(text)
       }
       // Page text reaches the decision model only where it may reach this run's models: the Agent tool ceiling and the selected Card grant.
