@@ -959,7 +959,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     const callId = short(event?.callId, 160) ? event.callId : null
     const pending = requestUi({ kind: 'act', runId: binding.runId,
       clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-      ...(callId ? { callId } : {}), action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run, trace)
+      ...(callId ? { callId } : {}), ...(event?.actor === 'decision' || event?.actor === 'model' ? { actor: event.actor } : {}), // a1: who chose this action (the task tool's loop or the conversation model), for the Card's record
+      action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run, trace)
     binding.pending.add(pending)
     let response
     try { response = await pending }

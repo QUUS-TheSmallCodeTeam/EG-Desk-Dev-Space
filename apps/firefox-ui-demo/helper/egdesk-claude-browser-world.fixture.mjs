@@ -14,6 +14,7 @@ import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mj
 import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { OWNER, pageWorld } from './egdesk-browser-live-runner.mjs'
 import { createPageToolsProvider } from './egdesk-page-tools.mjs'
+import { createBrowserTaskTool } from './egdesk-browser-task-tool.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { browserSchemaReady } from './egdesk-claude-browser-route.mjs'
@@ -36,7 +37,7 @@ const PAGES = () => ({ '/home': { text: ['쇼핑몰'], elements: [{ ref: 'q', ro
  * world(t, { harness, pageTools, codexReady, oldReadiness }): the bridge's wiring in miniature. harness / pageTools: the two flags (EGDESK_CLAUDE_HARNESS, EGDESK_PAGE_TOOLS).
  * codexReady: the Codex slot's own answer (qaReady), false = no Codex app-server (the real-window case). oldReadiness: the Browser provider's readiness as u4 left it (the Codex slot's, for every engine).
  */
-export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null, realTransport = false, siteUnreflected = false, staleSwap = null } = {}) {
+export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null, realTransport = false, siteUnreflected = false, staleSwap = null, taskDecide = null } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-claude-route-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const root = path.join(base, 'project'); fs.mkdirSync(root); const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
   const transports = [], events = [], ran = [], decisionBodies = [], receiveErrors = []
@@ -112,8 +113,16 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
     uiId = real.registerClient(client)
     transport = real
   }
-  const browser = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, schemaReady: readiness })
-  const page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => browser.dispatch(run, event) }, ledger: wiring.ledger })
+  // L8 a1: taskDecide(body) -> answers (the objective loop's decision model, scripted): the Browser provider gets a decision config (mode on, a key, one recipient) and the page tools carry the
+  // browser task tool (egdesk-browser-task-tool.mjs) over that provider, as the bridge wires them with EGDESK_BROWSER_TASK_TOOL=on. Without it both are exactly as before.
+  const loopClient = typeof taskDecide === 'function' ? createDecisionClient({ getApiKey: () => 'egd-synthetic-not-a-key-0002', recipientForKey: () => 'b'.repeat(64), fetchImpl: async (url, init) => {
+    const body = JSON.parse(init.body); decisionBodies.push(body)
+    return Response.json({ model: 'gpt-6-luna', answers: taskDecide(body), usage: { input_tokens: 40 } })
+  } }) : null
+  const browser = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, schemaReady: readiness,
+    ...(loopClient ? { decision: { mode: () => 'on', configured: () => true, recipient: () => 'b'.repeat(64), generation: () => 1, client: loopClient } } : {}) })
+  const taskTool = loopClient ? createBrowserTaskTool({ browser }) : null
+  const page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => browser.dispatch(run, event) }, ledger: wiring.ledger, ...(taskTool ? { taskTool } : {}) })
   // the decision model: a scripted answer per question name (predicates by name; a pick is 'none'); every request body is kept
   const predicates = decisions?.predicates ?? {}
   const decisionClient = decisions ? createDecisionClient({ getApiKey: () => 'egd-synthetic-not-a-key-0001', recipientForKey: () => 'a'.repeat(64), fetchImpl: async (url, init) => {
