@@ -2064,3 +2064,17 @@ test('only a confirmed fill + observed GET search recovers the navigation lock o
     assert.equal(Boolean(after.uncertainAction), !ok)
   }
 })
+
+test('internal named click observes past loading; serialized copies cannot request the internal condition', async () => {
+  const { NAMED_CHANGE } = await import('./egdesk-browser-tool-runtime.mjs')
+  const f = fixture(); await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  const obs = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const args = { ...clickArgs(obs), expectedTarget: obs.snapshot.interactiveElements[0] }
+  await assert.rejects(f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: { ...args, postcondition: { ...NAMED_CHANGE } } }), { code: 'INVALID_BROWSER_TOOL' })
+  f.setReceiptEditor(receipt => { const loading = snapshot(4, { text: ['Loading...'], interactiveElements: [] }); f.setSnapshot(loading)
+    setTimeout(() => f.setSnapshot(snapshot(5, { text: ['Hello World!'], interactiveElements: [] })), 320)
+    return { ...receipt, after: loading }
+  })
+  const result = await f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: { ...args, postcondition: NAMED_CHANGE } })
+  assert.deepEqual([result.status, result.after.text, f.actionCalls], ['postcondition-observed', ['Hello World!'], 1]); assert.notEqual(result.observationId, obs.observationId)
+})

@@ -371,3 +371,24 @@ test('L8 C4: session-end, ordering, grant and cancellation destinations are not 
   assert.deepEqual(options.map(o => o.item.element.ref), ['ok1', 'ok2'])
   assert.equal(excluded.gated, hrefs.length)
 })
+
+test('only the person’s own request can name a single standalone ordinary button', () => {
+  const nav = { standalone: true, form: null, type: 'submit', regionLabels: [], regionLabel: '', sensitiveRegion: false }
+  const start = element('el_1', 'button', 'Start', { nav })
+  const allowed = (els, namedButtonRequest) => buildReflexCandidates(page(REPORTS, els), { namedButtonRequest }).options.some(o => o.item.named)
+  assert.equal(allowed([start], '“ＳＴＡＲＴ”를 눌러줘'), true)
+  for (const [els, request] of [ [[start], undefined], [[start], 'Restart 눌러줘'], [[start, { ...start, ref: 'el_2' }], 'Start 누르고'],
+    [[{ ...start, nav: { ...nav, form: { method: 'post' } } }], 'Start 눌러'], [[{ ...start, label: 'Log in' }], 'Log in 눌러'],
+    [[{ ...start, nav: { ...nav, regionLabels: ['Billing'] } }], 'Start 눌러'], [[{ ...start, label: 'Delete' }], 'Delete 누르고'],
+    [[{ ...start, nav: { ...nav, sensitiveRegion: true } }], 'Start 누르고'], [[{ ...start, href: 'https://outside.test' }], 'Start 누르고'] ]) assert.equal(allowed(els, request), false)
+})
+
+test('named Start: one decision, one press, return only the verified fresh page as done', async () => {
+  const goal = 'Start 누르고 나오는 글자 알려줘', start = element('el_1', 'button', 'Start', { nav: { standalone: true, form: null, regionLabel: '', regionLabels: [], sensitiveRegion: false } })
+  const before = page(REPORTS, [start]), after = page(REPORTS, [], ['Hello World!'])
+  const { client } = decisions(q => q.name === 'next_step' ? choice('[B1] Start') : q.name === 'page_state' ? choice('content') : { type: 'predicate', probability: 0.05 })
+  const calls = [], result = await runBrowserReflex({ cardId: 'card', goal, namedButtonRequest: goal, client, callTool: async name => {
+    calls.push(name); return name.endsWith('observe') ? { snapshot: before, observationId: 'first' } : { after, observationId: 'last', status: 'postcondition-observed' }
+  } })
+  assert.deepEqual([result.outcome, result.text, result.observationId, result.decisions], ['done', ['Hello World!'], 'last', 1]); assert.deepEqual(calls, ['egdesk_browser_observe','egdesk_browser_click'])
+})
