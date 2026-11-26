@@ -565,7 +565,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
         ? 'Which option moves toward the goal next? For an ordinal search result use the result destinations in page order, not the search page navigation controls. Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
         : 'Which option moves toward the goal next?', choices),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
-      ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person explicitly request the exact named choice AND state of the selected check/uncheck/list action? No if merely inferred or unspecified.')] : []),
+      ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
       ...(popupProof ? [predicateQuestion('open_only', 'Is opening the selected link itself the whole request, with no reading, typing or other action requested on the destination?')] : []),
