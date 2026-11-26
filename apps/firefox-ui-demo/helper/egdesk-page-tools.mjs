@@ -236,6 +236,17 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     return respond(true, { status: 'opened', cardId: done.data?.cardId ?? null, host: parsed.host.toLowerCase(), next: 'read' })
   }
 
+  // a1: the task tool's guidance opens a link to another site through this tool's own press (its site question, u9 D25), never a path of its own: the link is found on a FRESH
+  // observation of this provider (so the press reads the same refs), by its exact address
+  const pressLink = async (run, event, { cardId, href } = {}) => {
+    if (typeof cardId !== 'string' || typeof href !== 'string' || !href) return refused('PAGE_REF_REQUIRED')
+    const fresh = await observe(run, event, cardId, 'taskobs')
+    if (fresh.error) return respond(true, { status: 'refused', code: fresh.error })
+    const element = (fresh.snapshot.interactiveElements ?? []).find(item => typeof item?.ref === 'string' && item.href === href && String(item.tag).toLowerCase() === 'a')
+    if (!element) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
+    return act(run, event, { cardId, ref: element.ref }, 'press')
+  }
+  try { taskTool?.usePagePress?.(pressLink) } catch { /* the task tool then offers no link to another site */ }
   return {
     providerId: PAGE_TOOLS_PROVIDER_ID,
     runtime: null,

@@ -30,6 +30,7 @@ export const BROWSER_TASK_TOOL_SPEC = Object.freeze({
   type: 'function', name: BROWSER_TASK_TOOL_NAME,
   description: 'Hand a browser task on a Card the person granted for operation (their Browser card menu: Chat 조작 허용) to EG-Desk\'s fast decision loop instead of one tool call per click. ' +
     'It opens same-site links, types the values you give into the fields they belong in, runs read-only searches and scrolls, deciding each step in well under a second, until the goal is met or it needs you. ' +
+    'Give values for anything to type that the person did not say word for word (it only picks text from their message, it never writes). A link to another site is offered in options; choosing it asks the person about that site. ' +
     'Call it again in the same turn as often as needed: with values when it answers needs_value, with guidance {choose: id} (an id from options) when it answers needs_guidance, and without goal to continue the same task. ' +
     'status: done | needs_value (ask.field needs text: give it in values, or ask the person) | needs_guidance (choose one of options, or ask the person) | human_step (sign-in, a code, payment, permission or a submit only the person may do) | cannot (see code; you may use egdesk_card_read, egdesk_card_press and egdesk_card_type yourself). ' +
     'It never pays, grants permission, deletes or submits a form that writes. The result fields are for you only: tell the person what happened in everyday words.',
@@ -72,7 +73,7 @@ export function validateTaskArgs(args) {
 // ---- the spans code cuts out of the person's message and the goal (the decision model chooses one; it never writes text) ----
 const QUOTED = /["“”„'‘’「」『』《》]([^"“”„'‘’「」『』《》\n]{1,80})["“”„'‘’「」『』《》]/g
 // words that ask for an action, and the connectives after them: a value never spans one (a request's verbs split it into segments)
-const ACTION_WORD = /^(검색|입력|적어|넣어|찾아|열어|열고|눌러|클릭|요약|정리|이동|들어가|알려|보여|가서|가줘|해줘|해주세요|해서|하고|하면|해봐|줘|주세요|좀|search|type|enter|find|open|click|go|look|please|and|then)/i
+const ACTION_WORD = /^(검색|입력|적어|넣어|찾아|열어|열고|눌러|클릭|요약|정리|이동|들어가|알려|보여|가서|가줘|틀어|재생|보내|해줘|해주세요|해서|하고|하면|해봐|줘|주세요|좀|search|type|enter|find|open|click|go|look|please|and|then)/i
 const PARTICLE = ['이라고', '라고', '에서', '에게', '한테', '으로', '을', '를', '은', '는', '에', '로']
 const EDGE_PUNCTUATION = /^[\s.,!?~…·:;()[\]{}<>]+|[\s.,!?~…·:;()[\]{}<>]+$/g
 const stripParticle = word => { for (const p of PARTICLE) if (word.length - p.length >= 2 && word.endsWith(p)) return word.slice(0, -p.length); return null }
@@ -136,16 +137,21 @@ export function pickTaskCard(cards, cardId) {
 
 const opOfValue = value => { const kind = OPTION_VALUE.exec(String(value ?? ''))?.[1]; return kind === 'L' ? 'open' : kind === 'F' ? 'fill' : 'press' }
 /** The elements the model may choose between (option values '[L1] label'), as ids and short labels; the task remembers the values for the guidance call. */
-function offer(task, values, code) {
+function offer(task, values, code, outside = []) {
   const seen = new Set()
-  const list = (Array.isArray(values) ? values : []).filter(value => typeof value === 'string' && OPTION_VALUE.test(value) && !seen.has(value) && seen.add(value)).slice(0, BROWSER_TASK_LIMITS.options)
-  task.offered = list.map((value, index) => ({ id: `o${index + 1}`, value, label: strip(value), op: opOfValue(value) }))
-  return { status: 'needs_guidance', code, options: task.offered.map(({ id, label }) => ({ id, label })) }
+  const list = (Array.isArray(values) ? values : []).filter(value => typeof value === 'string' && OPTION_VALUE.test(value) && !seen.has(value) && seen.add(value))
+  const far = (Array.isArray(outside) ? outside : []).slice(0, Math.max(0, BROWSER_TASK_LIMITS.options - Math.min(list.length, 2)))
+  const near = list.slice(0, BROWSER_TASK_LIMITS.options - far.length)
+  task.offered = [...far.map(link => ({ label: compactText(link.label, BROWSER_TASK_LIMITS.optionLabel), op: 'open', href: link.href, site: hostOf(link.href) })), ...near.map(value => ({ value, label: strip(value), op: opOfValue(value) }))]
+    .map((item, index) => ({ id: `o${index + 1}`, ...item }))
+  return { status: 'needs_guidance', code: far.length && !near.length ? 'outside_site' : code, options: task.offered.map(({ id, label, site }) => ({ id, label, ...(site ? { site } : {}) })) }
 }
 
 /** outcomeBody(task, result) -> { status, code?, ask?, options?, controls?, target?, next? }: the reflex result in the tool's closed words. */
-export function outcomeBody(task, result) {
+// outside: the links to another site on the page the loop ended on (onPage offSite); they are offered where the loop found no way on (the person is asked about the site).
+export function outcomeBody(task, result, { outside = [] } = {}) {
   const r = record(result) ? result : {}
+  const far = Array.isArray(outside) ? outside.filter(link => typeof link?.label === 'string' && link.label && typeof link.href === 'string') : []
   switch (r.outcome) {
     case 'done': return { status: 'done' }
     case 'needs_free_text': {
@@ -158,12 +164,13 @@ export function outcomeBody(task, result) {
     case 'handoff': task.offered = []; return { status: 'human_step', code: CODE.test(r.pageState ?? '') ? r.pageState : 'sensitive_flow' }
     case 'escalated': {
       if (r.reason === 'human_step') { task.offered = []; return { status: 'human_step', code: 'person_only_controls', ...(Array.isArray(r.controls) && r.controls.length ? { controls: r.controls.filter(label => typeof label === 'string').slice(0, 3).map(label => compactText(label, BROWSER_TASK_LIMITS.optionLabel)) } : {}) } }
-      if (r.reason === 'uncertain') return offer(task, (r.ranked || []).map(row => row?.value), 'uncertain')
+      if (r.reason === 'uncertain') return offer(task, (r.ranked || []).map(row => row?.value), 'uncertain', far)
+      if (r.reason === 'blocked' && far.length) return offer(task, [], 'outside_site', far)
       task.offered = []
       if (r.reason === 'press_needs_expected_effect') return { status: 'cannot', code: 'press_needs_expected_effect', ...(r.suggestion?.option ? { target: strip(r.suggestion.option) } : {}), next: 'egdesk_card_press' }
       return { status: 'cannot', code: CODE.test(r.reason ?? '') ? r.reason : 'blocked', ...(CODE.test(r.code ?? '') ? { detail: r.code } : {}) }
     }
-    case 'max_steps': task.offered = []; return { status: 'cannot', code: r.reason === 'step_limit' ? 'step_limit' : 'step_rejected', ...(CODE.test(r.code ?? '') ? { detail: r.code } : {}) }
+    case 'max_steps': if (r.reason === 'step_limit' && far.length) return offer(task, [], 'outside_site', far); task.offered = []; return { status: 'cannot', code: r.reason === 'step_limit' ? 'step_limit' : 'step_rejected', ...(CODE.test(r.code ?? '') ? { detail: r.code } : {}) }
     case 'fallback': task.offered = []; return { status: 'cannot', code: 'decision_unavailable', next: 'use_card_tools' }
     case 'aborted': task.offered = []; return { status: 'cannot', code: 'aborted' }
     case 'guidance_unknown': return { status: 'needs_guidance', code: 'option_unknown', options: (task.offered || []).map(({ id, label }) => ({ id, label })) }
@@ -183,6 +190,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
   if (!browser || typeof browser.runDirectTask !== 'function' || typeof browser.reflexScope !== 'function') throw new TypeError('the task tool needs the Browser provider (runDirectTask, reflexScope)')
   const t = decisionThresholds(thresholds)
   const busy = new Set()
+  let pagePress = null // the page tools' own press (bound by the page tools provider): a link to another site goes through its site question
   const message = run => { try { const text = typeof messageOf === 'function' ? messageOf(run) : null; return typeof text === 'string' && text.trim() ? compactText(text, BROWSER_TASK_LIMITS.message) : null } catch { return null } }
 
   function eventsFor(run, task, sink) {
@@ -223,6 +231,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     if (!offered) return { outcome: 'guidance_unknown' }
     const scope = browser.reflexScope(run, { callId: `${event?.callId ?? task.taskId}.guide`, namespace: null }, task.cardId)
     const t0 = clock()
+    if (offered.href) return outside(run, event, task, offered, scope, onPage, emit, t0)
     let observed
     try { observed = await scope.callTool('egdesk_browser_observe', { cardId: task.cardId }) } catch (error) { return { outcome: 'escalated', reason: 'observe_failed', ...(CODE.test(error?.code ?? '') ? { code: error.code } : {}) } }
     const snapshot = observed?.snapshot
@@ -250,12 +259,34 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     return null
   }
 
+  // A link to another site the model chose: found again on the page as it is now (the same address and words), then pressed through the page tools, which ask the person
+  // about the site (the Card's question) and follow it once. Refused or unanswered: nothing moved.
+  async function outside(run, event, task, offered, scope, onPage, emit, t0) {
+    if (typeof pagePress !== 'function') return { outcome: 'escalated', reason: 'outside_site_unavailable' }
+    let out = null
+    try { out = JSON.parse((await pagePress(run, { tool: 'egdesk_card_press', callId: `${event?.callId ?? task.taskId}.site`, arguments: { cardId: task.cardId } }, { cardId: task.cardId, href: offered.href }))?.contentItems?.[0]?.text ?? 'null') } catch { out = null }
+    if (out?.status === 'refused' && out?.code === 'PAGE_REF_UNKNOWN') return { outcome: 'guidance_gone' }
+    const meta = { op: 'open', target: compactText(offered.label, 40) }
+    if (out?.status !== 'pressed') {
+      emit({ failed: 'egdesk_browser_navigate', ok: false, stepMs: clock() - t0, ...meta, ...(CODE.test(out?.code ?? '') ? { code: out.code } : {}) }, 'model')
+      if (out?.status === 'person_step') return { outcome: 'escalated', reason: 'human_step', controls: [offered.label] }
+      return { outcome: 'escalated', reason: out?.site === 'site-refused' || out?.code === 'BROWSER_NAVIGATE_OUT_OF_SCOPE' ? 'site_not_allowed' : 'tool_failed', ...(CODE.test(out?.code ?? '') ? { code: out.code } : {}) }
+    }
+    emit({ action: 'egdesk_browser_navigate', ok: true, stepMs: clock() - t0, ...meta }, 'model')
+    try { await scope.callTool('egdesk_browser_wait', { cardId: task.cardId, for: 'load', timeoutMs: 10000 }) } catch { /* the next observation shows the page as it is */ }
+    onPage({ title: null, host: offered.site ?? null, offSite: [] })
+    task.userContext.push(`Chosen in the chat for this task: ${offered.label} (on ${offered.site ?? 'another site'})`)
+    task.steps += 1
+    task.offered = []
+    return null
+  }
+
   async function work(run, event, task, args, started) {
     const steps = []
     const emit = eventsFor(run, task, steps)
     let page = task.lastPage ?? null
     const observer = info => { store.progress?.(task, info); emit(info) }
-    const onPage = info => { page = { title: info?.title ?? null, host: info?.host ?? null }; task.lastPage = page }
+    const onPage = info => { page = { title: info?.title ?? null, host: info?.host ?? null, offSite: Array.isArray(info?.offSite) ? info.offSite : [] }; task.lastPage = page }
     task.status = 'running'; task.pause = null
     let values = record(args.values) ? { ...args.values } : {}
     let result = null
@@ -276,7 +307,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       }
       result = out ?? { outcome: 'fallback' }
     }
-    const body = outcomeBody(task, result)
+    const body = outcomeBody(task, result, { outside: typeof pagePress === 'function' ? page?.offSite ?? [] : [] })
     task.status = body.status === 'done' ? 'done' : body.code === 'decision_unavailable' ? 'cancelled' : 'paused'
     task.pause = task.status === 'paused' ? { kind: body.status === 'needs_value' || body.status === 'needs_guidance' ? 'need_context' : 'cannot_proceed', code: body.code ?? body.status } : null
     store.touch(task)
@@ -316,5 +347,5 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     finally { busy.delete(task.taskId) }
   }
 
-  return { name: BROWSER_TASK_TOOL_NAME, spec: BROWSER_TASK_TOOL_SPEC, store, handle }
+  return { name: BROWSER_TASK_TOOL_NAME, spec: BROWSER_TASK_TOOL_SPEC, store, handle, usePagePress(press) { pagePress = typeof press === 'function' ? press : null } }
 }

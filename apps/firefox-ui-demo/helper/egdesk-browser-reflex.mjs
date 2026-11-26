@@ -213,6 +213,7 @@ export function readOnlyPress(element, snapshot, { classify = classifyAction, is
 
 // c26: the snapshot's own scroll state (the Firefox child reports { x, y, maxY }): more than a few pixels left below. Unknown is not "more".
 export const MORE_BELOW_PX = 16
+export const MAX_OFF_SITE = 6
 export function contentBelow(snapshot) {
   const scroll = snapshot?.scroll
   return record(scroll) && Number.isFinite(scroll.y) && Number.isFinite(scroll.maxY) && scroll.maxY - scroll.y > MORE_BELOW_PX
@@ -242,6 +243,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   const counters = { navigate: 0, press: 0, fill: 0 }
   const personOnly = [] // c22: the controls only the person may operate (no action exists for them), named for the step
   const withheld = [] // c26: every control withheld as the person's own (a button withheld by vocabulary, a control with no action), in page order, named for the note
+  const offSite = [] // a1: links to another site (never options: the loop follows same-site links only), in page order, for the task tool's guidance (the person is asked about the site)
   for (const element of elements) {
     if (!record(element) || typeof element.ref !== 'string' || !element.ref) continue
     const kind = elementKind(element, { textComboboxes })
@@ -285,7 +287,12 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
       continue
     }
     if (kind === 'navigate') {
-      if (!isAllowedUrl(element.href, snapshot)) { excluded.offSite++; continue }
+      if (!isAllowedUrl(element.href, snapshot)) {
+        excluded.offSite++
+        const words = hrefWords(element.href)
+        if (label && offSite.length < MAX_OFF_SITE && !(words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none')) offSite.push({ label, href: element.href })
+        continue
+      }
       const words = hrefWords(element.href)
       if (words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none') { excluded.gated++; continue }
       counters.navigate++
@@ -299,7 +306,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   }
   const kept = entries.slice(0, Math.max(0, maxOptions))
   excluded.overflow = entries.length - kept.length
-  return { options: uniqueOptions(kept), excluded, personOnly, withheld }
+  return { options: uniqueOptions(kept), excluded, personOnly, withheld, offSite }
 }
 
 export function expectedTargetOf(element) {
@@ -615,8 +622,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     const entry = { step, observationId, revision: snapshot.revision, url: snapshot.url, actions: [] }
     steps.push(entry)
     // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
-    try { onPage?.({ step, title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOfUrl(snapshot.url) }) } catch { /* an observer never affects the loop */ }
-    const { options, excluded, personOnly, withheld } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    const { options, excluded, personOnly, withheld, offSite } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    try { onPage?.({ step, title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOfUrl(snapshot.url), offSite: offSite.map(link => ({ label: compactText(link.label, 60), href: link.href })) }) } catch { /* an observer never affects the loop */ }
     entry.excluded = excluded
     // Code rule (R3/R5): nothing on this page may be chosen and something was withheld as the person's own control (submit, payment,
     // permission, delete). There is nothing to judge, so no request is made: the step is the person's. Real measurement (2026-11-25):

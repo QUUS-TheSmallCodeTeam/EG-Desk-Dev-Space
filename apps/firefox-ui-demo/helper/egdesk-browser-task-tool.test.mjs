@@ -256,3 +256,66 @@ test('a1 a resumed loop takes the values given again; a value already typed is n
   const store = createBrowserTaskStore()
   assert.equal(store.size, 0)
 })
+
+test('a1 a link to another site: offered where the loop found no way on; choosing it goes through the page tools\' press (the site question), then the loop goes on', async () => {
+  const task = { offered: [] }
+  const far = [{ label: '장화 신은 고양이 - 나무위키', href: 'https://namu.wiki/w/puss' }]
+  const body = outcomeBody(task, { outcome: 'escalated', reason: 'uncertain', ranked: [{ value: 'scroll_more' }] }, { outside: far })
+  assert.deepEqual(body, { status: 'needs_guidance', code: 'outside_site', options: [{ id: 'o1', label: '장화 신은 고양이 - 나무위키', site: 'namu.wiki' }] })
+  assert.equal(outcomeBody({ offered: [] }, { outcome: 'escalated', reason: 'error_page' }, { outside: far }).status, 'cannot', 'an error page is not a reason to leave the site')
+  assert.equal(outcomeBody({ offered: [] }, { outcome: 'escalated', reason: 'blocked' }, { outside: far }).code, 'outside_site')
+
+  let round = 0
+  const pressed = []
+  const browser = {
+    directEntryEnabled: () => true,
+    reflexScope: () => ({ client: null, callTool: async () => ({ status: 'wait-condition-met' }), isDecisionCurrent: () => true }),
+    runDirectTask: async (_run, args) => {
+      round++
+      if (round === 1) { args.onPage({ step: 1, title: '검색 결과', host: 'www.google.com', offSite: far }); return { outcome: 'escalated', reason: 'uncertain', ranked: [], steps: [{ step: 1 }], state: {} } }
+      args.onPage({ step: 1, title: '장화 신은 고양이 - 나무위키', host: 'namu.wiki', offSite: [] })
+      return { outcome: 'done', steps: [{ step: 1 }], state: {} }
+    },
+  }
+  const tool = createBrowserTaskTool({ browser })
+  const first = parse(await tool.handle(RUN(), { callId: 's1', arguments: { goal: '첫 결과 열기' } }))
+  assert.deepEqual([first.status, first.options], ['needs_guidance', []], 'without the page tools\' press no link to another site is offered')
+  tool.usePagePress(async (_run, _event, args) => { pressed.push(args); return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ status: 'pressed', via: 'site' }) }] } })
+  round = 0
+  const offered = parse(await tool.handle(RUN(), { callId: 's2', arguments: { goal: '첫 결과 열기' } }))
+  assert.deepEqual([offered.status, offered.code, offered.options[0].site], ['needs_guidance', 'outside_site', 'namu.wiki'])
+  const opened = parse(await tool.handle(RUN(), { callId: 's3', arguments: { guidance: { choose: 'o1' } } }))
+  assert.deepEqual(pressed, [{ cardId: 'card', href: 'https://namu.wiki/w/puss' }])
+  assert.equal(opened.status, 'done')
+  assert.deepEqual(opened.steps.map(step => [step.op, step.by]), [['open', 'model']])
+  assert.equal(opened.page.host, 'namu.wiki')
+
+  round = 0
+  const refusedTool = createBrowserTaskTool({ browser })
+  refusedTool.usePagePress(async () => ({ success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ status: 'not_done', code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', site: 'site-refused' }) }] }))
+  parse(await refusedTool.handle(RUN(), { callId: 'r1', arguments: { goal: '첫 결과 열기' } }))
+  const refused = parse(await refusedTool.handle(RUN(), { callId: 'r2', arguments: { guidance: { choose: 'o1' } } }))
+  assert.deepEqual([refused.status, refused.code], ['cannot', 'site_not_allowed'])
+})
+
+test('a1 the page tools bind their own press for a link to another site: a fresh observation, the link found by its address, the site question, then the navigation', async () => {
+  const calls = []
+  const page = { url: 'https://www.google.com/search?q=x', title: 'x - Google', revision: 1, documentId: 'd', readyState: 'complete', text: ['결과'],
+    interactiveElements: [{ ref: 'r7', role: 'link', tag: 'a', label: '장화 신은 고양이 - 나무위키', href: 'https://namu.wiki/w/puss', value: '' }] }
+  const ok = body => ({ success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(body) }] })
+  const browser = { dispatch: async (_run, event) => {
+    calls.push([event.tool, event.arguments?.url ?? event.arguments?.site ?? null])
+    if (event.tool === 'egdesk_browser_observe') return ok({ observationId: `o${calls.length}`, snapshot: page })
+    if (event.tool === 'egdesk_browser_request_site') return ok({ status: 'site-allowed' })
+    return ok({ status: 'postcondition-observed' })
+  } }
+  let press = null
+  createPageToolsProvider({ mode: () => 'on', browser, taskTool: { spec: BROWSER_TASK_TOOL_SPEC, handle: async () => ({}), usePagePress: fn => { press = fn } } })
+  assert.equal(typeof press, 'function')
+  const out = parse(await press(RUN(), { callId: 'p1' }, { cardId: 'card', href: 'https://namu.wiki/w/puss' }))
+  assert.deepEqual([out.status, out.via], ['pressed', 'site'])
+  assert.deepEqual(calls.map(call => call[0]), ['egdesk_browser_observe', 'egdesk_browser_request_site', 'egdesk_browser_observe', 'egdesk_browser_navigate'])
+  assert.equal(calls.at(-1)[1], 'https://namu.wiki/w/puss')
+  const gone = parse(await press(RUN(), { callId: 'p2' }, { cardId: 'card', href: 'https://elsewhere.example/x' }))
+  assert.equal(gone.code, 'PAGE_REF_UNKNOWN')
+})
