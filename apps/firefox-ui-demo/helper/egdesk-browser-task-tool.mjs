@@ -1,3 +1,4 @@
+import { isBrowserUserHold } from './egdesk-browser-tool-runtime.mjs'
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { NO_FIELD_TEXT, candidateSpans, pickFieldText, undecidedField } from './egdesk-browser-field-text.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
@@ -189,7 +190,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     const t0 = clock()
     if (offered.href) return outside(run, event, task, offered, scope, onPage, emit, t0)
     let observed
-    try { observed = await scope.callTool('egdesk_browser_observe', { cardId: task.cardId }) } catch (error) { return { outcome: 'escalated', reason: 'observe_failed', ...(CODE.test(error?.code ?? '') ? { code: error.code } : {}) } }
+    try { observed = await scope.callTool('egdesk_browser_observe', { cardId: task.cardId }) } catch (error) { if (isBrowserUserHold(error)) throw error; return { outcome: 'escalated', reason: 'observe_failed', ...(CODE.test(error?.code ?? '') ? { code: error.code } : {}) } }
     const snapshot = observed?.snapshot
     if (!record(snapshot) || typeof observed?.observationId !== 'string' || !Number.isSafeInteger(snapshot.revision)) return { outcome: 'escalated', reason: 'observe_failed' }
     onPage({ title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOf(snapshot.url) })
@@ -204,11 +205,12 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       await scope.callTool(planned.tool, planned.args)
       emit({ action: planned.tool, ok: true, stepMs: clock() - t0, ...meta }, 'model')
     } catch (error) {
+      if (isBrowserUserHold(error)) throw error
       // a navigation the site redirected or extended: the page that loaded decides (the same rule as the loop's steps and the page tools)
       let landed = false
       if (planned.tool === 'egdesk_browser_navigate') {
-        try { await scope.callTool('egdesk_browser_wait', { cardId: task.cardId, for: 'load', timeoutMs: 5000 }) } catch { /* observe as it is */ }
-        try { landed = navigationLanded({ actual: (await scope.callTool('egdesk_browser_observe', { cardId: task.cardId }))?.snapshot?.url, expected: planned.args.url, from: snapshot.url, submitted: match.item.readOnly?.kind === 'get_form' }) } catch { landed = false }
+        try { await scope.callTool('egdesk_browser_wait', { cardId: task.cardId, for: 'load', timeoutMs: 5000 }) } catch (error) { if (isBrowserUserHold(error)) throw error }
+        try { landed = navigationLanded({ actual: (await scope.callTool('egdesk_browser_observe', { cardId: task.cardId }))?.snapshot?.url, expected: planned.args.url, from: snapshot.url, submitted: match.item.readOnly?.kind === 'get_form' }) } catch (error) { if (isBrowserUserHold(error)) throw error; landed = false }
       }
       if (!landed) {
         const code = CODE.test(error?.code ?? '') ? error.code : 'TOOL_FAILED'
@@ -217,7 +219,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       }
       emit({ action: planned.tool, ok: true, stepMs: clock() - t0, ...meta }, 'model')
     }
-    try { await scope.callTool('egdesk_browser_wait', match.item.kind === 'navigate' || match.item.readOnly?.kind === 'get_form' ? { cardId: task.cardId, for: 'load', timeoutMs: 10000 } : { cardId: task.cardId, for: 'idle', timeoutMs: 5000 }) } catch { /* the next observation shows the page as it is */ }
+    try { await scope.callTool('egdesk_browser_wait', match.item.kind === 'navigate' || match.item.readOnly?.kind === 'get_form' ? { cardId: task.cardId, for: 'load', timeoutMs: 10000 } : { cardId: task.cardId, for: 'idle', timeoutMs: 5000 }) } catch (error) { if (isBrowserUserHold(error)) throw error }
     task.userContext.push(`Chosen in the chat for this task: ${offered.label}`)
     task.steps += 1
     task.offered = []
@@ -230,6 +232,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     if (typeof pagePress !== 'function') return { outcome: 'escalated', reason: 'outside_site_unavailable' }
     let out = null
     try { out = JSON.parse((await pagePress(run, { tool: 'egdesk_card_press', callId: `${event?.callId ?? task.taskId}.site`, arguments: { cardId: task.cardId } }, { cardId: task.cardId, href: offered.href }))?.contentItems?.[0]?.text ?? 'null') } catch { out = null }
+    if (isBrowserUserHold(out)) throw out
     if (out?.status === 'refused' && out?.code === 'PAGE_REF_UNKNOWN') return { outcome: 'guidance_gone' }
     const meta = { op: 'open', target: compactText(offered.label, 40) }
     if (out?.status !== 'pressed') {
@@ -238,7 +241,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       return { outcome: 'escalated', reason: out?.site === 'site-refused' || out?.code === 'BROWSER_NAVIGATE_OUT_OF_SCOPE' ? 'site_not_allowed' : 'tool_failed', ...(CODE.test(out?.code ?? '') ? { code: out.code } : {}) }
     }
     emit({ action: 'egdesk_browser_navigate', ok: true, stepMs: clock() - t0, ...meta }, 'model')
-    try { await scope.callTool('egdesk_browser_wait', { cardId: task.cardId, for: 'load', timeoutMs: 10000 }) } catch { /* the next observation shows the page as it is */ }
+    try { await scope.callTool('egdesk_browser_wait', { cardId: task.cardId, for: 'load', timeoutMs: 10000 }) } catch (error) { if (isBrowserUserHold(error)) throw error }
     onPage({ title: null, host: offered.site ?? null, offSite: [] })
     task.userContext.push(`Chosen in the chat for this task: ${offered.label} (on ${offered.site ?? 'another site'})`)
     task.steps += 1
@@ -258,7 +261,10 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     if (task.askedField && !args.guidance) resumeState = { ...resumeState, askedField: task.askedField }
     task.askedField = null
     let result = null
-    if (args.guidance) result = await guide(run, event, task, args.guidance.choose, onPage, emit)
+    if (args.guidance) {
+      try { result = await guide(run, event, task, args.guidance.choose, onPage, emit) }
+      catch (error) { if (!isBrowserUserHold(error)) throw error; result = { outcome: 'escalated', reason: 'human_step', staleBy: 'user-hold' } }
+    }
     while (!result) {
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }

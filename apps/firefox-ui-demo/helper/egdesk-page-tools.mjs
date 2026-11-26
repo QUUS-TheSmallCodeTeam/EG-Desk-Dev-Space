@@ -1,3 +1,4 @@
+import { isBrowserUserHold } from './egdesk-browser-tool-runtime.mjs'
 import { createHash } from 'node:crypto'
 import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
@@ -69,9 +70,14 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
   const recall = (run, cardId) => last.get(`${run?.runId ?? run?.answerId}/${cardId}`) ?? null
   const opaque = url => authOpaqueOn(env) && isAuthOpaqueUrl(url)
 
+  const pageFailure = error => isBrowserUserHold(error)
+    ? respond(true, { status: 'refused', code: error.code, staleBy: 'user-hold', forYouOnly: 'The person took control of the Card: say so, stop, and do not retry.' })
+    : respond(false, { error: { code: 'PAGE_TOOL_FAILED' } })
   async function call(run, event, tool, args, suffix) {
     if (!browser || typeof browser.dispatch !== 'function') return { ok: false, data: { error: { code: 'PAGE_BROWSER_UNAVAILABLE' } } }
-    return parse(await browser.dispatch(run, { tool, arguments: args, callId: `${event?.callId ?? 'page'}.${suffix}`, namespace: null }))
+    const out = parse(await browser.dispatch(run, { tool, arguments: args, callId: `${event?.callId ?? 'page'}.${suffix}`, namespace: null }))
+    if (!out.ok && isBrowserUserHold(out.data?.error)) throw out.data.error // terminal, including a navigation readback
+    return out
   }
   const cardsOf = run => (Array.isArray(run?.browserBinding?.cards) ? run.browserBinding.cards : [])
   const pickCard = (run, args, { interact = false } = {}) => {
@@ -266,7 +272,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     if (!element) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
     return act(run, event, { cardId, ref: element.ref }, 'press')
   }
-  try { taskTool?.usePagePress?.(pressLink) } catch { /* the task tool then offers no link to another site */ }
+  try { taskTool?.usePagePress?.((...args) => pressLink(...args).catch(pageFailure)) } catch { /* the task tool then offers no link to another site */ }
   return {
     providerId: PAGE_TOOLS_PROVIDER_ID,
     runtime: null,
@@ -274,7 +280,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     dispatch(run, event) {
       const key = `${run?.answerId ?? run?.runId ?? ''}/${event?.callId ?? ''}`
       if (event?.callId && calls.has(key)) return calls.get(key)
-      const work = this.handle(run, event).catch(() => respond(false, { error: { code: 'PAGE_TOOL_FAILED' } }))
+      const work = this.handle(run, event).catch(pageFailure)
       if (event?.callId) { calls.set(key, work); while (calls.size > 256) calls.delete(calls.keys().next().value) }
       return work
     },

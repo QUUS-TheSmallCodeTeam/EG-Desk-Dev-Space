@@ -125,3 +125,43 @@ test('staleBy end to end: a fill the Card refuses as not sent carries the word t
   assert.equal(w.pw.state.acts.length, sentToCard, 'nothing reached the Card')
   w.transports.at(-1).finish(); await w.settled(sent)
 })
+
+for (const first of ['observe', 'act']) test(`BRW-13: pause before ${first} is terminal for this Card binding and reaches the model and record`, async t => {
+  const w = world(t, { hold: true })
+  const sent = await w.browserSend('상품 검색에 우산 넣어줘'); await w.drain()
+  const send = w.pw.transport.sendToUi, requests = []
+  if (first === 'act') await callTool(w, 'egdesk_card_read', { mode: 'structure' })
+  w.pw.transport.sendToUi = async request => {
+    if (!['observe', 'act'].includes(request.kind)) return send(request)
+    requests.push(request.kind)
+    return { requestId: request.requestId, status: 'rejected', error: 'The user is operating this Browser Card directly; Agent requests are refused until the user allows control again from the Card',
+      ...(request.kind === 'act' ? { dispatchPhase: 'not-dispatched' } : {}), timing: {} }
+  }
+  const type = () => callTool(w, 'egdesk_card_type', { ref: 'q', text: '우산' })
+  const read = () => callTool(w, 'egdesk_card_read', { mode: 'structure' })
+  for (const out of [await (first === 'observe' ? read() : type()), await read(), await type()]) {
+    assert.deepEqual([out.status, out.code, out.staleBy], ['refused', 'BROWSER_OBSERVATION_STALE', 'user-hold'])
+    assert.match(out.forYouOnly, /stop, and do not retry/)
+  }
+  const raw = await callTool(w, 'egdesk_browser_observe', { cardId: 'card' })
+  assert.deepEqual([raw.error?.code, raw.error?.staleBy], ['BROWSER_OBSERVATION_STALE', 'user-hold'], 'the final native error sanitizer keeps the closed reason')
+  assert.match(raw.error.message, /stop, and do not retry/)
+  await w.drain()
+  assert.deepEqual(requests, [first], 'no more requests reach this Card')
+  assert.equal(w.pw.state.acts.length, 0)
+  const failed = w.events.filter(e => JSON.stringify(e).includes('"browser.tool.failed"'))
+  assert.ok(failed.length >= 3 && failed.every(e => JSON.stringify(e).includes('"staleBy":"user-hold"')))
+  w.transports.at(-1).finish(); await w.settled(sent)
+})
+
+test('a missing observation without a hold stays unavailable and does not latch the Card', async t => {
+  const w = world(t, { hold: true })
+  const sent = await w.browserSend('상품 검색을 읽어줘'); await w.drain()
+  const send = w.pw.transport.sendToUi
+  w.pw.transport.sendToUi = async req => req.kind === 'observe' ? { requestId: req.requestId, status: 'rejected', error: 'Selected Browser Card is unavailable' } : send(req)
+  const bad = await callTool(w, 'egdesk_browser_observe', { cardId: 'card' })
+  assert.deepEqual([bad.error?.code, bad.error?.staleBy], ['BROWSER_OBSERVATION_UNAVAILABLE', undefined])
+  w.pw.transport.sendToUi = send
+  assert.equal((await callTool(w, 'egdesk_browser_observe', { cardId: 'card' })).status, 'observed')
+  w.transports.at(-1).finish(); await w.settled(sent)
+})

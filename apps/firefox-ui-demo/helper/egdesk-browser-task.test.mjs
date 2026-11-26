@@ -27,7 +27,7 @@ const PAGES = {
 const choice = (name, value, confidence) => ({ name, type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
 const starts = (choices, text) => choices.find(c => c.value.includes(text))?.value
 
-async function world(t, { start, mode = 'on', hang = false }) {
+async function world(t, { start, mode = 'on', hang = false, cardHeld = false }) {
   const owner = 'codex:fixture-owner'
   const decisions = [], acts = [], uiKinds = []
   let docSeq = 1
@@ -79,6 +79,7 @@ async function world(t, { start, mode = 'on', hang = false }) {
       const reply = { requestId: request.requestId }
       if (request.kind === 'bind') return { ...reply, status: 'bound', binding: { cardId: 'card', cardEpoch: 'epoch', profileId: 'fixture', accountId: '', userContextId: 0, url: cur.url, engineAccountKey: owner, authorityEpoch: 1 } }
       if (request.kind === 'observe') {
+        if (cardHeld) return { ...reply, status: 'rejected', error: 'The user is operating this Browser Card directly; Agent requests are refused until the user allows control again from the Card' }
         const wait = request.options?.wait
         return { ...reply, status: 'observed', snapshot: wait ? { ...snap(), wait: { for: wait.for, outcome: 'met', elapsedMs: 1 } } : snap() }
       }
@@ -326,4 +327,12 @@ test('C11 the step observer cannot change the loop: a throwing observer and no o
   assert.deepEqual(observed, plain)
   assert.deepEqual(seen.filter(i => i.action).map(i => i.action), ['egdesk_browser_navigate', 'egdesk_browser_wait', 'egdesk_browser_navigate', 'egdesk_browser_wait'])
   assert.deepEqual([...new Set(seen.map(i => i.step))], [1, 2])
+})
+
+test('direct entry hands a held observation back in the subjective note without another Card request', async t => {
+  const w = await world(t, { start: `${O}/invoices`, cardHeld: true })
+  const { out } = await w.say('거래처 포털에서 이번 달 세금계산서 내려받아줘')
+  const note = JSON.parse(out.note).egdesk_browser_task
+  assert.deepEqual([out.handled, note.status, note.code, note.staleBy], [true, 'cannot_proceed', 'human_step', 'user-hold'])
+  assert.deepEqual(w.uiKinds.filter(kind => ['observe', 'act'].includes(kind)), ['observe'])
 })

@@ -638,6 +638,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       tally(task, result)
       task.state = record(result.state) ? result.state : task.state
       store.touch(task)
+      if (result.staleBy === 'user-hold') return fromResult(task, result) // even a changed goal cannot resume a revoked Card
       // c23: whatever this segment ended with (even a pause or done) was about the OLD goal: the person changed it meanwhile, so plan again
       if (task.replan && result.outcome !== 'fallback' && task.status === 'running') continue
       if (result.outcome === 'max_steps' && result.reason !== 'step_rejected') continue
