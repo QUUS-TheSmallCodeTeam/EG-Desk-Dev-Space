@@ -883,6 +883,7 @@ test('wait reports met, not met before timeout, or unknown and never sends an ac
 
 test('wait after an unconfirmed navigation waits for the replacement document and can resolve it', async () => {
   const f = guardedFixture()
+  f.current = guardedSnapshot({ innerWindowId: 41 })
   await f.bind()
   const seen = await f.observe()
   const destination = 'https://example.test/next'
@@ -892,6 +893,7 @@ test('wait after an unconfirmed navigation waits for the replacement document an
   f.current = guardedSnapshot({ documentId: 'document-2', revision: 1, url: destination })
   const loaded = await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 5000 })
   assert.equal(f.waits()[0].options.wait.notDocumentId, 'document-1')
+  assert.equal(f.waits()[0].options.wait.notInnerWindowId, 41)
   assert.equal(loaded.status, 'wait-condition-met')
   assert.equal(loaded.wait.documentReplaced, true)
   assert.equal(loaded.navigationPostconditionReobserved, true)

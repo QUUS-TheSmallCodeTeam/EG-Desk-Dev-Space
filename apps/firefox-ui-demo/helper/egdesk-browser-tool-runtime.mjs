@@ -705,8 +705,10 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     const wait = { for: args.for, timeoutMs: args.timeoutMs,
       ...(documentId ? { ref: args.ref, documentId } : {}),
       // While a dispatched transition is pending, the prior document cannot
-      // satisfy load/idle; the actor keeps waiting for its replacement.
-      ...(transition ? { notDocumentId: transition.priorDocumentId } : {}) }
+      // satisfy load/idle. For navigation, chrome can wait for the replacement
+      // WindowGlobal before sending the document-scoped actor query.
+      ...(transition ? { notDocumentId: transition.priorDocumentId } : {}),
+      ...(args.for === 'load' && transition?.priorInnerWindowId ? { notInnerWindowId: transition.priorInnerWindowId } : {}) }
     // A wait spends the current observation: the page is expected to change.
     card.observation = null
     const trace = {}
@@ -964,7 +966,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
       if (action.type === 'navigate' ||
           (['click', 'press', 'pointer-click', 'type-text'].includes(action.type) && condition && ['url', 'visible-text'].includes(condition.kind))) {
         card.pendingTransition = { condition, ref: args.ref || null,
-          priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue }
+          priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue,
+          ...(action.type === 'navigate' && observed.snapshot.innerWindowId ? { priorInnerWindowId: observed.snapshot.innerWindowId } : {}) }
       }
     }
     // BRW-12: after a lost response, ask once whether the actor entered

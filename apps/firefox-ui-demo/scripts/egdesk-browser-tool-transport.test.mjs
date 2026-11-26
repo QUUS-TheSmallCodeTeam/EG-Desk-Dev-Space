@@ -1603,6 +1603,29 @@ test('a retried wait gets only the rest of its own timeout and reports the whole
   })
 })
 
+test('post-navigation load waits in chrome before querying the actor, without restarting the budget', async () => {
+  for (const replaced of [true, false]) {
+    let now = 1000, poll
+    const o = observeFixture({ now: () => now, scheduler: { setTimeout(fn) { poll = fn; return 1 }, clearTimeout() {} } })
+    const wait = { for: 'load', timeoutMs: 10000, notDocumentId: 'doc-a', notInnerWindowId: 1 }
+    o.setActor(({ options }) => {
+      assert.equal(options.wait.notDocumentId, 'doc-a', 'actor still checks the excluded document')
+      assert.equal(options.wait.timeoutMs, replaced ? 9600 : 0)
+      return { documentId: replaced ? 'doc-b' : 'doc-a', wait: { for: 'load', outcome: replaced ? 'met' : 'timeout', elapsedMs: 0 } }
+    })
+    const result = o.browserToolObserve({}, { wait }, { deadlineMs: now + 15000 })
+    now += 200; poll()
+    assert.equal(o.requests.length, 0, 'never start a long wait on the departing actor')
+    if (replaced) o.context.currentWindowGlobal = o.windowGlobal(2)
+    now += replaced ? 200 : 9800; poll()
+    const snapshot = await result
+    assert.deepEqual(o.requests.map(r => r.innerWindowId), [replaced ? 2 : 1])
+    assert.equal(snapshot.wait.outcome, replaced ? 'met' : 'timeout')
+    assert.equal(snapshot.wait.elapsedMs, replaced ? 400 : 10000)
+    assert.equal(o.timers.size, 0)
+  }
+})
+
 test('document-ready waiters share one poll per Card and each keeps its own deadline', async () => {
   const o = observeFixture()
   o.context.currentWindowGlobal = null
