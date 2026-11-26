@@ -86,12 +86,12 @@ function portal() {
 // button; Decisions answers as the real one did (a web task on this card; on the home page the step needs text nobody gave), and, when asked, chooses the span.
 const D = 'https://duckduckgo.com'
 const DUCK_MSG = '덕덕고 카드에서 장화 신은 고양이 검색해줘'
-function duckSite() {
+function duckSite(fieldLabel = '검색어') {
   const timeline = [], acts = []
   let docSeq = 1, cur = { url: `${D}/`, documentId: 'd1', revision: 1, value: '' }
   const submitUrl = () => `${D}/?q=${encodeURIComponent(cur.value)}`
   const elements = () => (new URL(cur.url).searchParams.get('q') === null ? [
-    { ref: 'q', role: 'searchbox', tag: 'input', label: '검색어', href: '', value: cur.value },
+    { ref: cur.fieldRef ?? 'q', role: 'searchbox', tag: fieldLabel === '검색어' ? 'input' : 'textarea', label: fieldLabel, href: '', value: cur.value },
     { ref: 's', role: 'button', tag: 'button', label: '검색', href: '', value: '', nav: { type: 'submit', sensitiveRegion: false, regionLabel: '', form: { method: 'get', fields: ['search', 'submit'], sensitive: false, submitUrl: submitUrl() }, controls: null } },
     { ref: 'p', role: 'link', tag: 'a', label: '개인정보 보호', href: `${D}/privacy`, value: '' },
   ] : [{ ref: 'r1', role: 'link', tag: 'a', label: '장화 신은 고양이 - 나무위키', href: 'https://namu.wiki/w/x', value: '' }])
@@ -107,8 +107,8 @@ function duckSite() {
       else if (names.includes('next_step')) {
         const q = request.questions.find(item => item.name === 'next_step'), onHome = /URL: https:\/\/duckduckgo\.com\/\n/.test(`${evidence}\n`), typed = /filled \[F1\]/.test(evidence)
         const uncertainField = onHome && !typed && evidence.includes('비 올 때')
-        answers.push(choice('next_step', !onHome ? 'goal_met' : typed ? q.choices.find(c => c.value.startsWith('[B')).value : uncertainField ? q.choices.find(c => c.value.startsWith('[F')).value : 'needs_free_text', uncertainField ? 0.42 : 0.95), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onHome ? 0.02 : 0.95 })
-      } else for (const q of request.questions) answers.push(q.type === 'choice' ? choice(q.name, q.choices[0].value, 0.95) : { name: q.name, type: 'predicate', probability: 0.02 })
+        answers.push(choice('next_step', !onHome ? 'goal_met' : typed ? q.choices.find(c => c.value.startsWith('[B')).value : uncertainField ? q.choices.find(c => c.value.startsWith('[F')).value : 'needs_free_text', uncertainField ? 0.42 : typed && fieldLabel !== '검색어' ? 0.74 : 0.95), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onHome ? 0.02 : 0.95 })
+      } else for (const q of request.questions) answers.push(q.type === 'choice' ? choice(q.name, q.name === 'field_0' && fieldLabel !== '검색어' ? q.choices.at(-1).value : q.choices[0].value, 0.95) : { name: q.name, type: 'predicate', probability: 0.02 })
       return { ok: true, text: async () => JSON.stringify({ answers }) }
     } })
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
@@ -138,10 +138,10 @@ const source = (n, threadId, uri = `${O}/invoices`) => [{ id: 'selected-source',
   browserToolSelection: { token: `token-${n}`, threadId } }]
 
 /** The bridge's Claude browser wiring in miniature (harness on, page tools on), with the direct entry configured by the bridge's own wiring from the flag value. */
-function claudeWorld(t, { flag = 'alternate', startDelayMs = 0, site = 'portal', hold = false, taskTool = false } = {}) {
+function claudeWorld(t, { flag = 'alternate', startDelayMs = 0, site = 'portal', fieldLabel, hold = false, taskTool = false } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-l5a1-claude-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
-  const p = site === 'duck' ? duckSite() : portal(), events = [], transports = [], earlyWrites = [], published = []
+  const p = site === 'duck' ? duckSite(fieldLabel) : portal(), events = [], transports = [], earlyWrites = [], published = []
   let chat = null
   const wiring = createOwnToolsWiring({ env: { EGDESK_OWN_TOOLS: 'on', EGDESK_CLAUDE_HARNESS: 'on', PATH: '/usr/bin:/bin', HOME: '/home/synthetic' }, dataDir,
     spawn: () => { throw new Error('no command runs here') }, getChat: () => chat, home: '/home/synthetic', gitStatus: async () => '' })
@@ -324,6 +324,25 @@ test('alternate: an uncertain first field with no literal value hands the same t
   const out = await callTool(w, BROWSER_TASK_TOOL_NAME, { values: { [note.ask.field]: '우산' } })
   assert.deepEqual([out.taskId, out.status], [note.id, 'done'])
   assert.deepEqual(w.acts.map(a => a.type), ['fill', 'navigate']); assert.equal(new URL(w.cur.url).searchParams.get('q'), '우산')
+  w.transports[0].finish(); await w.settled(sent)
+})
+
+for (const change of ['none', 'document', 'element']) test(`alternate: answer the named DuckDuckGo field, changed target: ${change}`, async t => {
+  const w = claudeWorld(t, { site: 'duck', fieldLabel: 'DuckDuckGo로 검색', hold: true, taskTool: true })
+  const sent = await w.send('덕덕고 카드에서 비 올 때 쓰는 거 검색해줘'); await w.drain()
+  const { egdesk_browser_task: note } = noteOf(w.transports[0].sent[0])
+  assert.deepEqual([note.status, note.ask.field, w.acts], ['needs_value', 'DuckDuckGo로 검색', []])
+  if (change === 'document') w.cur.documentId = 'replacement'
+  if (change === 'element') w.cur.fieldRef = 'replacement'
+  const at = w.timeline.length
+  const out = await callTool(w, BROWSER_TASK_TOOL_NAME, { values: { [note.ask.field]: '우산' } })
+  assert.equal(out.taskId, note.id)
+  assert.equal(w.timeline.slice(at).includes('decide:field_0'), change !== 'none')
+  if (change === 'none') {
+    assert.ok(!w.timeline.slice(at, w.timeline.indexOf('ui:act', at)).some(s => s.startsWith('decide:')))
+    assert.equal(out.status, 'done'); assert.deepEqual(w.acts, [{ type: 'fill', ref: 'q' }, { type: 'navigate', ref: null }])
+    assert.equal(new URL(w.cur.url).searchParams.get('q'), '우산')
+  } else assert.deepEqual(w.acts, [])
   w.transports[0].finish(); await w.settled(sent)
 })
 

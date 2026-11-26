@@ -587,6 +587,11 @@ export async function decideRecordedStep({ goal, snapshot, recorded, today = nul
   return { kind: 'user_context', candidates: recorded.candidates, ...out }
 }
 
+// Private identity for a public needs_value question. A URL alone cannot distinguish a reload.
+export function askedFieldTarget(snapshot, option) {
+  const id = snapshot?.documentId, ref = option?.item?.element?.ref
+  return ref && (Number.isSafeInteger(id) || (typeof id === 'string' && id)) ? { documentId: id, url: snapshot.url, ref } : null
+}
 const fieldRef = option => option.item?.element?.ref ?? option.value
 
 /**
@@ -748,6 +753,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   // The supplied values for this page: bind each (an exact field name first, else one mapping request) and type the first ready one. -> { result } (the loop returns it) |
   // { typed: true } (a field was typed: next step) | { typed: false } | { retry: true } (L6 a1b: the fill was refused as not sent: next step, decided anew). firstPass (a1 valuesFirst):
   // before the step's choice, with the page-state predicates in the mapping request.
+  let answer = seed.askedField // supplied only for the next call answering an actual needs_value note
   const triedHere = new Set() // a1: `name|url|document` pairs the values-first mapping already asked about
   const staleRetried = new Set() // L6 a1b: value names whose fill the Card refused once as not sent (nothing was typed): decided once more on a new observation
   async function typePending(entry, snapshot, observationId, fields, { firstPass = false } = {}) {
@@ -767,7 +773,14 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
 
       // Exact names reserve their observed controls before model assignment.
       const docKey = `${url}|${documentId}`
-      const unassigned = [...pending.keys()].filter(key => !assigned.has(key) && !unmatched.has(key) && !triedHere.has(`${key}|${docKey}`))
+      let answered = null
+      if (answer) {
+        const key = Object.keys(values).find(key => key.replace(/\s+/g, ' ').trim() === answer.name)
+        const option = documentId === answer.documentId && url === answer.url && fields.find(option => fieldRef(option) === answer.ref)
+        if (key && pending.has(key) && option && !reserved.has(answer.ref)) { bind(key, option); answered = key }
+        answer = null
+      }
+      const unassigned = answered ? [] : [...pending.keys()].filter(key => !assigned.has(key) && !unmatched.has(key) && !triedHere.has(`${key}|${docKey}`))
       if (unassigned.length && fields.length) {
         const named = []
         for (const key of unassigned) {
@@ -806,11 +819,11 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
           readyFields.set(key, option)
         } else unmatched.add(key)
       }
-      const ready = readyFields.keys().next().value
+      const ready = answered ?? readyFields.keys().next().value
       if (ready) {
         const option = readyFields.get(ready)
         const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
-        if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100) }) }
+        if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) }) }
         attemptedRefs.add(action.args.ref)
         const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
         if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`); typedTexts.push(action.args.text) }
@@ -978,10 +991,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       case 'blocked': return finish('escalated', { reason: BLOCKED_STATES.has(decision.pageState) ? decision.pageState : 'blocked', ranked: decision.ranked })
       // a2: the page's only text field rides along (soleField, never part of the model's tool output): a caller that fills fields with the person's own words (the task tool, the
       // entry's fieldText) asks for its text even when the spread choice did not rank it in the top two (real DuckDuckGo: 47 options)
-      case 'uncertain': return finish('escalated', { reason: 'uncertain', ranked: decision.ranked, ...(fields.length === 1 ? { soleField: fields[0].value } : {}) })
+      case 'uncertain': {
+        const detail = { reason: 'uncertain', ranked: decision.ranked, ...(fields.length === 1 ? { soleField: fields[0].value } : {}) }
+        return finish('escalated', { ...detail, fieldTarget: askedFieldTarget(snapshot, fields.find(option => option.value === undecidedField(detail))) })
+      }
       // the page-state predicates did not all decide: the person looks at the page (never a silent stop)
       case 'page_unclear': return finish('page_unclear', { url: snapshot.url, checks: decision.pageChecks })
-      case 'free_text': return finish('needs_free_text', { field: null, fields: fields.map(option => option.value) })
+      case 'free_text': return finish('needs_free_text', { field: null, fields: fields.map(option => option.value), fieldTarget: askedFieldTarget(snapshot, fields[0]) })
       case 'user_context': {
         // The fixed "need more context from the user" option: the candidates are the listed elements that were most likely.
         const listed = new Set(options.map(option => option.value))
@@ -1002,7 +1018,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       default: {
         const option = decision.option
         const action = reflexActionArgs(option, { cardId, observationId, snapshot })
-        if (action.needsText) return finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100) })
+        if (action.needsText) return finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) })
         if (action.escalate) {
           return finish('escalated', { reason: action.escalate, observationId,
             suggestion: { ref: option.item.element.ref, option: option.value, expectedTarget: expectedTargetOf(option.item.element) } })

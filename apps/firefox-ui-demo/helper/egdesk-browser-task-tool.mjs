@@ -1,7 +1,7 @@
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { NO_FIELD_TEXT, candidateSpans, pickFieldText, undecidedField } from './egdesk-browser-field-text.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
-import { PAGE_TEXT_FLAG, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { PAGE_TEXT_FLAG, askedFieldTarget, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-browser-task.mjs'
 
 // L8 a1 ('교대' round, owner 2026-11-26: "decision model 이랑 대화형 모델이 같은 세션에서 같은 맥락으로 번갈아가면서 사용자 요청을 빠르게 수행"): the browser task as ONE tool
@@ -197,7 +197,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     const match = options.find(option => option.value === offered.value) ?? options.find(option => optionTarget(option) === offered.label && optionOp(option) === offered.op) ?? null
     if (!match) return { outcome: 'guidance_gone' }
     const planned = reflexActionArgs(match, { cardId: task.cardId, observationId: observed.observationId, snapshot })
-    if (planned.needsText) return { outcome: 'needs_free_text', field: match.value, label: compactText(match.item.element.label, 100) }
+    if (planned.needsText) return { outcome: 'needs_free_text', field: match.value, label: compactText(match.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, match) }
     if (planned.escalate) return { outcome: 'escalated', reason: planned.escalate, suggestion: { option: match.value } }
     const meta = { op: optionOp(match), target: optionTarget(match) }
     try {
@@ -254,15 +254,19 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     const onPage = info => { page = { title: info?.title ?? null, host: info?.host ?? null, offSite: Array.isArray(info?.offSite) ? info.offSite : [] }; task.lastPage = page }
     task.status = 'running'; task.pause = null
     let values = record(args.values) ? { ...args.values } : {}
+    let resumeState = task.state
+    if (task.askedField && !args.guidance) resumeState = { ...resumeState, askedField: task.askedField }
+    task.askedField = null
     let result = null
     if (args.guidance) result = await guide(run, event, task, args.guidance.choose, onPage, emit)
     while (!result) {
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }
-      const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState: task.state,
+      const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState,
         maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, actor: 'decision', pageText: pageText === true })
       values = {}
       task.state = record(out?.state) ? out.state : task.state
+      resumeState = task.state
       task.steps += Array.isArray(out?.steps) ? out.steps.length : 0
       store.touch(task)
       if (out?.outcome === 'max_steps' && out.reason !== 'step_rejected') continue
@@ -280,6 +284,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       result = out ?? { outcome: 'fallback' }
     }
     const body = outcomeBody(task, result, { outside: typeof pagePress === 'function' ? page?.offSite ?? [] : [] })
+    if (body.status === 'needs_value' && result.fieldTarget) task.askedField = { ...result.fieldTarget, name: body.ask.field }
     task.status = body.status === 'done' ? 'done' : body.code === 'decision_unavailable' ? 'cancelled' : 'paused'
     task.pause = task.status === 'paused' ? { kind: body.status === 'needs_value' || body.status === 'needs_guidance' ? 'need_context' : 'cannot_proceed', code: body.code ?? body.status } : null
     store.touch(task)

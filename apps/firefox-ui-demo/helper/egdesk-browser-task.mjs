@@ -510,6 +510,8 @@ export function finishedPageFacts(segments, ids = []) {
   return { found, page: found.length ? [] : pageLines(segments) }
 }
 
+const askName = field => compactText(field.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)
+
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
 export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], field = null }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
@@ -524,7 +526,7 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
     ...(Array.isArray(page) && page.length && !(Array.isArray(found) && found.length) ? { page: page.slice(0, MAX_PAGE_LINES) } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
-  if (status === 'needs_value' && typeof field === 'string' && field) body.ask = { field: compactText(field.replace(/^\[[A-Z]\d+\]\s*/, ''), 60), kind: 'text' }
+  if (status === 'needs_value' && typeof field === 'string' && field) body.ask = { field: askName(field), kind: 'text' }
   const next = status === 'needs_value' || status === 'needs_guidance' ? 'continue_with_egdesk_browser_task' : status === 'done' ? 'report_to_user' : status === 'need_context' ? 'ask_user_in_chat' : 'tell_user_and_ask_in_chat'
   return JSON.stringify({ egdesk_browser_task: { ...body, next } })
 }
@@ -641,7 +643,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
         const chosen = result.outcome === 'needs_free_text' ? await chosenText(run, task, result) : rankedField ? await chosenText(run, task, { field: rankedField }) : null
         if (chosen) { values = chosen; continue }
         // A confirmed person-only step never reaches this branch.
-        if (rankedField && task.steps === 1 && canContinue(task.cardId)) return fromResult(task, { outcome: 'needs_free_text', field: rankedField })
+        if (rankedField && task.steps === 1 && canContinue(task.cardId)) return fromResult(task, { outcome: 'needs_free_text', field: rankedField, fieldTarget: result.fieldTarget })
       }
       return fromResult(task, result)
     }
@@ -673,6 +675,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
     const field = result?.label || result?.field || (result?.fields?.length === 1 ? result.fields[0] : null)
     const continueTask = ['detail_needed', 'uncertain', 'page_unclear'].includes(pause.code) && canContinue(task.cardId)
     const status = continueTask ? (pause.code === 'detail_needed' && field ? 'needs_value' : 'needs_guidance') : pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
+    task.askedField = status === 'needs_value' && result?.fieldTarget ? { ...result.fieldTarget, name: askName(field) } : null
     return { handled: true, status: 'paused', taskId: task.taskId,
       note: subjectiveNote(task, { status, field, code: pause.code, candidates: extra.candidates, detail: extra.detail, recorded: extra.recorded }) }
   }
