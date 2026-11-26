@@ -47,6 +47,7 @@ import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { applyUpperBundle, describeUpperBundle, hudRoutingCapability, modeGatedClient } from './egdesk-upper-bundle.mjs'
+import { PERSONAL_FLAGS_FILE, applyPersonalFlags, describePersonalFlags } from './egdesk-personal-flags.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
@@ -107,6 +108,10 @@ for (const name of Object.keys(process.env)) {
 
 // u1: EGDESK_UPPER=on switches the conversation path's turn-judgment developer flags on together (helper/egdesk-upper-bundle.mjs); a flag set explicitly keeps its value. Default off.
 // This runs before anything below reads a flag. It sets developer flags only: the Decision model stays the person's setting (mode 끔/기록만/사용 and a saved key).
+// 2026-11-26 (owner: "항상 킴으로 마치 내 개인 설정 하듯"): the person's saved feature flags (<data>/settings/egdesk-personal-flags.json) fill the flags the launch
+// did not set, before the bundle reads them. An explicit environment value wins; no file, no effect (helper/egdesk-personal-flags.mjs).
+const personalFlags = applyPersonalFlags(process.env, path.join(appDataDirectory(), 'settings', PERSONAL_FLAGS_FILE))
+if (personalFlags.applied.length || personalFlags.kept.length) console.log(`[egdesk-codex-bridge] ${describePersonalFlags(personalFlags)}`)
 const upperBundle = applyUpperBundle(process.env)
 if (upperBundle.on) console.log(`[egdesk-codex-bridge] ${describeUpperBundle(upperBundle)}`)
 const nodeRuntime = requireEGDeskNodeRuntime()
