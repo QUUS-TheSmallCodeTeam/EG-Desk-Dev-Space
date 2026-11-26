@@ -1405,6 +1405,16 @@ export class CodexChatRuntime {
         if (!selected.includes(provider)) selected.push(provider)
       }
     }
+    // The task tool resumes the same decision loop. Offer just that entry on new
+    // threads when it actually survived the grant/ceiling filters. The full
+    // verification catalog still recognizes pinned tools on existing threads.
+    if (!forManifest && owners.get(toolKey(null, BROWSER_TASK_TOOL_NAME))?.providerId === PAGE_TOOLS_PROVIDER_ID) {
+      const key = toolKey(null, BROWSER_REFLEX_TOOL_NAME)
+      if (owners.get(key)?.providerId === 'egdesk-browser') {
+        owners.delete(key)
+        return { specs: specs.filter(spec => spec.name !== BROWSER_REFLEX_TOOL_NAME), owners, selected, manifest: manifest.filter(entry => entry.key !== key) }
+      }
+    }
     return { specs, owners, selected, manifest }
   }
 

@@ -67,7 +67,7 @@ function spec(name, description, properties, required) {
 export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_observe', 'Observe one explicitly selected Browser Card. Coordinates are Browser surface-local; camera movement does not change the target. Elements inside open and closed shadow roots and same-origin frames are included, and a frame element ref carries its frame path (for example f2/el_9); cross-origin, private or unreadable frames appear only in inaccessibleFrames and cannot be read or operated. Elements a page made clickable without a native control (cursor:pointer or onclick) have role clickable; a label around a hidden radio or checkbox has that role with value checked or unchecked; an element that scrolls its own content has role scrollable (or its own role) and its scroll offsets in scrollContainers. A selected account label does not prove site login.',
     { cardId: base.cardId }, ['cardId']),
-  spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card to an http(s) URL on the same site (registrable domain) as the currently observed document; other sites and https-to-http downgrades are rejected. Then observe. A dispatched request does not prove load or an external effect.',
+  spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card to an http(s) URL on the same site (registrable domain) as the currently observed document or a site explicitly allowed for this conversation; https-to-http downgrades are rejected. Pass cardId, observationId and expectedRevision from a fresh observation, the absolute url, and postcondition {kind:"url", value:the destination URL}. Do not use a visible-text or target-value postcondition here; observe after navigation to check page content. A dispatched request does not prove load or an external effect.',
     { ...base, url: { type: 'string' }, postcondition }, ['cardId', 'observationId', 'expectedRevision', 'url', 'postcondition']),
   spec('egdesk_browser_click', 'Request one guarded DOM click on an observed element without pointerdown or a focus step. A site may ignore synthetic clicks or focus another element itself. Requires a fresh observation, exact target precondition and testable DOM postcondition; an interaction grant is not proof of external authorization or submission success. A click that would land on another element is refused before input, and the error names what covers it (obscuredBy) so you can deal with that element first.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
@@ -354,7 +354,8 @@ function validateArgs(tool, args) {
     reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   }
   if (tool === 'egdesk_browser_navigate') {
-    if (!safeUrl(args.url) || args.postcondition.kind !== 'url') reject('INVALID_BROWSER_TOOL', 'Navigation requires an explicit safe URL and URL postcondition')
+    if (!safeUrl(args.url)) reject('INVALID_BROWSER_TOOL', 'Navigation requires an explicit safe URL')
+    if (args.postcondition.kind !== 'url') throw Object.assign(new Error('Navigation requires a URL postcondition'), { code: 'INVALID_BROWSER_TOOL', invalidBy: 'navigation-postcondition-kind' })
     return
   }
   if (!validTarget(args)) reject('INVALID_BROWSER_TOOL', 'An exact observed element precondition is required')
@@ -1264,6 +1265,11 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
 
   async function dispatch(run, event) {
     const tool = event?.tool
+    // Native thread schemas are pinned. If the caller omitted only the redundant
+    // URL assertion, derive the exact destination; never replace an explicit assertion.
+    if (tool === 'egdesk_browser_navigate' && record(event.arguments) && !Object.hasOwn(event.arguments, 'postcondition')) {
+      event = { ...event, arguments: { ...event.arguments, postcondition: { kind: 'url', value: event.arguments.url } } }
+    }
     validateArgs(tool, event?.arguments)
     const binding = bindings.get(run?.answerId)
     if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') {
