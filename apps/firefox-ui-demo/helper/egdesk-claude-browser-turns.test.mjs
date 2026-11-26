@@ -68,7 +68,9 @@ test('D20: the pure rule: only Browser Cards granted to operate stay in a Claude
   assert.deepEqual(claudeKeptInputs(true, undefined), [])
   assert.equal(ChatState.claudeKeptInputs, claudeKeptInputs)
   assert.ok(surface.includes('inputSources: ChatState.claudeKeptInputs(claudeBrowserPlan.live, thread.inputSources), briefingInputs: []'))
-  assert.ok(surface.includes("ChatState.chatThreadEngineId(thread, state.codex) === 'claude'"), 'ending the grant takes the chip away for a Claude conversation only')
+  assert.ok(surface.includes('sendError: null, inputSources: keptBrowserInputs(thread.inputSources), briefingInputs: []'), 'Codex retains its interact selection on send')
+  assert.match(surface, /const keptBrowserInputs = inputs => ChatState.claudeKeptInputs\(engineId !== 'claude' \|\| claudeBrowserPlan.live, inputs\)/)
+  assert.match(surface, /if \(thread && ChatState.clientThreadBinding\(thread\) === activeClientThreadId\) \{\s+for \(const input/, 'revocation removes only the matching room’s chip, for both engines')
 })
 
 test('D20: the same Card carries the next turns of the conversation (a fresh token from the standing grant), the run binding continues, and the Card tools work on every turn; with the grant ended there are none', async t => {

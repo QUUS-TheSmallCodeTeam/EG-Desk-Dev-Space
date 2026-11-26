@@ -371,3 +371,27 @@ test('L8 C4: session-end, ordering, grant and cancellation destinations are not 
   assert.deepEqual(options.map(o => o.item.element.ref), ['ok1', 'ok2'])
   assert.equal(excluded.gated, hrefs.length)
 })
+
+test('on a POST form with ordinary fields, a withheld submit alone is a person target even with a neutral label', async () => {
+  const post = { ...LIST_PAGE, interactiveElements: [
+    { ref: 'name', role: 'textbox', tag: 'input', label: 'Name', value: 'Example' },
+    { ref: 'go', role: 'button', tag: 'button', label: 'Continue', nav: { type: 'submit', form: { method: 'post' } } },
+  ] }
+  const { options, personOnly, withheld } = buildReflexCandidates(post, { askSite: true })
+  assert.equal(personOnly.length, 0); assert.deepEqual(withheld.map(x => x.label), ['Continue'])
+  assert.deepEqual(options.map(x => x.item.element.ref), ['name'])
+  const { client } = decisions(q => q.name === 'next_step' ? choice('blocked') : q.name === 'page_state' ? choice('content') : { type: 'predicate', probability: q.name === 'person_target_0' ? 0.99 : 0.01 })
+  const b = tools([post]); const result = await runBrowserReflex({ cardId: 'c', goal: 'submit order', valuesFirst: true, textComboboxes: true, callTool: b.callTool, client })
+  assert.deepEqual([result.reason, result.steps[0].rule, result.controls], ['human_step', 'person_target', ['Continue']]); assert.deepEqual(b.calls.map(c => c.name), ['egdesk_browser_observe'])
+})
+
+test('only reading for the chat answer remains: done beats an otherwise ambiguous follow-up on ordinary content', async () => {
+  const { client } = decisions(q => {
+    if (q.name === 'page_state') return choice('content')
+    if (q.name === 'next_step') return choice('needs_user_context')
+    assert.equal(q.name, 'goal_met'); assert.match(q.instructions, /only reading it for the chat answer remains/)
+    return { type: 'predicate', probability: 0.98 }
+  })
+  const b = tools([LIST_PAGE]); const result = await runBrowserReflex({ cardId: 'c', goal: '첫 번째 검색 결과 제목이 뭐야?', valuesFirst: true, textComboboxes: true, callTool: b.callTool, client })
+  assert.equal(result.outcome, 'done'); assert.deepEqual(b.calls.map(c => c.name), ['egdesk_browser_observe'])
+})

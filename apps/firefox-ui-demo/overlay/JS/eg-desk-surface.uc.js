@@ -19636,6 +19636,7 @@
         const selectedInputs = submittedDraft.inputSources;
         // u4: the same plan on what this send actually carries (the draft snapshot); a plan that would now refuse falls back to today's behaviour, which then stops at the interaction check below
         const claudeBrowserPlan = ChatState.claudeBrowserSendPlan({ engineId, capable: claudeBrowserCapable, selectedInputs, threadInputs: selectedInputs, contextPicked: 0, briefingInputs: submittedDraft.briefingInputs.length });
+        const keptBrowserInputs = inputs => ChatState.claudeKeptInputs(engineId !== 'claude' || claudeBrowserPlan.live, inputs);
         let submittedWasCleared = false;
         let inputReferences;
         // Preserve the specific foreign-engine/room refusal before the more
@@ -19665,7 +19666,7 @@
           // for transport. An unresolved send must not offer a full retry.
           if (!submittedBoard || !boardLiveDraftCurrent() || !ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id),
               getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft)) return;
-          updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, inputSources: [], briefingInputs: [] }, null));
+          updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, inputSources: keptBrowserInputs(thread.inputSources), briefingInputs: [] }, null));
           chatRequestProjectDisplays.delete(activeThread.id);
           state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
@@ -19776,7 +19777,7 @@
           const currentComposer = getCodexThreadById(state.codex, activeThread.id);
           submittedWasCleared = ChatState.chatDraftMatches(currentComposer, getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft);
           if (!submittedBoard && submittedWasCleared && engineId !== 'claude') {
-            updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, sendError: null, inputSources: [], briefingInputs: [] }, null));
+            updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, sendError: null, inputSources: keptBrowserInputs(thread.inputSources), briefingInputs: [] }, null));
             chatRequestProjectDisplays.delete(activeThread.id);
             state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
           }
@@ -19990,7 +19991,7 @@
             }));
             if (!submittedBoard && request.status === 'failed' && submittedWasCleared
                 && ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id), getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0,
-                  { text: '', revision: submittedDraft.revision, inputSources: [], briefingInputs: [], requestProjectTarget: null })) {
+                  { text: '', revision: submittedDraft.revision, inputSources: keptBrowserInputs(selectedInputs), briefingInputs: [], requestProjectTarget: null })) {
               state.codex.threadDrafts[activeThread.id] = submittedDraft.text;
               updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread,
                 inputSources: InputContext.addInputSources(thread.inputSources, selectedInputs), briefingInputs: submittedDraft.briefingInputs }, submittedDraft.requestProjectTarget));
@@ -27936,10 +27937,10 @@
       const revokeItem = standingGrant ? item('조작 허용 해제', '이 대화에서 이 Browser에 준 조작 허용을 지금 끝냅니다. 다음 턴부터 Agent는 다시 허락을 받아야 합니다.',
         () => {
           revokeBrowserToolGrants({ clientThreadId: activeClientThreadId, cardId: card.id });
-          // u7: a Claude conversation keeps the granted chip between turns; ending the grant takes that chip away too (a Codex conversation is left as it was)
+          // Both engines keep this room’s operate selection between turns.
           try {
             const thread = getCodexThreadById(state.codex, state.codex.activeThreadId);
-            if (thread && ChatState.chatThreadEngineId(thread, state.codex) === 'claude') {
+            if (thread && ChatState.clientThreadBinding(thread) === activeClientThreadId) {
               for (const input of (thread.inputSources || [])) if (input.kind === 'browser' && input.sourceRef?.viewId === card.id && input.browserToolPermission === 'interact') state.codexBridge.removeInputSource(thread.id, input.id);
             }
           } catch {}

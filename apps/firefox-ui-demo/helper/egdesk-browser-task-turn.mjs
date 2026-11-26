@@ -16,7 +16,7 @@ const RULE_HEAD = 'EG-Desk\'s Decision model already worked on this browser requ
 const RULE_DONE = 'status done: tell the person the result in one message.'
 const RULE_VALUE_TOOL = `next continue_with_egdesk_browser_task: call ${BROWSER_TASK_TOOL_NAME} this turn without a goal. For needs_value, infer the value from the conversation and pass it in values under ask.field; ask the person one short question only if you cannot infer it. For needs_guidance, read the Card if needed and continue the task; use only option ids the tool offers. For need_context, follow the note's next.`
 const RULE_VALUE_ASK = 'A status that needs a value or a choice (needs_value, needs_guidance, need_context): when the conversation already settles it (the person said it, or it follows plainly from what they said), continue from where it stopped yourself; otherwise ask the person one short question.'
-const RULE_CANNOT = 'human_step, cannot or cannot_proceed: tell the person what is left for them to do on the page. Never ask the person for something they already said.'
+const RULE_CANNOT = 'human_step, cannot or cannot_proceed: tell the person what is left for them to do on the page. If staleBy is user-hold, the person took control of the Card: say so, stop, and do not retry. Never ask the person for something they already said.'
 
 /** The rule, in the same words for both engines. toolOffered: the browser task tool is in this turn's tools (only then is it named). */
 export function browserTaskRule({ toolOffered = false } = {}) {
@@ -48,7 +48,7 @@ export function noteWords(note) {
 const SCREEN_OP = Object.freeze({ open: 'navigate', submit: 'submit', press: 'click', fill: 'fill', scroll: 'scroll' })
 // why the conversation model takes the task over, in the screen's words (L1 HANDOFF_REASONS): the note's or the tool's closed status/code
 const HANDOFF_OF = Object.freeze({ needs_value: 'needs_value', detail_needed: 'needs_value', needs_guidance: 'low_confidence', uncertain: 'low_confidence', page_unclear: 'low_confidence',
-  choice_needed: 'needs_user', confirm_needed: 'needs_user', need_context: 'needs_user', human_step: 'human_step', person_only_controls: 'human_step', sensitive_flow: 'human_step' })
+  choice_needed: 'needs_user', confirm_needed: 'needs_user', need_context: 'needs_user', human_step: 'human_step', person_only_controls: 'human_step', sensitive_flow: 'human_step', login_required: 'human_step', two_factor_required: 'human_step', bot_check: 'human_step' })
 const WORD = /^[A-Za-z][A-Za-z0-9_]{0,39}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/
 const short = (value, max) => (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '')
@@ -77,7 +77,7 @@ export function browserStepFor(event, { clientThreadId } = {}) {
   const step = { clientThreadId, taskId, seq, op,
     ...(typeof event.cardId === 'string' && ID.test(event.cardId) ? { cardId: event.cardId } : {}),
     ...(short(event.target, 60) ? { target: short(event.target, 60) } : {}), ...(short(event.valueName, 40) ? { valueName: short(event.valueName, 40) } : {}),
-    ...(!unverified && typeof event.ok === 'boolean' ? { ok: event.ok } : {}), ...(count(event.ms) !== null ? { ms: event.ms } : {}),
+    ...(!unverified && op !== 'handoff' && typeof event.ok === 'boolean' ? { ok: event.ok } : {}), ...(count(event.ms) !== null ? { ms: event.ms } : {}),
     by: event.by === 'model' ? 'model' : 'decision',
     ...(op === 'handoff' ? { status: reason } : status ? { status } : {}), ...(reason ? { reason } : {}) }
   return step

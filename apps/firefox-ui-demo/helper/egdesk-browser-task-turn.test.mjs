@@ -430,3 +430,16 @@ test('prepareTurn is never in the way: an unknown or running conversation is ski
   assert.deepEqual(await w.claude.prepareTurn({ threadId }), { status: 'skipped' }, 'a turn is running')
 })
 
+
+test('human handoffs are not failed end steps: credentials, authentication walls, payments and human control', async () => {
+  const { browserStepFor } = await import('./egdesk-browser-task-turn.mjs')
+  const { subjectiveNote } = await import('./egdesk-browser-task.mjs')
+  const { outcomeBody } = await import('./egdesk-browser-task-tool.mjs')
+  for (const code of ['login_required', 'two_factor_required', 'bot_check', 'sensitive_flow', 'human_step']) {
+    const s = browserStepFor({ op: 'end', taskId: 't', seq: 1, ok: false, code, status: 'cannot_proceed' }, { clientThreadId: 'a' })
+    assert.deepEqual([s.op, s.reason, s.ok], ['handoff', 'human_step', undefined])
+  }
+  const out = { outcome: 'escalated', reason: 'human_step', staleBy: 'user-hold' }
+  assert.deepEqual(outcomeBody({}, out), { status: 'human_step', code: 'person_only_controls', staleBy: 'user-hold' })
+  assert.equal(JSON.parse(subjectiveNote({taskId: 't', steps: 1}, {status: 'cannot_proceed', code: 'human_step', staleBy: 'user-hold'})).egdesk_browser_task.staleBy, 'user-hold')
+})
