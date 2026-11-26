@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { readSurfaceSource } from './egdesk-surface-source.mjs'
+import { captureInputSources } from '../overlay/resources/EGDeskInputContext.sys.mjs'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 
 globalThis.JSWindowActorParent ||= class {}
@@ -135,7 +136,7 @@ test('Browser context source identifies exact live Card without silently selecti
   assert.deepEqual(selectors.browserToolSelectedSources('thread-a'), [], 'old account authority epochs are not auto-selected')
 })
 
-test('BRW-11: a standing interaction grant re-issues the one-time token each turn until the Card, account or site changes', () => {
+test('BRW-11: a standing interaction grant re-issues the one-time token each turn until the Card, account or site changes', async () => {
   const current = { cardId: 'browser-a', cardEpoch: 'epoch-a', profileId: 'firefox-default', accountId: 'account-a', userContextId: 0,
     engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 3, url: 'https://shop.example.test/cart' }
   const card = { id: 'browser-a', isConnected: true, dataset: {}, classList: { contains: name => name === 'egd-browser-card' },
@@ -165,7 +166,15 @@ test('BRW-11: a standing interaction grant re-issues the one-time token each tur
   assert.equal(tokens.get('token-2').usedRunId, null)
   current.url = 'https://www.example.test/other'
   tokens.get('token-2').usedRunId = 'run-2'
+  // Replay the Codex send order: capture preparation used to throw on the old URL before the selection could renew.
+  const capture = async inputs => captureInputSources(ChatState.claudeBrowserSendPlan({ engineId: 'codex', selectedInputs: inputs }).captureInputs,
+    { browser: async () => ({ text: 'result page', url: current.url }) }, { nextId: () => 'snap' })
+  assert.notEqual(selected.sourceRef.uri, current.url)
+  assert.deepEqual(await capture(state.codex.threads[0].inputSources), [], 'the live Card carries no immutable snapshot')
+  await assert.rejects(capture([{ ...selected, browserToolPermission: 'observe' }]), /첨부 후 페이지 주소가 바뀌었습니다/, 'a read attachment remains locked to its original page')
   assert.equal(selectors.browserToolSelectedSources('thread-a')[0].sourceRef.uri, current.url, 'same site, another page: still granted, current URL')
+  assert.equal(tokens.get('token-3').selectedUrl, current.url)
+  assert.deepEqual(selectors.browserToolSelectedSources('thread-b', [selected]), [], 'cannot carry the live chip to another conversation')
   current.url = 'https://elsewhere.test/'
   tokens.get('token-3').usedRunId = 'run-3'
   assert.deepEqual(selectors.browserToolSelectedSources('thread-a'), [], 'the person steered the Card to another site: the grant ends')

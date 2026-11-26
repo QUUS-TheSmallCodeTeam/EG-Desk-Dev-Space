@@ -44,8 +44,13 @@ test('capability on but the send needs the Reader or has no Card to operate: ref
   assert.deepEqual(plan({ capable: true, selectedInputs: [card('observe')] }), { refuse: false, live: false, captureInputs: [card('observe')] })
 })
 
+test('Codex: only the explicit operate Card skips immutable capture; files and read attachments still go through it', () => {
+  const read = card('observe', 'read'), unselected = { ...card('interact', 'not-granted'), selectedByUser: false }
+  assert.deepEqual(plan({ engineId: 'codex', selectedInputs: [card('interact'), read, file, unselected] }).captureInputs, [read, file, unselected])
+})
+
 test('another engine is untouched: the plan hands the inputs back and refuses nothing', () => {
-  for (const engineId of ['codex', undefined, 'other']) for (const capable of [true, false]) {
+  for (const engineId of [undefined, 'other']) for (const capable of [true, false]) {
     const inputs = [card('interact'), file]
     assert.deepEqual(claudeBrowserSendPlan({ engineId, capable, selectedInputs: inputs, threadInputs: inputs, contextPicked: 3, briefingInputs: 2 }), { refuse: false, live: false, captureInputs: inputs })
   }
