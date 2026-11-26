@@ -3055,12 +3055,14 @@ export class CodexChatRuntime {
       }
       // Direct browser entry, 'on' (flag decisionContext.browserEntry.mode() === 'on', default off): the objective loop runs on a pre-turn
       // binding BEFORE the native turn exists, and the subjective model gets only the closed note. Any failure here means an ordinary turn.
+      let taskToolOffered = false
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'on') {
         // a1: alternating, the conversation model's process starts while the Decision model works (Claude: the CLI's start, with the spec this turn carries); best effort, never in the way
         if (this.browserAlternateOn() && typeof engine.prepareTurn === 'function') {
           try { void Promise.resolve(engine.prepareTurn({ threadId: cid, ...(overrides.cwd ? { cwd: overrides.cwd } : {}), ...(overrides.model ? { model: overrides.model } : {}), ...(effort !== undefined ? { effort } : {}) }, slot)).catch(() => {}) } catch { /* the turn starts it itself */ }
         }
-        browserPre = await this.runBrowserEntryOn(body, context, preparedProviders)
+        taskToolOffered = this.browserAlternateOn() && this.browserTaskToolOffered(policy, { browserInteraction: true, toolCeiling: ceiling, engineId: engine.id, authority: contextAuthority, slot })
+        browserPre = await this.runBrowserEntryOn(body, context, preparedProviders, taskToolOffered)
       }
       // Completed messages only (the held-answer mode, decisionContext.draftCheck 'on'): the subjective model's message for a browser task
       // (its question to the person, or its final report) is held and posted once, like any held answer. No second mechanism: the same
@@ -3072,7 +3074,6 @@ export class CodexChatRuntime {
       // a1: a Claude browser conversation under the harness holds whatever the check's setting, as its other turns do (u8, claudeHarnessHold): the talk between tool calls is a work note, one answer is posted.
       else if (policy === BROWSER_BOUNDED && !context.draftHold && (this.browserTaskHoldEligible() || this.claudeHarnessHold(body, context))) { context.draftHold = pending.draftHold = true; context.holdOnly = true }
       // a1: alternating, the rule rides beside the note (it names the browser task tool only when this turn offers it); otherwise the note as it is
-      const taskToolOffered = Boolean(browserPre?.note) && this.browserAlternateOn() && this.browserTaskToolOffered(policy, { browserInteraction: true, toolCeiling: ceiling, engineId: engine.id, authority: contextAuthority, slot })
       const browserTaskContext = browserPre?.note ? { egdesk_browser_task: { kind: 'application', value: this.browserTaskTurnNote(browserPre.note, { toolOffered: taskToolOffered }) } } : null
       if (browserPre?.note) context.browserTaskNote = browserPre.note
       // Re-checked at the last moment: the mode, every page's permission and the key must still hold, or nothing is attached.
@@ -5643,7 +5644,7 @@ export class CodexChatRuntime {
    * The direct entry over a run (the pre-turn quiet run or a live run): the options both entry paths share. Its steps go to the screen (onStepEvent, L8's contract).
    * The run's egress gate decides what of the page reaches the note and the entry.
    */
-  directBrowserEntry(run) {
+  directBrowserEntry(run, taskToolOffered = false) {
     const cfg = this.decisionContext?.browserEntry, store = this.browserTasks() ?? (this.browserTaskStore ??= createBrowserTaskStore({ now: this.now }))
     const pageText = () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } }
     return createDirectBrowserEntry({ provider: this.browserToolProvider(), store,
@@ -5654,6 +5655,7 @@ export class CodexChatRuntime {
       // c23: with in-run messages on, a message that replaces the task is recognised (the same flag, EGDESK_INRUN_MESSAGES)
       inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn(),
       // a1: alternating, a field the step needs is filled with a span of the person's message the Decision model chooses (L8 fieldText), so the Card moves before the turn
+      canContinue: cardId => taskToolOffered && this.browserAlternateOn() && run.browserBinding?.cards?.some(card => card.cardId === cardId && card.permission === 'interact'),
       fieldText: () => this.browserAlternateOn(), onStepEvent: (stepRun, event) => this.browserTaskStep(stepRun, event) })
   }
 
@@ -5763,7 +5765,7 @@ export class CodexChatRuntime {
       // The loop now works inside a live run: this run may post completed intermediate messages at a beat (nothing else about it changes).
       this.allowIntermediateMessages(hold.key)
       this.noteBrowserTurnMessage([run.requestId], message) // a1: the reply's spans are the browser task tool's value candidates
-      const entry = this.directBrowserEntry(run)
+      const entry = this.directBrowserEntry(run, hold.taskToolOffered)
       const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
       ;({ note, handedOff } = this.afterBrowserEntry(run, out))
     } catch { note = null; handedOff = false }
@@ -5873,7 +5875,7 @@ export class CodexChatRuntime {
   // 'on': bind the selected Cards with a quiet pre-turn run object, let the direct entry decide and (if it takes the turn) run the
   // objective loop, and return the closed note for the subjective input. The turn's run adopts this same binding afterwards
   // (the Card selection token is single-use, so a second bind is not possible). Never throws: failure means an ordinary turn.
-  async runBrowserEntryOn(body, context, preparedProviders) {
+  async runBrowserEntryOn(body, context, preparedProviders, taskToolOffered = false) {
     const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider(), prepared = provider ? preparedProviders.get(provider) : null
     if (!cfg || !provider || !prepared || typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled()) return null
     const id = `pre-${context.requestId}`
@@ -5910,7 +5912,7 @@ export class CodexChatRuntime {
       if (context.heartbeat) feedBrowserTask(context.heartbeat, this.browserTaskStore, context.clientThreadId)
       // a1: the person's message, for the browser task tool's value candidates (this turn and its pre-turn run); the loop's steps go to the screen by the run's conversation
       this.noteBrowserTurnMessage([context.requestId, preRun.runId], body.message)
-      const entry = this.directBrowserEntry(preRun)
+      const entry = this.directBrowserEntry(preRun, taskToolOffered)
       // c39: with the open-item resolver on, the turn-start request already read this message against the browser task and its options: the entry takes that read (no second request, no
       // different decision) and the resolver's later apply does not do it twice
       const verdictRow = context.requestId && this.browserOpenItemsOn() ? this.openItemVerdicts.get(context.requestId) ?? null : null

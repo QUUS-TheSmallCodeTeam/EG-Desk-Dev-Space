@@ -511,7 +511,7 @@ export function finishedPageFacts(segments, ids = []) {
 }
 
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [] }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], field = null }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(task.goalChanges > 0 ? { goalChanges: Math.min(task.goalChanges, 9) } : {}), // c23: how many times the person changed the request while it ran
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
@@ -524,7 +524,8 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
     ...(Array.isArray(page) && page.length && !(Array.isArray(found) && found.length) ? { page: page.slice(0, MAX_PAGE_LINES) } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
-  const next = status === 'done' ? 'report_to_user' : status === 'need_context' ? 'ask_user_in_chat' : 'tell_user_and_ask_in_chat'
+  if (status === 'needs_value' && typeof field === 'string' && field) body.ask = { field: compactText(field.replace(/^\[[A-Z]\d+\]\s*/, ''), 60), kind: 'text' }
+  const next = status === 'needs_value' || status === 'needs_guidance' ? 'continue_with_egdesk_browser_task' : status === 'done' ? 'report_to_user' : status === 'need_context' ? 'ask_user_in_chat' : 'tell_user_and_ask_in_chat'
   return JSON.stringify({ egdesk_browser_task: { ...body, next } })
 }
 
@@ -540,7 +541,7 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
 // fieldText() (a1, default off; Main 16:5x, real window: the entry entered the DuckDuckGo card and stopped at its first step because nobody gave the search text): a field the loop
 // needs text for is filled with a span of the person's own message the decision model CHOOSES (egdesk-browser-field-text.mjs; none = the pause as before), the chosen text is typed
 // before the next step's choice, and a search box that announces itself as a combobox (Google's) is a text field. Off: everything as before.
-export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false, onStepEvent = null, fieldText = () => false } = {}) {
+export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false, onStepEvent = null, fieldText = () => false, canContinue = () => false } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -639,6 +640,8 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
         const rankedField = result.outcome === 'escalated' && result.reason === 'uncertain' && !pendingText ? undecidedField(result) : null
         const chosen = result.outcome === 'needs_free_text' ? await chosenText(run, task, result) : rankedField ? await chosenText(run, task, { field: rankedField }) : null
         if (chosen) { values = chosen; continue }
+        // A confirmed person-only step never reaches this branch.
+        if (rankedField && task.steps === 1 && canContinue(task.cardId)) return fromResult(task, { outcome: 'needs_free_text', field: rankedField })
       }
       return fromResult(task, result)
     }
@@ -667,9 +670,11 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
     task.askedCandidates = pause.kind === 'need_context' && asked === 'choice_needed' ? (extra.candidates || []).slice(0, 3).map(item => compactText(String(item).replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) : []
     if (pause.kind === 'need_context' && ASKED_CODES.has(asked)) task.pendingAsk = asked
     else if (pause.code !== 'page_unclear') remember(task, { status: 'stuck', code: pause.code }) // a page to look at is a pause, not an outcome
-    const status = pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
+    const field = result?.label || result?.field || (result?.fields?.length === 1 ? result.fields[0] : null)
+    const continueTask = ['detail_needed', 'uncertain', 'page_unclear'].includes(pause.code) && canContinue(task.cardId)
+    const status = continueTask ? (pause.code === 'detail_needed' && field ? 'needs_value' : 'needs_guidance') : pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
     return { handled: true, status: 'paused', taskId: task.taskId,
-      note: subjectiveNote(task, { status, code: pause.code, candidates: extra.candidates, detail: extra.detail, recorded: extra.recorded }) }
+      note: subjectiveNote(task, { status, field, code: pause.code, candidates: extra.candidates, detail: extra.detail, recorded: extra.recorded }) }
   }
 
   function fromResult(task, result) {
