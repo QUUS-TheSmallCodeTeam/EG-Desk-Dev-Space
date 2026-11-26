@@ -353,7 +353,7 @@ test('a1 who chose an action (actor) rides on the Browser dispatch a scope sends
 
 test('a1 the wiring uses the runtime\'s hooks: the step events go to browserTaskStep(run, event, ids) and the task lives in browserTasks() (the entry\'s store), whose paused task the tool continues', async () => {
   const shared = createBrowserTaskStore()
-  const entryTask = shared.create({ conversationKey: 'conv-1', cardId: 'card', goal: '명세서 열기' })
+  const entryTask = shared.create({ conversationKey: 't1', cardId: 'card', goal: '명세서 열기' }) // a1 (L5): the direct entry keys a task by the person's chat id (context.clientThreadId)
   entryTask.status = 'paused'; entryTask.state = { pending: [], assigned: [], attemptedRefs: [], unmatched: [], history: ['opened [L1] 명세서'] }
   const received = [], directCalls = []
   const live = { dispatch: async () => ({}), directEntryEnabled: () => true, reflexScope: () => ({ client: null, callTool: async () => ({}) }),

@@ -52,9 +52,7 @@ import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
 import { isCurrentBrowserReflexHandoff } from './codex-browser-tool-provider.mjs'
 // The reflex only runs interaction steps, so it is visible and callable exactly
 // where interaction tools are, and only when the Browser provider lists it.
-// a1: the browser task tool (the conversation model continues the Decision loop's task with a value or a choice; L8, provisional name) is the same kind:
-// an interaction tool of the Browser provider, offered and callable only where interaction is, and only when the provider lists it (nothing lists it today).
-const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME, BROWSER_TASK_TOOL_NAME])
+const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME])
 // Fixture QA allows only observe/click/fill; a reflex could run other steps.
 const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
 import { planSessionTopic, SESSION_TOPIC_LIMITS } from './egdesk-session-topic.mjs'
@@ -162,7 +160,7 @@ import { withoutAuthOpaqueSources } from './egdesk-auth-opaque.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
-import { BROWSER_TASK_STEP_EVENT, BROWSER_TASK_TOOL_NAME, stepSink, withBrowserTaskRule, withStepHook } from './egdesk-browser-task-turn.mjs' // a1 (교대)
+import { BROWSER_TASK_TOOL_NAME, browserStepFor, noteWords, withBrowserTaskRule } from './egdesk-browser-task-turn.mjs' // a1 (교대)
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
@@ -1000,10 +998,10 @@ export class CodexChatRuntime {
     this.threadToolManifests = new Map()
     this.threadToolManifestStatus = new Map()
     this.browserRegisteredThreads = new Set()
-    // a1 (교대, flag EGDESK_BROWSER_ENTRY=alternate): browserTaskStep(run, info, { taskId, cardId }) shows one step of a Decision loop a tool runs (the browser task tool), like the
-    // entry's steps (nothing is shown unless the flag is 'alternate'); browserTasks() is the entry's task store (the entry and a tool continue the same task), null while the entry is off.
+    // a1 (교대): browserTaskStep(run, event) puts one step of a Decision loop a tool runs (the browser task tool, L8's step contract) on the screen through lane L1's channel, like
+    // the entry's steps; browserTasks() is the entry's task store (the entry and the tool continue the same task), null while the entry is off.
     const providerRuntime = Object.freeze({ emit: (...args) => this.emit(...args), browserRegisteredThreads: this.browserRegisteredThreads, currentEpoch: () => this.epoch,
-      browserTaskStep: (run, info, ids = {}) => this.browserTaskStep(run, info, { ...ids, phase: 'tool' }), browserTasks: () => this.browserTasks() })
+      browserTaskStep: (run, event) => this.browserTaskStep(run, event), browserTasks: () => this.browserTasks() })
     for (const provider of this.toolProviders) provider.runtime = provider === contexts ? this : providerRuntime
     this.providerRuntime = providerRuntime // u1: for registerToolProvider
     this.ownedRuns = new WeakSet()
@@ -3062,7 +3060,7 @@ export class CodexChatRuntime {
         if (this.browserAlternateOn() && typeof engine.prepareTurn === 'function') {
           try { void Promise.resolve(engine.prepareTurn({ threadId: cid, ...(overrides.cwd ? { cwd: overrides.cwd } : {}), ...(overrides.model ? { model: overrides.model } : {}), ...(effort !== undefined ? { effort } : {}) }, slot)).catch(() => {}) } catch { /* the turn starts it itself */ }
         }
-        browserPre = await this.runBrowserEntryOn(body, context, preparedProviders, { conversationId: cid, engineId: engine.id })
+        browserPre = await this.runBrowserEntryOn(body, context, preparedProviders)
       }
       // Completed messages only (the held-answer mode, decisionContext.draftCheck 'on'): the subjective model's message for a browser task
       // (its question to the person, or its final report) is held and posted once, like any held answer. No second mechanism: the same
@@ -5603,64 +5601,68 @@ export class CodexChatRuntime {
     try { return this.collectToolSpecs(policy, options).specs.some(spec => spec?.name === BROWSER_TASK_TOOL_NAME) } catch { return false }
   }
 
-  /**
-   * One step of a Decision loop on the screen: a chat.event v2 `browserTaskStep`, transient (sent to the windows, never stored, so the history and its checkpoints
-   * are what they were). target: the run the step belongs to, or, before the turn exists, the pending send ({ requestId, clientThreadId, conversationId, localRunId }).
-   * Only while alternating. Returns whether a step was sent.
-   */
-  browserTaskStep(target, info, { taskId = null, cardId = null, phase = 'tool', sink = null } = {}) {
-    if (!target || !this.browserAlternateOn()) return false
-    if (target.clientThreadId && this.deletedConversations.has(target.clientThreadId)) return false
-    const publish = details => this.emitTransient(target, BROWSER_TASK_STEP_EVENT, details)
-    return (sink ?? stepSink(publish))(info, { taskId, cardId, phase })
+  /** The person's message of a browser turn (lane L8's messageOf: its spans are the value candidates of the browser task tool), by the turn's request id or the pre-turn run id; null otherwise. */
+  browserTaskMessage(run) {
+    const messages = this.browserTurnMessages
+    if (!messages || !run) return null
+    return messages.get(run.requestId) ?? messages.get(run.runId) ?? null
+  }
+
+  /** Keeps a browser turn's message for browserTaskMessage (memory only, the last 100 keys), only while the entry is on. */
+  noteBrowserTurnMessage(keys, message) {
+    if (this.browserEntryMode() !== 'on' || typeof message !== 'string' || !message.trim()) return
+    this.browserTurnMessages ??= new Map()
+    for (const key of keys) if (typeof key === 'string' && key) { this.browserTurnMessages.delete(key); this.browserTurnMessages.set(key, message) }
+    while (this.browserTurnMessages.size > 100) this.browserTurnMessages.delete(this.browserTurnMessages.keys().next().value)
   }
 
   /**
-   * A chat.event v2 for the windows only: the identity fields and the sequence of a stored event, durable false, transient true; no record, no run checkpoint.
-   * A quiet target (the pending send before its turn exists) names no run: runId and answerId are null, the send's requestId is its key.
+   * One step of a Decision loop on the screen, through lane L1's channel (decisionContext.browserSteps.publish; it sends nothing while EGDESK_BROWSER_STEPS_UI is off).
+   * run: the run the step belongs to (the pre-turn quiet run included: the conversation is its clientThreadId). event: L8's step contract. Returns whether a step was sent.
    */
-  emitTransient(target, event, details) {
-    const pending = target?.quiet === true
-    this.emitEvent({
-      type: 'chat.event', v: 2, provider: 'codex', engineId: this.runEngine(target), event,
-      streamId: this.streamId, seq: ++this.seq, ts: this.now(),
-      requestId: target.requestId ?? null, clientThreadId: target.clientThreadId ?? null, conversationId: target.conversationId ?? null,
-      runId: pending ? null : target.runId ?? null, answerId: pending ? null : target.answerId ?? null,
-      localConversationId: target.localConversationId || null, localRunId: target.localRunId || null, localMessageId: null,
-      details: copy(details), durable: false, transient: true,
-    })
-    return true
+  browserTaskStep(run, event) {
+    try {
+      const channel = this.decisionContext?.browserSteps
+      if (typeof channel?.publish !== 'function' || !run?.clientThreadId || this.deletedConversations.has(run.clientThreadId)) return false
+      const step = browserStepFor(event, { clientThreadId: run.clientThreadId })
+      return step ? channel.publish(step) === true : false
+    } catch { return false }
+  }
+
+  /** The entry's own last step of a call (L8's 'end'): done, or the hand-over to the conversation model with its reason. Numbered after the task's steps. */
+  browserTaskEnd(run, note) {
+    const words = noteWords(note), task = words?.id ? this.browserTaskStore?.get?.(words.id) ?? null : null
+    if (!task || !words.status) return false
+    const seq = (task.eventSeq ?? 0) + 1
+    task.eventSeq = seq
+    return this.browserTaskStep(run, { taskId: task.taskId, cardId: task.cardId ?? null, seq, op: 'end', status: words.status, ...(words.code ? { code: words.code } : {}), ok: words.status === 'done', by: 'decision' })
   }
 
   /**
-   * The direct entry over a run (the pre-turn quiet run or a live run): the options both entry paths share. onStep: the loop's observer, given only when alternating;
-   * it hears the store's progress hook (task, info) (egdesk-browser-task.mjs) and, should the entry take an onStep option of its own, that one too (a step heard twice
-   * is shown once). The run's egress gate decides what of the page reaches the note and the entry.
+   * The direct entry over a run (the pre-turn quiet run or a live run): the options both entry paths share. Its steps go to the screen (onStepEvent, L8's contract).
+   * The run's egress gate decides what of the page reaches the note and the entry.
    */
-  directBrowserEntry(run, { onStep = null } = {}) {
+  directBrowserEntry(run) {
     const cfg = this.decisionContext?.browserEntry, store = this.browserTasks() ?? (this.browserTaskStore ??= createBrowserTaskStore({ now: this.now }))
     const pageText = () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } }
-    return createDirectBrowserEntry({ provider: this.browserToolProvider(), store: onStep ? withStepHook(store, onStep) : store,
+    return createDirectBrowserEntry({ provider: this.browserToolProvider(), store,
       outcomeSink: typeof cfg?.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
       calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
       // c20: the finished task's status text goes into the note only where this run's models may receive Browser data; c21: the entry quotes the first lines each card shows, same gate
       pageTextInNote: pageText, cardTextInEntry: pageText,
       // c23: with in-run messages on, a message that replaces the task is recognised (the same flag, EGDESK_INRUN_MESSAGES)
-      inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn(), ...(onStep ? { onStep } : {}) })
+      inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn(),
+      onStepEvent: (stepRun, event) => this.browserTaskStep(stepRun, event) })
   }
 
-  /** a1: the loop's step hook for a run (or the pending send before the turn exists), or null while not alternating. One sink per entry call, so a step reported twice is shown once. */
-  browserStepHook(target, phase) {
-    if (!this.browserAlternateOn()) return null
-    const sink = stepSink(details => this.emitTransient(target, BROWSER_TASK_STEP_EVENT, details))
-    // (task, info) from the store's hook, or (info) from an onStep of the loop's own: the step's own ids then
-    return (first, second) => {
-      const task = second === undefined ? null : first, info = second === undefined ? first : second
-      return this.browserTaskStep(target, info, { taskId: task?.taskId ?? null, cardId: task?.cardId ?? null, phase, sink })
-    }
+  /** a1: after the entry handled a message: the call's last step for the screen (done, or the hand-over to the conversation model with its reason). -> { note, handedOff } */
+  afterBrowserEntry(run, out) {
+    const note = out?.handled === true && typeof out.note === 'string' ? out.note : null
+    if (note) this.browserTaskEnd(run, note)
+    return { note, handedOff: Boolean(note) && out.status === 'paused' }
   }
 
-  // u1: one more tool provider after construction (the bridge's optional wiring); the catalog reads this.toolProviders at every turn
+  // u1: one more tool provider after construction  // u1: one more tool provider after construction (the bridge's optional wiring); the catalog reads this.toolProviders at every turn
   registerToolProvider(provider) {
     if (!provider || typeof provider.providerId !== 'string' || this.toolProviders.includes(provider)) return false
     provider.runtime = this.providerRuntime
@@ -5758,9 +5760,10 @@ export class CodexChatRuntime {
     try {
       // The loop now works inside a live run: this run may post completed intermediate messages at a beat (nothing else about it changes).
       this.allowIntermediateMessages(hold.key)
-      const entry = this.directBrowserEntry(run, { onStep: this.browserStepHook(run, 'entry') })
+      this.noteBrowserTurnMessage([run.requestId], message) // a1: the reply's spans are the browser task tool's value candidates
+      const entry = this.directBrowserEntry(run)
       const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
-      if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
+      ;({ note, handedOff } = this.afterBrowserEntry(run, out))
     } catch { note = null; handedOff = false }
     hold.handedOff = handedOff
     if (hold.cancelled || this.browserRunHolds.get(run) !== hold || run.status !== 'inProgress') return
@@ -5868,8 +5871,7 @@ export class CodexChatRuntime {
   // 'on': bind the selected Cards with a quiet pre-turn run object, let the direct entry decide and (if it takes the turn) run the
   // objective loop, and return the closed note for the subjective input. The turn's run adopts this same binding afterwards
   // (the Card selection token is single-use, so a second bind is not possible). Never throws: failure means an ordinary turn.
-  // a1: conversationId / engineId name the pending send for the loop's steps on the screen (alternating only)
-  async runBrowserEntryOn(body, context, preparedProviders, { conversationId = null, engineId = null } = {}) {
+  async runBrowserEntryOn(body, context, preparedProviders) {
     const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider(), prepared = provider ? preparedProviders.get(provider) : null
     if (!cfg || !provider || !prepared || typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled()) return null
     const id = `pre-${context.requestId}`
@@ -5904,16 +5906,16 @@ export class CodexChatRuntime {
       const memory = typeof cfg.memory === 'function' && !skipMemory ? await cfg.memory({ body, context, client: guarded(['memory_page']), egress, askedAt: context.askedAt ?? this.now(), position: this.turnPosition(context) }) : null
       // Read-only: the task loop's step count and waiting state feed this conversation's heartbeat; the store behaves exactly as before.
       if (context.heartbeat) feedBrowserTask(context.heartbeat, this.browserTaskStore, context.clientThreadId)
-      // a1: before the turn exists, the loop's steps are the pending send's (its requestId); shown only when alternating
-      const pendingSend = { quiet: true, requestId: context.requestId, clientThreadId: context.clientThreadId, conversationId, localRunId: context.localRunId ?? null, ...(engineId ? { engine: { id: engineId } } : {}) }
-      const entry = this.directBrowserEntry(preRun, { onStep: this.browserStepHook(pendingSend, 'entry') })
+      // a1: the person's message, for the browser task tool's value candidates (this turn and its pre-turn run); the loop's steps go to the screen by the run's conversation
+      this.noteBrowserTurnMessage([context.requestId, preRun.runId], body.message)
+      const entry = this.directBrowserEntry(preRun)
       // c39: with the open-item resolver on, the turn-start request already read this message against the browser task and its options: the entry takes that read (no second request, no
       // different decision) and the resolver's later apply does not do it twice
       const verdictRow = context.requestId && this.browserOpenItemsOn() ? this.openItemVerdicts.get(context.requestId) ?? null : null
       const browserItem = verdictRow?.items?.find(item => item.provider === 'browser') ?? null
       const openItemRead = browserItem ? readFromResolver(verdictRow.verdict, browserItem.source, context.clientThreadId, { sole: verdictRow.items.length === 1 }) : null
       const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers, ...(openItemRead ? { openItemRead } : {}) })
-      if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
+      ;({ note, handedOff } = this.afterBrowserEntry(preRun, out)) // a1: the call's last step for the screen
       if (verdictRow && openItemRead?.kind === 'settled' && out?.handled === true) {
         verdictRow.browserApplied = { settled: out.settled ?? openItemRead.optionId ?? null }
         // c43: settled by the sole item's own options (the referent had said no): the engine's open-items block must say so, not that the item stays open

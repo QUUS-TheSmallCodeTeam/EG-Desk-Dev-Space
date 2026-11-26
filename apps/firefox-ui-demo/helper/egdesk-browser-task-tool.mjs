@@ -341,7 +341,8 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     const args = record(event?.arguments) ? event.arguments : {}
     const invalid = validateTaskArgs(args)
     if (invalid) return reply({ status: 'cannot', code: 'TASK_ARGS_INVALID', detail: invalid })
-    const conversationKey = run?.conversationId ?? run?.clientThreadId ?? null
+    // a1 (L5): the conversation as the direct entry keys its tasks (the person's chat id first), so a call without a goal finds the task the entry stopped
+    const conversationKey = run?.clientThreadId ?? run?.conversationId ?? null
     if (!conversationKey) return reply({ status: 'cannot', code: 'TASK_NO_CONVERSATION' })
     const cards = Array.isArray(run?.browserBinding?.cards) ? run.browserBinding.cards : []
     const store = tasksNow()
