@@ -102,7 +102,7 @@ import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-f
 import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { markStage, stagesOf } from './egdesk-upper-bundle.mjs' // u1: the order of a turn (memory/action, engine, check) as state
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
-import { claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1
+import { claudeBoundedHarnessInstructions, claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1; a1 (D27): a browser thread's instructions
 import { OBSERVE_RESULT_KEY, observeOptions, runObserveOption } from './egdesk-observe-first.mjs' // u5: read-only computer viewing, picked by the decision model and run by code before the engine
 import { claudeBrowserLive } from './egdesk-claude-browser-route.mjs' // u5
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
@@ -2732,7 +2732,7 @@ export class CodexChatRuntime {
       throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
     }
     if (bounded && engine.id !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
-    const qaOverrides = bounded && engine.id === 'claude' ? claudeBoundedThreadOverrides(policy, { relaxed: this.claudeBrowserLive() }) : bounded ? await loadQaThreadOverrides(request, {
+    const qaOverrides = bounded && engine.id === 'claude' ? this.claudeBoundedOverrides(policy, overrides.developerInstructions) : bounded ? await loadQaThreadOverrides(request, {
       threadId: context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null,
       cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
     }) : null
@@ -3059,7 +3059,8 @@ export class CodexChatRuntime {
       // Every other turn of a Browser conversation (U8: no streaming, only finished messages; all-on finding A6): the same hold, nothing new.
       // It only holds: the draft check stays ineligible for a bounded turn (the original is posted whole), and the heartbeat does not start
       // speaking in a bounded run because of it (holdOnly; allowIntermediateMessages is still the only way to opt a bounded run in).
-      else if (policy === BROWSER_BOUNDED && !context.draftHold && this.browserTaskHoldEligible()) { context.draftHold = pending.draftHold = true; context.holdOnly = true }
+      // a1: a Claude browser conversation under the harness holds whatever the check's setting, as its other turns do (u8, claudeHarnessHold): the talk between tool calls is a work note, one answer is posted.
+      else if (policy === BROWSER_BOUNDED && !context.draftHold && (this.browserTaskHoldEligible() || this.claudeHarnessHold(body, context))) { context.draftHold = pending.draftHold = true; context.holdOnly = true }
       const browserTaskContext = browserPre?.note ? { egdesk_browser_task: { kind: 'application', value: browserPre.note } } : null
       if (browserPre?.note) context.browserTaskNote = browserPre.note
       // Re-checked at the last moment: the mode, every page's permission and the key must still hold, or nothing is attached.
@@ -7488,6 +7489,14 @@ export class CodexChatRuntime {
 
   /** u1: the Claude harness config ({ disallowed }) when the flag and own tools are on, else null. */
   claudeHarness() { try { return this.ownToolsOn() ? this.ownTools?.claudeHarness?.() ?? null : null } catch { return null } }
+  /**
+   * SUB-10: the overrides of a bounded (browser) Claude thread. a1 (D27): under the harness they also carry EG-Desk's instructions for such a thread (how to talk between tool calls, which language to
+   * write to the person in) after the Agent's own text (base); without the harness they are exactly as before (no instructions).
+   */
+  claudeBoundedOverrides(policy, base = null) {
+    const own = claudeBoundedThreadOverrides(policy, { relaxed: this.claudeBrowserLive() })
+    return this.claudeHarness() !== null ? { ...own, developerInstructions: claudeBoundedHarnessInstructions(base) } : own
+  }
   /** u5: the Claude browser capability is live (harness on and the page tools provider registered) */
   claudeBrowserLive() { try { return claudeBrowserLive({ harness: this.claudeHarness(), toolProviders: this.toolProviders }) } catch { return false } }
 
