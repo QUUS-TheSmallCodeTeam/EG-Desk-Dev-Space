@@ -40,6 +40,29 @@ test('ops from the tools, the reflex and the contract read as one vocabulary', (
   assert.equal(View.browserStepByCallId(undefined), 'model');
 });
 
+test('who chose a Card request: its actor first (the task tool sends it), else the reflex call name as before', () => {
+  // L8 (ebc9387): act requests on the task tool's path carry actor 'decision' | 'model'; a model-guided step still has a reflex call name.
+  assert.equal(View.browserStepActor({ actor: 'model', callId: 'task-1.guide.reflex-1-0b3c' }), 'model', 'the actor wins over a reflex call name');
+  assert.equal(View.browserStepActor({ actor: 'decision', callId: 'toolu_01ABC' }), 'decision', 'the actor wins over a model call name');
+  assert.equal(View.browserStepActor({ actor: 'decision', callId: 'task-1.s1.reflex-2-x' }), 'decision');
+  for (const actor of [undefined, null, '', 'nobody', 'Decision', 7]) {
+    assert.equal(View.browserStepActor({ actor, callId: 'entry.reflex-3-y' }), 'decision', `no usable actor (${String(actor)}): the call name decides`);
+    assert.equal(View.browserStepActor({ actor, callId: 'toolu_9' }), 'model', `no usable actor (${String(actor)}): the call name decides`);
+  }
+  assert.equal(View.browserStepActor({}), 'model');
+  assert.equal(View.browserStepActor(null), 'model');
+  const guard = { documentId: 'doc-1', viewport: { width: 1000, height: 500 }, target: { ref: 'el_1', label: '검색', bounds: { x: 10, y: 10, width: 100, height: 20 } } };
+  const act = extra => View.browserStepCardView({ request: { kind: 'act', action: { type: 'click', ref: 'el_1' }, guard, ...extra }, engineId: 'claude' });
+  const guided = act({ actor: 'model', callId: 'task-1.guide.reflex-1-z' });
+  assert.equal(guided.by, 'model');
+  assert.equal(guided.caption, "Claude · '검색' 누름", 'the same words as before, named by the actor');
+  const looped = act({ actor: 'decision', callId: 'call_1' });
+  assert.equal(looped.by, 'decision');
+  assert.equal(looped.caption, "결정 모델 · '검색' 누름");
+  assert.equal(act({ callId: 'entry.reflex-1-q' }).caption, "결정 모델 · '검색' 누름", 'without an actor, as before');
+  assert.equal(act({ actor: 'someone', callId: 'toolu_2' }).caption, "Claude · '검색' 누름", 'an unknown actor is ignored');
+});
+
 test('each line says who did what and how long it took (proposed words)', () => {
   const line = (raw, engineId = 'claude') => View.browserStepLine(View.normalizeBrowserStep(raw, { ts: 1 }), { engineId }).line;
   assert.equal(line(step(0)), "결정 모델 · 검색칸에 '검색어' 입력 · 0.3초");
