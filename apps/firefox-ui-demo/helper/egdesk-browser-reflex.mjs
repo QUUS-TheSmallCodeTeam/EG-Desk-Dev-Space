@@ -606,7 +606,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   // a1: each page action also tells the observer what it was (op, the element's short name, the NAME of the value typed) and how long it took (ms: the call,
   // stepMs: since the step began, its decision included). A refused call is told as `failed` (never `action`: the progress facts count only done actions).
   let stepStart = Date.now()
-  const described = (tool, meta) => ({ op: meta.op ?? OP_OF_TOOL[tool] ?? 'act', target: typeof meta.target === 'string' && meta.target ? meta.target : null, ...(typeof meta.valueName === 'string' && meta.valueName ? { valueName: compactText(meta.valueName, 60) } : {}) })
+  // a wait carries no op: it is part of the step before it, never a line of its own (a reader that maps the tool name, like the runtime's step sink, drops it as before)
+  const described = (tool, meta) => ({ ...(tool === 'egdesk_browser_wait' && !meta.op ? {} : { op: meta.op ?? OP_OF_TOOL[tool] ?? 'act' }), target: typeof meta.target === 'string' && meta.target ? meta.target : null, ...(typeof meta.valueName === 'string' && meta.valueName ? { valueName: compactText(meta.valueName, 60) } : {}) })
   async function act(entry, tool, args, meta = {}) {
     const t0 = Date.now()
     try {
