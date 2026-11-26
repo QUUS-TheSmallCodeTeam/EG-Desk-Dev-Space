@@ -15,10 +15,14 @@ const operates = input => isBrowser(input) && input.browserToolPermission === 'i
  * claudeBrowserSendPlan({ engineId, capable, selectedInputs, threadInputs, contextPicked, briefingInputs })
  *   -> { refuse: boolean, live: boolean, captureInputs: [...] }
  * refuse: the send is refused with the existing CLAUDE_CONTEXT_UNSUPPORTED sentence. live: Browser Cards go as live selected sources (and not as captures).
- * captureInputs: what is captured as immutable context (the Reader's input). Not Claude: nothing here applies.
+ * captureInputs: what is captured as immutable context (the Reader's input). Codex also sends explicit operate selections only through its live binding.
  */
 export function claudeBrowserSendPlan({ engineId, capable = false, selectedInputs = [], threadInputs = [], contextPicked = 0, briefingInputs = 0 } = {}) {
   const inputs = Array.isArray(selectedInputs) ? selectedInputs : []
+  // An operate chip targets a live Card, not the page at the URL where the person granted it.
+  // The send validates and refreshes selectedSources separately; never turn an expired grant into a capture.
+  if (engineId === 'codex') return Object.freeze({ refuse: false, live: false,
+    captureInputs: inputs.filter(input => !(operates(input) && input.selectedByUser === true)) })
   if (engineId !== 'claude') return Object.freeze({ refuse: false, live: false, captureInputs: inputs })
   const operating = (Array.isArray(threadInputs) ? threadInputs : []).some(input => input?.browserToolPermission === 'interact') || inputs.some(operates)
   // today's refusal, unchanged: a picked context source, or a Browser Card granted to operate (as the screen read thread.inputSources)
