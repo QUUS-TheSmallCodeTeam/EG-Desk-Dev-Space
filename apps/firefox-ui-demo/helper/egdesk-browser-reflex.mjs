@@ -587,6 +587,9 @@ export function validateReflexArgs(args) {
 }
 
 const PUBLIC_CODE = /^[A-Z][A-Z0-9_]{2,63}$/
+// L6 a1b: a fill the Card refused as not sent while the page stayed the same document (its element, revision, viewport or focus moved, or the helper's copy was not
+// the latest): decided once more on a new observation. A replaced document, an unnamed refusal and every other one end the task as before.
+const SAME_DOCUMENT_NOT_SENT = new Set(['target', 'revision', 'viewport', 'focus', 'observation'])
 const failure = error => (error instanceof DecisionError ? error.code : 'unreachable')
 
 // a1 (the task tool, egdesk-browser-task-tool.mjs): what one page action of the loop was, for the step observer. Closed words and the element's own short
@@ -670,13 +673,15 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       tell({ step: entry.step, failed: tool, ok: false, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...(PUBLIC_CODE.test(code) ? { code } : {}), ...described(tool, meta) })
       const repeated = lastFailure === code
       lastFailure = code
-      return { ok: false, code, repeated }
+      return { ok: false, code, repeated, ...(typeof error?.staleBy === 'string' ? { staleBy: error.staleBy } : {}) }
     }
   }
 
   // The supplied values for this page: bind each (an exact field name first, else one mapping request) and type the first ready one. -> { result } (the loop returns it) |
-  // { typed: true } (a field was typed: next step) | { typed: false }. firstPass (a1 valuesFirst): before the step's choice, with the page-state predicates in the mapping request.
+  // { typed: true } (a field was typed: next step) | { typed: false } | { retry: true } (L6 a1b: the fill was refused as not sent: next step, decided anew). firstPass (a1 valuesFirst):
+  // before the step's choice, with the page-state predicates in the mapping request.
   const triedHere = new Set() // a1: `name|url|document` pairs the values-first mapping already asked about
+  const staleRetried = new Set() // L6 a1b: value names whose fill the Card refused once as not sent (nothing was typed): decided once more on a new observation
   async function typePending(entry, snapshot, observationId, fields, { firstPass = false } = {}) {
       const byValue = new Map(fields.map(option => [option.value, option]))
       const { documentId, url } = snapshot
@@ -741,6 +746,15 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         attemptedRefs.add(action.args.ref)
         const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
         if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`) }
+        else if (done.code === 'BROWSER_OBSERVATION_STALE' && SAME_DOCUMENT_NOT_SENT.has(done.staleBy) && !staleRetried.has(ready)) {
+          // L6 a1b (real window 11-26 17:16, DuckDuckGo: the task's first fill refused by the Card as not sent, staleBy target, and the task ended there while the
+          // model's own fill on the same Card went through): refused before any input on the same document, nothing was typed. The decision made on that observation
+          // is NOT sent again on another one: the value's binding is dropped (still pending, its field untried), so the next step reads the page again and decides
+          // where it goes anew. Once per value: a second refusal ends the task as before. A replaced document (or an unnamed refusal) ends it at once, as before.
+          staleRetried.add(ready); attemptedRefs.delete(action.args.ref); assigned.delete(ready); unmatched.delete(ready)
+          for (const tried of [...triedHere]) if (tried.startsWith(`${ready}|`)) triedHere.delete(tried)
+          return { retry: true }
+        }
         else return { result: finish('escalated', { reason: 'tool_failed', code: done.code }) }
         return { typed: true }
       }
@@ -791,6 +805,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       const typed = await typePending(entry, snapshot, observationId, fields, { firstPass: true })
       if (typed.result) return typed.result
       if (typed.typed) { entry.rule = 'values_first'; continue }
+      if (typed.retry) { entry.rule = 'fill_not_sent'; continue }
     }
     // The recorded choice on this page is a string comparison (code, once per path and run); the person's reply in this task overrides it.
     const recorded = priorRun && !usedRecorded.has(safePathOf(snapshot.url)) ? recordedChoice(priorRun, snapshot, options, { goal, userContext: contextLines }) : null
@@ -848,6 +863,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       const typed = await typePending(entry, snapshot, observationId, fields)
       if (typed.result) return typed.result
       if (typed.typed) continue
+      if (typed.retry) { entry.rule = 'fill_not_sent'; continue }
     }
 
     switch (decision.kind) {

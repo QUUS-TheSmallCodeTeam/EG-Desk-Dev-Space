@@ -141,6 +141,13 @@ export const BROWSER_INPUT_DENIED_REASONS = Object.freeze(['lease-already-used',
   'inner-window-id-mismatch', 'browsing-context-id-mismatch', 'run-binding-changed', 'run-cancelled', 'run-stopped', 'card-lease-changed', 'card-closed',
   'card-browser-mismatch', 'interaction-not-granted', 'selection-run-mismatch', 'action-type-mismatch', 'action-ref-mismatch', 'action-url-mismatch',
   'live-binding-changed', 'live-binding-unavailable'])
+// With target (L6 a1b): which check of the page actor refused the observed element: a field that moved (role, label, href, value, tag), not a listed control any more
+// (candidate), another element under that ref (reference), gone from the page, hidden, disabled, or not an editable field.
+export const BROWSER_TARGET_REASONS = Object.freeze(['role', 'label', 'href', 'value', 'tag', 'candidate', 'reference', 'gone', 'hidden', 'disabled', 'not-editable'])
+export function targetReasonOf(text) {
+  const word = /Browser (?:target (?:changed|is unavailable|is not an editable field)|action requires an observed element reference) \[([a-z-]{1,24})\]/.exec(typeof text === 'string' ? text.slice(0, 600) : '')?.[1]
+  return word && BROWSER_TARGET_REASONS.includes(word) ? word : null
+}
 export function staleReasonOf(text) {
   const message = typeof text === 'string' ? text.slice(0, 600) : ''
   const named = /\bstale \[([a-z-]{1,24})\]/.exec(message)?.[1]
@@ -1015,6 +1022,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
           { code: 'BROWSER_OBSERVATION_STALE', staleBy: staleReasonOf(response.error), dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
             ...(BROWSER_INPUT_DENIED_REASONS.includes(response.inputDeniedBy) ? { inputDeniedBy: response.inputDeniedBy } : {}),
+            ...(targetReasonOf(response.error) ? { targetBy: targetReasonOf(response.error) } : {}),
             ...(obscuredBy ? { obscuredBy } : {}) })
       }
       markUnknown()
