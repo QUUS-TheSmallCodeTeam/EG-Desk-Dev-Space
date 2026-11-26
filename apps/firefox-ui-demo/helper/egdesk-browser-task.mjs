@@ -1,3 +1,4 @@
+import { requestedMotion } from './egdesk-browser-motion.mjs'
 import { controlLines, localDay, pageTextOn } from './egdesk-browser-reflex.mjs'
 import { randomBytes } from 'node:crypto'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
@@ -80,6 +81,7 @@ const titleParts = title => String(title ?? '').split(/\s[|\-–—·:]\s|[|·]/
 export function codeEntryCard(message, cards) {
   const text = norm(message)
   if (!text) return null
+  if (cards?.length === 1 && requestedMotion(message)) return cards[0].cardId
   const named = (cards || []).filter(card => {
     const labels = String(card.host || '').toLowerCase().split('.').filter(part => part.length >= 4 && !HOST_STOP.has(part))
     return labels.some(part => new RegExp(`(^|[^a-z0-9])${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(text)) || titleParts(card.title).some(part => text.includes(part))
@@ -432,14 +434,14 @@ export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision',
     ...(typeof status === 'string' && EVENT_CODE.test(status) ? { status } : {}) })
 }
 
-const CANNOT = new Set(['site_not_allowed', 'site_pending', 'blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_rejected'])
+const CANNOT = new Set(['site_not_allowed', 'site_pending', 'blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_limit', 'step_rejected'])
 const PUBLIC_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
 const tally = (task, result) => {
   for (const step of result.steps || []) {
     for (const action of step.actions || []) {
       if (!action.ok) continue
       if (action.tool === 'egdesk_browser_fill') task.actions.fill++
-      else if (action.tool === 'egdesk_browser_navigate') task.actions.navigate++
+      else if (action.tool === 'egdesk_browser_navigate' || action.tool === 'egdesk_browser_history') task.actions.navigate++
       else if (action.tool === 'egdesk_browser_click') task.actions.press = (task.actions.press ?? 0) + 1 // c20: a read-only button
       else if (action.tool === 'egdesk_browser_scroll') task.actions.scroll++
     }

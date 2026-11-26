@@ -1,3 +1,4 @@
+import { requestedMotion, runRequestedMotion, isHistory } from './egdesk-browser-motion.mjs'
 import { undecidedField } from './egdesk-browser-field-text.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded } from './egdesk-browser-url-policy.mjs'
@@ -486,8 +487,9 @@ function fannedChoice(next, answers, fan, thresholds) {
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
 export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
-  const fan = crowdedStep(options)
-  const choices = fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
+  const motion = requestedMotion(goal)
+  const fan = !motion && crowdedStep(options)
+  const choices = motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
     `Goal: ${goal}`, ...(isDay(today) ? [`Today: ${today}`] : []), `URL: ${snapshot.url}`,
@@ -519,6 +521,8 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
   if (out.pageState && HANDOFF_STATES.has(out.pageState)) return { kind: 'handoff', ...out }
   if (out.pageState && BLOCKED_STATES.has(out.pageState)) return { kind: 'blocked', ...out }
   if (out.pageState !== 'content') return { kind: 'page_unclear', ...out }
+  // A model's goal_met is not a scroll coordinate or a history landing.
+  if (motion) return { kind: next.state === 'accepted' && next.value === 'move_' + motion ? 'motion' : 'uncertain', motion, ...out }
   if (arrived && readPredicate(result.answers, 'arrival_finishes', thresholds.done).state === 'yes') return { kind: 'done', rule: arrived + '_arrived', ...out }
   if (goalMet.state === 'yes') return { kind: 'done', ...out }
   // c16 (real s10: needs_user_context at 0.70, below the bar, ended as "uncertain" with no candidates): an undecided next step whose top is
@@ -874,7 +878,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     // permission, delete). There is nothing to judge, so no request is made: the step is the person's. Real measurement (2026-11-25):
     // asked anyway, the model answered scroll_more at confidence 0.30. A page that withholds a sensitive FIELD (a code, a password) is still
     // asked, because its page state (two_factor_required at 1.0 in the same measurement) names what the person has to do.
-    if (!options.length && excluded.gated + excluded.unsupported > 0 && excluded.sensitive === 0) {
+    if (!requestedMotion(goal) && !options.length && excluded.gated + excluded.unsupported > 0 && excluded.sensitive === 0) {
       entry.rule = 'person_only_controls'
       // c27 (owner decision, c26): the controls are named here too (they were not: S1 pinned an unnamed note); the person is told which controls are theirs
       return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, ...(withheld.length ? { controls: withheld.map(control => control.label) } : {}) })
@@ -896,7 +900,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       if (typed.retry) { entry.rule = 'fill_not_sent'; continue }
     }
     // The recorded choice on this page is a string comparison (code, once per path and run); the person's reply in this task overrides it.
-    const recorded = priorRun && !usedRecorded.has(safePathOf(snapshot.url)) ? recordedChoice(priorRun, snapshot, options, { goal, userContext: contextLines }) : null
+    const recorded = !requestedMotion(goal) && priorRun && !usedRecorded.has(safePathOf(snapshot.url)) ? recordedChoice(priorRun, snapshot, options, { goal, userContext: contextLines }) : null
     const prior = priorRun ? priorFacts(priorRun, snapshot, options) : { lines: [], conflict: false }
     // An earlier choice that is gone forces a question only while the person has not answered in this task.
     const conflict = prior.conflict && !contextLines.length
@@ -920,7 +924,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     entry.decision = { kind: decision.kind, pageState: decision.pageState, next: decision.next, goalMet: decision.goalMet,
       // c18: the numbers the calibration log keeps per step (the page-state predicates, the top two probabilities, how many values were offered)
       pageChecks: decision.pageChecks ?? null, targets: decision.targets ?? null, top: decision.ranked?.[0]?.probability ?? null, second: decision.ranked?.[1]?.probability ?? null,
-      options: decision.next?.by === 'code' ? null : options.length + Object.keys(REFLEX_CONTROLS).length,
+      options: decision.next?.by === 'code' ? null : decision.motion ? 2 : options.length + Object.keys(REFLEX_CONTROLS).length,
       usage: decision.usage, latencyMs: Math.round(decision.latencyMs) }
 
     // a2 (measured, DuckDuckGo-like home, real model): after the loop typed the person's text, the step's top choice was the read-only search at 0.74, under the 0.75 bar, so the task
@@ -1014,6 +1018,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         if (!done.ok && done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
         continue
       }
+      case 'motion': return runRequestedMotion({ motion: decision.motion, observed, cardId, callTool, act, entry, finish, signal, isDecisionCurrent })
       case 'scroll': {
         const done = await act(entry, 'egdesk_browser_scroll', { cardId, observationId, expectedRevision: snapshot.revision, direction: 'down', amount: 'page' })
         if (done.ok) history.push('scrolled down')
