@@ -4,8 +4,9 @@
 // valueName, ok, ms, by: 'decision'|'model', status? } (the bridge frame 'browser.task.step', or the chat event
 // 'browserTask.step' on a run). The lines sit in the conversation where they happened (between the messages, by time),
 // grouped by task; a long task folds to its summary and newest line.
-// Card: an Agent request the Card carried out gets a short caption at the Card's edge and, while the page is the one
-// it was read on, a frame around its target (the observed bounds, in percent of the observed viewport).
+// Card: an Agent request the Card carried out gets a short caption at the Card's edge (who chose it: the request's actor,
+// else its reflex call name) and, while the page is the one it was read on, a frame around its target (the observed
+// bounds, in percent of the observed viewport).
 // Nothing here decides, sends or authorizes anything; the words are proposals (the owner confirms them).
 
 export const BROWSER_STEP_FRAME_TYPE = 'browser.task.step';
@@ -51,6 +52,13 @@ export function browserStepOp(value) {
  * '<call>.reflex-<n>-<uuid>' by the Browser provider), else 'model' (the conversation model's own tool call). */
 export function browserStepByCallId(callId) {
   return typeof callId === 'string' && /\.reflex-\d+-/.test(callId) ? 'decision' : 'model';
+}
+
+/** Who chose one Browser request the Card carried out: the request's own actor ('decision' | 'model', sent with act
+ * requests on the task tool's path) when it says, else the call name (browserStepByCallId). The actor comes first: a
+ * conversation model's guided step still runs through the reflex scope and so has a reflex call name. */
+export function browserStepActor(request) {
+  return request?.actor === 'decision' || request?.actor === 'model' ? request.actor : browserStepByCallId(request?.callId);
 }
 
 export function browserEngineName(engineId) {
@@ -243,7 +251,7 @@ export function browserStepCardView({ request, response = null, reading = null, 
   if (request?.kind !== 'act') return null;
   const action = request.action || {};
   const guard = request.guard || {};
-  const by = browserStepByCallId(request.callId);
+  const by = browserStepActor(request);
   const caption = browserActionCaption({ by, engineId, action: { ...action, host: hostOf(action.url) }, target: guard.target, outcome });
   if (!caption) return null;
   const sameReading = reading && reading.documentId && reading.documentId === guard.documentId ? reading : null;
