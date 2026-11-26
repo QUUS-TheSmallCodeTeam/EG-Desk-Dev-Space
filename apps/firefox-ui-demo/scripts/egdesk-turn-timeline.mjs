@@ -15,6 +15,8 @@
 //   node scripts/egdesk-turn-timeline.mjs --since 16:30 [--browser] [--thread thread-dm-...] [--engine claude|codex] [--last N]
 //        [--until 21:00] [--json out.json] [--save closed.json] [--from closed.json] [--bridge http://127.0.0.1:39218] [--rows]
 //   --since/--until: KST "HH:MM" today, or an ISO time (no zone = KST). --browser: only turns that touched a Browser card.
+//   --row: stdout is JSON Lines, one measurement per selected turn (seconds; null = unknown). Browser counts cover stored events only.
+//   --thread ID --last 1 selects the newest matching turn; --thread ID --turn N selects its exact 1-based turn (also with --from).
 //   --save writes the CLOSED data (no text) so the same report can be made later with --from (the call log does not survive a restart).
 //   --rows: the per-step rows of every turn (default: rows for at most 6 turns, then the summary table). --idle: also requests that
 //   never started a turn (only the message was recorded).
@@ -227,10 +229,17 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
     const m = REFLEX.exec(e.browser.callId ?? '')
     return { ts: e.ts, event: e.event, ...e.browser, reflexStep: m ? Number(m[2]) : null, reflexParent: m ? m[1] : null }
   })
+  const owners = new Map()
   const loose = []
   for (const b of browserEvents) {
-    const owner = b.callId ? tools.find(t => b.callId === t.id || b.callId.startsWith(`${t.id}.`)) : null
-    if (owner) owner.browser.push(b); else loose.push(b)
+    let owner = b.callId ? tools.find(t => b.callId === t.id || b.callId.startsWith(`${t.id}.`)) : null
+    // In Codex the reflex prefix is often bt_<id>.s<n>, not the exec activity id.
+    // Use only one *containing* task invocation, never the first browser call of the turn.
+    if (!owner && b.reflexStep !== null) {
+      const candidates = tools.filter(t => t.tool === 'egdesk_browser_task' && t.start <= b.ts && b.ts <= t.end)
+      if (candidates.length === 1) owner = candidates[0]
+    }
+    if (owner) { owners.set(b, owner); owner.browser.push(b) } else loose.push(b)
   }
 
   // decision calls, placed in absolute time
@@ -246,19 +255,23 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
   // reflex steps: the window from the previous step (or the tool's start) to this step's browser event; the decision calls in that
   // window are the call time, the rest is the action (dispatch, page reaction, EG-Desk checks)
   const steps = []
-  const stepGroups = new Map()
-  for (const b of browserEvents.filter(x => x.reflexStep !== null)) { const k = b.reflexParent ?? ''; if (!stepGroups.has(k)) stepGroups.set(k, []); stepGroups.get(k).push(b) }
-  for (const [parent, group] of stepGroups) {
-    group.sort((a, b) => a.ts - b.ts)
-    const owner = tools.find(t => t.id === parent) ?? null
-    let from = owner ? owner.start : Math.min(...calls.filter(c => c.kind === 'browser').map(c => c.start), group[0].ts)
-    for (const b of group) {
-      const windowMs = [from, b.ts]
-      const callMs = total(union(calls.filter(c => c.kind === 'browser').map(c => [c.start, c.end])).map(iv => [Math.max(iv[0], windowMs[0]), Math.min(iv[1], windowMs[1])]).filter(([s, e]) => e > s))
-      steps.push({ parent, owner: owner?.id ?? null, step: b.reflexStep, start: from, end: b.ts, ms: b.ts - from, callMs, actionMs: Math.max(0, b.ts - from - callMs), label: browserLabel(b) })
-      from = b.ts
-    }
+  const previous = new Map()
+  let missingStart = false
+  const browserCallTime = union(calls.filter(c => c.kind === 'browser').map(c => [c.start, c.end]))
+  for (const b of browserEvents.filter(x => x.reflexStep !== null).sort((a, b) => a.ts - b.ts)) {
+    const owner = owners.get(b)
+    // Separate invocations even if the task's reflex prefix is reused across calls.
+    const key = JSON.stringify([owner?.id, b.reflexParent])
+    const last = previous.get(key)
+    const prior = last && b.reflexStep > last.reflexStep ? last.ts : null
+    const from = prior ?? (owner && owner.start <= b.ts ? owner.start : null)
+    const start = from ?? b.ts // completion only: do not invent a duration
+    if (from === null) missingStart = true
+    const callMs = total(clip(browserCallTime, start, b.ts))
+    steps.push({ owner: owner?.id, step: b.reflexStep, start, end: b.ts, ms: b.ts - start, callMs, actionMs: b.ts - start - callMs, label: browserLabel(b), timed: from !== null })
+    previous.set(key, b)
   }
+  if (missingStart) notes.push('일부 단계의 호출 시작 불명: 시각만 표시하고 단계 시간 합계에서 제외')
 
   // the person: an approval or question card from required to resolved, and a site-permission request that waited on the card
   // (request_site pending or allowed after more than SITE_WAIT_MS) are waiting for the person, not processing
@@ -267,7 +280,7 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
     const done = events.find(x => /\.resolved$/.test(x.event) && x.waitId === e.waitId && x.ts >= e.ts)
     waits.push({ start: e.ts, end: done?.ts ?? end, what: e.event.startsWith('approval') ? `허용 카드${e.waitKind ? ` ${e.waitKind}` : ''}` : '질문 카드' })
   }
-  for (const t of tools) if (t.browser.some(b => b.action === 'request_site') && t.end - t.start > SITE_WAIT_MS) waits.push({ start: t.start, end: t.end, what: '사이트 허용 기다림' })
+  for (const t of tools) if (t.browser.some(b => b.action === 'request_site' && b.reflexStep === null) && t.end - t.start > SITE_WAIT_MS) waits.push({ start: t.start, end: t.end, what: '사이트 허용 기다림' })
   const waitUnion = union(waits.map(w => [w.start, Math.min(w.end, end)]))
 
   // the conversation model: inside the native turn, every moment no tool runs
@@ -288,6 +301,8 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
   const firstPageAction = browserEvents.filter(b => b.event.startsWith('browser.tool.') && b.action && b.action !== 'wait' && b.action !== 'request_site' && b.event !== 'browser.tool.failed').map(b => b.ts)[0] ?? null
   const touchedBrowser = browserEvents.length > 0 || tools.some(t => browserTool(t.tool)) || events.some(e => e.event === 'browser.bound')
 
+  if (touchedBrowser) notes.push('브라우저 수치는 저장된 사건 기준. 턴 전 진입의 화면 전용 단계는 포함되지 않음')
+
   const rows = []
   const rel = ts => Math.round(ts - T0)
   rows.push({ start: 0, end: null, who: '사용자', what: '메시지', depth: 0 })
@@ -300,7 +315,7 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
     rows.push({ start: rel(t.start), end: rel(t.end), who: 'EG-Desk', decidedBy: who, what: `${t.tool} 실행 · ${by}${t.outcome ? ` · ${t.outcome}` : ''}${t.exitCode !== undefined && t.exitCode !== null ? ` · exit ${t.exitCode}` : ''}`, depth: 0 })
     for (const b of t.browser.filter(x => x.reflexStep === null)) rows.push({ start: rel(b.ts), end: null, who: 'EG-Desk', what: browserLabel(b), depth: 1 })
   }
-  for (const s of steps) rows.push({ start: rel(s.start), end: rel(s.end), who: '결정 모델', what: `단계 ${s.step}: ${s.label} · 결정 호출 ${Math.round(s.callMs)}ms + 동작 ${Math.round(s.actionMs)}ms`, depth: s.owner ? 1 : 0 })
+  for (const s of steps) rows.push({ start: rel(s.start), end: rel(s.end), who: '결정 모델', what: `단계 ${s.step}: ${s.label} · ${s.timed ? `결정 호출 ${Math.round(s.callMs)}ms + 동작 ${Math.round(s.actionMs)}ms` : '시작 불명'}`, toolCallId: s.owner ?? null, depth: s.owner ? 1 : 0 })
   for (const b of loose.filter(x => x.reflexStep === null)) rows.push({ start: rel(b.ts), end: null, who: 'EG-Desk', what: browserLabel(b), depth: 0 })
   for (const w of waits) rows.push({ start: rel(w.start), end: rel(Math.min(w.end, end)), who: '사용자', what: `${w.what}(기다림)`, depth: 1 })
   rows.push({ start: rel(end), end: null, who: '최종 답', what: finalAnswer ? `답 올라옴${finalAnswer.chars !== undefined ? ` · ${finalAnswer.chars}자` : ''}` : '답 없음', depth: 0 })
@@ -327,8 +342,8 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
       preTurnMs: Math.round(preTurn[1] - preTurn[0]),
       engine: { segments: engine.length, ms: Math.round(engineMs) },
       decision: { calls: callsBefore.length, serialMs: Math.round(total(decisionUnion)), inputTokens: callsBefore.reduce((n, c) => n + (c.inputTokens ?? 0), 0), afterAnswer: callsAfter.length, exact: callsExact },
-      decisionSteps: { steps: steps.length, ms: Math.round(steps.reduce((n, s) => n + s.ms, 0)), callMs: Math.round(steps.reduce((n, s) => n + s.callMs, 0)), actionMs: Math.round(steps.reduce((n, s) => n + s.actionMs, 0)) },
-      tools: { count: tools.length, ms: Math.round(toolMs), byDecision: tools.filter(t => whoDecided(t) !== '대화 모델').length },
+      decisionSteps: { steps: steps.length, untimed: steps.filter(s => !s.timed).length, ms: Math.round(steps.reduce((n, s) => n + s.ms, 0)), callMs: Math.round(steps.reduce((n, s) => n + s.callMs, 0)), actionMs: Math.round(steps.reduce((n, s) => n + s.actionMs, 0)) },
+      tools: { count: tools.length, ms: Math.round(toolMs), delegated: tools.filter(t => whoDecided(t) === '결정 모델(맡김)').length, byDecision: tools.filter(t => whoDecided(t) !== '대화 모델').length },
       browserStep: {
         byEngine: { steps: engineSteps.length, avgMs: engineSteps.length ? Math.round(engineSteps.reduce((n, x) => n + x, 0) / engineSteps.length) : null },
         byDecision: { steps: steps.length, avgMs: steps.length ? Math.round(steps.reduce((n, x) => n + x.ms, 0) / steps.length) : null },
@@ -362,6 +377,16 @@ export function renderTurn(turn) {
   lines.push(`        브라우저 한 단계: 대화 모델이 고른 단계 ${s.browserStep.byEngine.steps}개 평균 ${sec(s.browserStep.byEngine.avgMs)}초 | 결정 모델 단계 ${s.browserStep.byDecision.steps}개 평균 ${sec(s.browserStep.byDecision.avgMs)}초`)
   for (const n of turn.notes) lines.push(`  참고: ${n}`)
   return lines.join('\n')
+}
+
+// Non-overlapping tool picker counts: a delegated wrapper is an engine choice, not a decision-model tool selection.
+export function matrixRow(t) {
+  const s = t.summary, seconds = ms => ms === null ? null : ms / 1000
+  return { thread: t.clientThreadId, turn: t.index, requestId: t.requestId, engine: t.engineId,
+    totalSec: seconds(s.totalMs), firstActionSec: seconds(s.firstPageActionMs), decisionSteps: s.decisionSteps.steps,
+    decisionStepSec: s.decisionSteps.untimed ? null : seconds(s.decisionSteps.ms), engineSegments: s.engine.segments, engineSec: seconds(s.engine.ms),
+    toolsEngineDirect: s.tools.count - s.tools.byDecision, toolsEngineDelegated: s.tools.delegated, toolsDecisionDirect: s.tools.byDecision - s.tools.delegated,
+    browserFailures: s.browserEvents.failed, humanWaitSec: seconds(s.waitMs), browserCoverage: 'stored-events-only' }
 }
 
 export function renderTable(turns) {
@@ -493,6 +518,8 @@ function parseArgs(argv) {
     else if (a === '--json') out.json = next()
     else if (a === '--save') out.save = next()
     else if (a === '--from') out.from = next()
+    else if (a === '--row') out.row = true
+    else if (a === '--turn') { out.turn = Number(next()); if (!Number.isSafeInteger(out.turn) || out.turn < 1) throw new Error('--turn needs a positive integer') }
     else if (a === '--rows') out.rows = true
     else if (a === '--idle') out.idle = true
     else if (a === '--calls') out.calls.push(next())
@@ -505,26 +532,30 @@ function parseArgs(argv) {
   return out
 }
 
-async function main(argv) {
+export async function main(argv, { print = console.log, warn = console.error } = {}) {
   const opts = parseArgs(argv)
-  if (opts.help) { const lines = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1); console.log(lines.slice(0, lines.findIndex(l => !l.startsWith('//'))).join('\n')); return 0 }
+  if (opts.help) { const lines = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1); print(lines.slice(0, lines.findIndex(l => !l.startsWith('//'))).join('\n')); return 0 }
   if (opts.watch) { await watchCalls({ bridge: opts.bridge, file: opts.watch, everyS: opts.every, forMinutes: opts.forMinutes }); return 0 }
+  if (opts.turn && opts.threads.length !== 1) throw new Error('--turn needs exactly one --thread')
   const since = parseWhen(opts.since), until = parseWhen(opts.until)
   const collected = opts.from ? JSON.parse(fs.readFileSync(opts.from, 'utf8')) : await collectFromBridge({ bridge: opts.bridge, threads: opts.threads, since })
   if (collected?.format !== TIMELINE_FORMAT) throw new Error('not a timeline file (saved with --save)')
   if (opts.calls.length) { collected.liveTurns = mergeLiveTurns(collected.liveTurns, ...opts.calls.map(readCallsFile)); if (collected.liveTurns.length) collected.liveNote = null }
   if (opts.save) fs.writeFileSync(opts.save, JSON.stringify(collected), { mode: 0o600 })
-  const all = timelinesOf(collected).filter(t => !opts.threads.length || opts.threads.includes(t.clientThreadId))
+  const all = timelinesOf(collected).filter(t => (!opts.threads.length || opts.threads.includes(t.clientThreadId)) && (!opts.turn || opts.turn === t.index))
   const turns = selectTurns(all, { since, until, browser: opts.browser, engine: opts.engine, last: opts.last, idle: opts.idle })
-  if (collected.liveNote) console.log(`참고: ${collected.liveNote}`)
+  const note = opts.row ? warn : print
+  if (collected.liveNote) note(`참고: ${collected.liveNote}`)
   const idle = opts.idle ? 0 : selectTurns(all, { since, until, browser: opts.browser, engine: opts.engine, idle: true }).filter(t => t.started === false).length
-  if (idle) console.log(`참고: 턴이 시작되지 않은 요청 ${idle}개는 뺌습니다(--idle로 포함)`)
-  if (!turns.length) { console.log('고른 조건에 맞는 턴이 없습니다.'); return 1 }
-  const detailed = opts.rows ? turns : turns.slice(-6)
-  for (const t of detailed) console.log(renderTurn(t) + '\n')
-  if (detailed.length < turns.length) console.log(`(단계 표는 마지막 ${detailed.length}턴만. 전부 보려면 --rows)\n`)
-  console.log(renderTable(turns))
+  if (idle) note(`참고: 턴이 시작되지 않은 요청 ${idle}개는 뺌습니다(--idle로 포함)`)
+  if (!turns.length) { note('고른 조건에 맞는 턴이 없습니다.'); return 1 }
   if (opts.json) fs.writeFileSync(opts.json, JSON.stringify({ format: TIMELINE_FORMAT, turns }, null, 1), { mode: 0o600 })
+  if (opts.row) { for (const turn of turns) print(JSON.stringify(matrixRow(turn))); return 0 }
+  const detailed = opts.rows ? turns : turns.slice(-6)
+  for (const t of detailed) print(renderTurn(t) + '\n')
+  if (detailed.length < turns.length) print(`(단계 표는 마지막 ${detailed.length}턴만. 전부 보려면 --rows)\n`)
+  print(renderTable(turns))
+
   return 0
 }
 

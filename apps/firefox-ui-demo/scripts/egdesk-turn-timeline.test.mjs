@@ -3,7 +3,7 @@ import test from 'node:test'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { CALLS_FORMAT, collectFromBridge, displayWidth, mergeLiveTurns, parseWhen, reduceHistory, reduceLiveCalls, renderTable, renderTurn, selectTurns, timelinesOf, turnTimelines, watchCalls } from './egdesk-turn-timeline.mjs'
+import { CALLS_FORMAT, collectFromBridge, displayWidth, main, mergeLiveTurns, parseWhen, reduceHistory, reduceLiveCalls, renderTable, renderTurn, selectTurns, timelinesOf, turnTimelines, watchCalls } from './egdesk-turn-timeline.mjs'
 
 // Synthetic history pages shaped like GET /chat/history (only the fields the bridge really writes). Every text below must never reach the output.
 const SECRET = ['검색창에 우산 입력해줘', '우산 3,900원 비밀 본문', 'npm test --token=abc', 'https://shop.example.test/q?u=1', '장화 신은 고양이']
@@ -160,4 +160,43 @@ test('collecting from the bridge uses GET only, pages the history and reads the 
   assert.equal(collected.conversations.length, 1, 'only the conversation updated since'); assert.match(collected.liveNote, /꺼짐/)
   assert.equal(timelinesOf(collected).length, 1)
   for (const secret of SECRET) assert.ok(!JSON.stringify(collected).includes(secret), 'the saved data is closed too')
+})
+
+test('Codex task-local and .guide reflex IDs restart at their enclosing invocation, not the first decision call', () => {
+  // Relative intervals from 8dysu9y, names anonymised; reuse the prefix for the last invocation as a stronger regression.
+  const events = [ev(0, 'message.accepted'), ev(1, 'run.started')]
+  for (const [id, prefix, start, done, end] of [['exec-a', 'bt_x.s2', 844, 870, 1967], ['exec-b', 'exec-b.guide', 5299, 5334, 5340], ['exec-c', 'bt_x.s2', 7827, 7874, 8969]]) {
+    const a = act(id, 'dynamicToolCall', 'egdesk_browser_task')
+    events.push(ev(start, 'activity.started', a), ev(done, 'browser.tool.completed', { callId: `${prefix}.reflex-1-anon`, status: 'observed' }), ev(end, 'activity.completed', a))
+  }
+  events.push(ev(9100, 'run.completed'))
+  const [turn] = turnTimelines(reduceHistory({ events }), { liveTurns: [{ startedAt: T, requestId: 'req-1', calls: [{ kind: 'browser', startMs: 3, endMs: 5 }, { kind: 'browser', startMs: 7830, endMs: 7840 }] }] })
+  assert.deepEqual(turn.rows.filter(r => r.what.startsWith('단계 1:')).map(r => [r.toolCallId, r.ms]), [['exec-a', 26], ['exec-b', 35], ['exec-c', 47]])
+  assert.equal(turn.summary.decisionSteps.callMs, 10); assert.equal(turn.summary.tools.delegated, 3)
+})
+
+test('without a unique invocation do not borrow turn-wide call time; UI-only entry has no persisted steps', () => {
+  const events = [ev(0, 'message.accepted'), ev(1200, 'browser.bound'), ev(1210, 'run.started'), ev(2500, 'run.completed')]
+  const one = () => turnTimelines(reduceHistory({ events }), { liveTurns: [{ startedAt: T, requestId: 'req-1', calls: [{ kind: 'browser', startMs: 10, endMs: 500 }] }] })[0]
+  const entry = one()
+  assert.equal(entry.summary.decisionSteps.steps, 0); assert.equal(entry.summary.firstPageActionMs, null); assert.ok(entry.notes.some(n => n.includes('화면 전용')))
+  for (const id of ['a','b']) {
+    const a = act(id, 'dynamicToolCall', 'egdesk_browser_task'); events.push(ev(1300, 'activity.started', a), ev(2400, 'activity.completed', a))
+  }
+  events.push(ev(2000, 'browser.tool.completed', { callId: 'bt_x.s1.reflex-1-anon' }))
+  const orphan = one(); assert.equal(orphan.summary.decisionSteps.untimed, 1); assert.equal(orphan.summary.decisionSteps.ms, 0); assert.equal(orphan.summary.tools.delegated, 0)
+})
+
+test('offline matrix CLI: --thread and --turn select exactly one JSON line, notes never enter stdout', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'egd-matrix-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'closed.json'); const conversation = reduceHistory(pagesOne())
+  conversation.events.push(...conversation.events.map(e => ({ ...e, requestId: 'req-2', ts: e.ts + 20_000 })))
+  fs.writeFileSync(file, JSON.stringify({ format: 'egdesk-turn-timeline-v1', conversations: [conversation, { ...conversation, thread: { clientThreadId: 'other' } }], liveNote: 'note' }))
+  const cli = async (...args) => {
+    const stdout = [], stderr = []; const status = await main(['--from', file, '--row', ...args], { print: s => stdout.push(s), warn: s => stderr.push(s) })
+    return { status, stdout: stdout.join('\n'), stderr: stderr.join('\n') }
+  }
+  const p = await cli('--thread', 'thread-dm-test', '--turn', '2'); assert.equal(p.status, 0); assert.equal(p.stderr.trim(), '참고: note'); assert.equal(p.stdout.trim().split('\n').length, 1)
+  assert.deepEqual(JSON.parse(p.stdout), { thread: 'thread-dm-test', turn: 2, requestId: 'req-2', engine: null, totalSec: 6.5, firstActionSec: 3.4, decisionSteps: 2, decisionStepSec: 0.7, engineSegments: 4, engineSec: 5.19, toolsEngineDirect: 1, toolsEngineDelegated: 1, toolsDecisionDirect: 1, browserFailures: 0, humanWaitSec: 0, browserCoverage: 'stored-events-only' })
+  const miss = await cli('--thread', 'other', '--turn', '9'); assert.equal(miss.status, 1); assert.equal(miss.stdout, ''); await assert.rejects(cli('--turn', '1'), /exactly one --thread/)
 })
