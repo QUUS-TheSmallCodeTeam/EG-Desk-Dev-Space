@@ -77,11 +77,12 @@ export const BRIDGE_COMPOSITION = Object.freeze({
     'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_FLOW_STALLED_COPY', 'EGDESK_FLOW_NOTE_WORDING', 'EGDESK_UPPER', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
   // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
   notReproduced: {
-    keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration', 'nunchi'], // nunchi (u1, flag EGDESK_NUNCHI): its guidance record and route live in the bridge; the check's own scripts do not exercise it
+    keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration', 'nunchi', 'browserSteps'], // nunchi (u1, flag EGDESK_NUNCHI): its guidance record and route live in the bridge; the check's own scripts do not exercise it
+    // a1 (L1): browserSteps (flag EGDESK_BROWSER_STEPS_UI, read in egdesk-browser-steps-channel.mjs) only sends step lines to the screen; nothing in a turn changes
     runtimeKeys: ['localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
     flags: ['EGDESK_BROWSER_ENTRY', 'EGDESK_BROWSER_OPEN_ITEMS', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
            'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_TERMINAL_OPEN_URL', // c34: the terminal's opener and the sign-in-card rule need a window and a Terminal card (not part of this check's composition)
-            'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE'],
+            'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE', 'EGDESK_BROWSER_STEPS_UI'],
   },
 })
 

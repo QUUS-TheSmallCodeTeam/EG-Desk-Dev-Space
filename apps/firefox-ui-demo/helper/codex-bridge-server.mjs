@@ -100,6 +100,7 @@ import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
 import { createHostAgent, resolveHostAgentExecutable } from './egdesk-host-agent.mjs'
 import { createHostControl, createHostControlHttpHandler } from './egdesk-host-control.mjs'
 import { createComputerObserveWiring } from './egdesk-computer-observe-wiring.mjs'
+import { BROWSER_STEP_FRAME_TYPE, browserStepsUiMode, createBrowserStepsChannel } from './egdesk-browser-steps-channel.mjs'
 
 // Ignore prerelease variables; do not pass them on in direct bridge launches.
 for (const name of Object.keys(process.env)) {
@@ -170,12 +171,18 @@ const authState = {
 }
 
 function broadcast(event, chatProtocol = 0) {
+  // a1 (L1): a Browser step frame goes out only while EGDESK_BROWSER_STEPS_UI=on, checked again here (display only)
+  if (event?.type === BROWSER_STEP_FRAME_TYPE && !(event = browserSteps.gate(event))) return
   const payload = `event: codex\ndata: ${JSON.stringify(event)}\n\n`
   for (const client of clients) {
     if (chatProtocol && client.chatProtocol !== chatProtocol) continue
     client.send(payload)
   }
 }
+
+// a1 (L1): Browser task step lines for Chat and the Card (developer flag EGDESK_BROWSER_STEPS_UI, default off); the runtime
+// reports through decisionContext.browserSteps.publish(step). See egdesk-browser-steps-channel.mjs.
+const browserSteps = createBrowserStepsChannel({ mode: () => browserStepsUiMode(), broadcast: frame => broadcast(frame, 2) })
 
 function emitAuthStatus() {
   broadcast({
@@ -589,6 +596,8 @@ const chat = new CodexChatRuntime({
     turnMemory: turnMemoryConfig,
     nunchi: nunchiConfig,
     browserEntry: browserEntryConfig,
+    // a1 (L1): where a Browser task's steps are reported for the screen (sends nothing while EGDESK_BROWSER_STEPS_UI is off)
+    browserSteps,
     // Advisory draft check after an answer is posted (records only). Developer flag, default off; it has no settings screen entry.
     // The check asks per-sentence yes/no questions (default); EGDESK_DRAFT_CHECK_DESIGN=choice selects the old 4-way choice for comparison (developer flag).
     ...(['advisory', 'on'].includes(process.env.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => process.env.EGDESK_DRAFT_CHECK, design: () => (process.env.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates'), ...(process.env.EGDESK_DRAFT_CHECK_FILES === 'on' ? { fileText: () => true } : {}), ...(process.env.EGDESK_DRAFT_CHECK_INCOMPLETE === 'hold' ? { incompleteEvidence: () => 'hold' } : {}) } } : {}), // u5: the check may read the text of a prefetched file the engine was given (default off)
@@ -1296,6 +1305,7 @@ const bridgeServer = createServer(async (req, res) => {
         boardDeliveryIntent: true,
         boardPresentation: true,
         channelContext: true,
+        ...(browserSteps.enabled() ? { browserSteps: true } : {}),
         desk: deskStore ? ['local-store', 'generations', 'restore', 'board-revisions', 'board-revert', 'prefs-import'] : ['local-store-unavailable'],
         portable: [
           ...(deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable']),
