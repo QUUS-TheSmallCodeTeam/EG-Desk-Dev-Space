@@ -5,7 +5,7 @@ import { hostOf, hrefIdentifiers, identifiersOf, labelKey, outcomeCandidate, pri
 import { decideOpenItem, settledNote } from './egdesk-browser-open-items.mjs'
 import { choiceContextLine } from './egdesk-browser-choice-reply.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
-import { candidateSpans, pickFieldText } from './egdesk-browser-field-text.mjs'
+import { candidateSpans, pickFieldText, undecidedField } from './egdesk-browser-field-text.mjs'
 
 // Direct chat -> objective browser entry (L8 cycle 6; DECISION_MODEL_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
 //
@@ -635,7 +635,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       if (fieldTextOn() && task.status === 'running') {
         // the step needs text for a field (or was undecided with a text field among its top two choices, nothing left to type): the span choice, then the loop goes on
         const pendingText = Array.isArray(task.state?.pending) && task.state.pending.length > 0
-        const rankedField = result.outcome === 'escalated' && result.reason === 'uncertain' && !pendingText ? (result.ranked || []).slice(0, 2).map(row => row?.value).find(value => /^\[F\d+\]/.test(value ?? '')) : null
+        const rankedField = result.outcome === 'escalated' && result.reason === 'uncertain' && !pendingText ? undecidedField(result) : null
         const chosen = result.outcome === 'needs_free_text' ? await chosenText(run, task, result) : rankedField ? await chosenText(run, task, { field: rankedField }) : null
         if (chosen) { values = chosen; continue }
       }
