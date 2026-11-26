@@ -458,9 +458,10 @@ export const STEP_GROUPS = Object.freeze({
   press_other: Object.freeze({ question: 'step_press', description: 'Press one of the other buttons or tabs on this page (which one is asked separately).', ask: 'If the next step presses one of the other buttons or tabs on this page, which one?' }),
 })
 /** crowdedStep(options) -> null (not crowded) | { direct: options asked in next_step itself, groups: { open_link?: [options], press_other?: [options] } } (page order kept). */
-export function crowdedStep(options) {
+export function crowdedStep(options, entrySiteLinks = false) {
   if (!Array.isArray(options) || options.length <= CROWDED_STEP_OPTIONS) return null
-  const decisive = option => option.item?.kind === 'fill' || option.item?.readOnly?.kind === 'get_form'
+  // A selected site link asks the Card (not the conversation model) for permission. On entry, keep those bounded links in the main choice.
+  const decisive = option => option.item?.kind === 'fill' || option.item?.readOnly?.kind === 'get_form' || (entrySiteLinks && option.item?.askSite)
   const members = { open_link: options.filter(option => !decisive(option) && option.item?.kind === 'navigate'), press_other: options.filter(option => !decisive(option) && option.item?.kind !== 'navigate') }
   const groups = Object.fromEntries(Object.entries(members).filter(([, list]) => list.length >= 2)) // a kind with one target is offered as itself
   const grouped = new Set(Object.values(groups).flat())
@@ -485,8 +486,8 @@ function fannedChoice(next, answers, fan, thresholds) {
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
-  const fan = crowdedStep(options)
+export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+  const fan = crowdedStep(options, entrySiteLinks)
   const choices = fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
@@ -501,7 +502,9 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
   const result = await client.decide({
     input: [{ role: 'developer', content: REFLEX_RULES }, { role: 'user', content: evidence }],
     questions: [
-      choiceQuestion('next_step', 'Which option moves toward the goal next?', choices),
+      choiceQuestion('next_step', entrySiteLinks && options.some(o => o.item.askSite)
+        ? 'Which option moves toward the goal next? Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
+        : 'Which option moves toward the goal next?', choices),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', 'Does the current page already satisfy the goal?'),
@@ -908,7 +911,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     try {
       if (recorded && !arrived) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
       decision = recorded && !arrived ? await decideRecordedStep({ goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ goal, snapshot: seen, options, history, arrived, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+        : await decideReflexStep({ goal, snapshot: seen, options, history, arrived, entrySiteLinks: step === 1 && !resumeState && typeof firstFieldText === 'function', pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })

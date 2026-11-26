@@ -235,3 +235,36 @@ for (const [status, mode, reason] of [
   assert.equal(calls.filter(c => c === 'navigate').length, success ? 1 : 0)
   if (success) { assert.equal(calls.at(-1), 'observe'); assert.equal(out.steps.at(-1).rule, 'link_arrived') }
 })
+
+for (const [receipt, code] of [['site-allowed', undefined], ['site-refused', 'site_not_allowed'], ['site-pending', 'site_pending']]) {
+  test(`alternate entry on crowded results: selected external title -> Card ${receipt}`, async () => {
+    const page = ddgResultsSnapshot(), title = '장화 신은 고양이 - 나무위키'
+    const href = page.interactiveElements.find(el => el.label === title).href
+    let landed = false
+    const calls = [], reply = Promise.withResolvers(), asked = Promise.withResolvers()
+    const client = fakeClient(req => {
+      const next = req.questions.find(q => q.name === 'next_step')
+      const picked = next.choices.find(c => c.value.endsWith('] ' + title))
+      return { next_step: ranked('next_step', [[landed ? 'goal_met' : picked?.value ?? 'needs_user_context', 0.98]]),
+        goal_met: { type: 'predicate', probability: 0.02 }, ...(landed ? { arrival_finishes: { type: 'predicate', probability: 0.98 } } : {}) }
+    })
+    const callTool = async (name, args) => {
+      calls.push(name.replace('egdesk_browser_', ''))
+      if (name.endsWith('_observe')) return { observationId: `o${calls.length}`, snapshot: landed ? { ...page, url: href, documentId: 'landed', interactiveElements: [] } : { ...page, revision: calls.length } }
+      if (name.endsWith('_request_site')) { assert.equal(args.site, 'namu.wiki'); asked.resolve(); return reply.promise }
+      if (name.endsWith('_navigate')) { assert.deepEqual([args.url, args.observationId, args.expectedRevision], [href, 'o3', 3]); landed = true }
+      return {}
+    }
+    const scope = { client, callTool, isDecisionCurrent: () => true }
+    const provider = { directEntryEnabled: () => true, reflexScope: () => scope, runDirectTask: (_run, args) => runBrowserReflex({ ...args, ...scope, pageText: false }) }
+    const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), fieldText: () => true })
+    const yes = { type: 'predicate', probability: 0.98 }
+    const result = entry.handle({ run: { browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: '첫 번째 검색 결과 열어줘',
+      hosts: { card: 'duckduckgo.com' }, entryAnswers: { browser_entry: yes, browser_entry_card_0: yes, browser_entry_answer: { ...yes, probability: 0.02 } } })
+    await Promise.race([asked.promise, result]); assert.deepEqual(calls, ['observe', 'request_site'])
+    reply.resolve({ status: receipt })
+    const note = JSON.parse((await result).note).egdesk_browser_task
+    assert.deepEqual([note.status, note.code], [code ? 'cannot_proceed' : 'done', code])
+    assert.deepEqual(calls, code ? ['observe', 'request_site'] : ['observe', 'request_site', 'observe', 'navigate', 'wait', 'observe'])
+  })
+}
