@@ -4,7 +4,8 @@ import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './eg
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
 import { grantHint } from './egdesk-browser-grant-path.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation } from './egdesk-browser-url-policy.mjs'
-import { buildReflexCandidates, expectedTargetOf, navigationLanded, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { buildReflexCandidates, decideReflexStep, withoutPageText, expectedTargetOf, navigationLanded, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
 
 // L8 u1 ('위': up to the conversation): the browser as EG-Desk tools (the tools are named after the Card: egdesk_card_*; egdesk_page_* is the working-memory fixture's stand-in) the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
@@ -34,9 +35,9 @@ export const INTERNAL_NOTE = 'Not for the person: act, why, status, via and code
 export const PAGE_TOOL_SPECS = Object.freeze([
   Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.read, description: 'Read an EG-Desk Browser Card the person granted to this conversation: its title, address and visible lines. mode "structure" also lists its controls (ref, role, label) each marked auto (pressing or typing runs at once), approval (the person is asked first) or person (only the person does it on the page: sign-in, payment, permission, password). Read again after anything changes the page. The marks and the result fields are for you: never say them to the person; describe what you do in everyday words.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { cardId: { type: 'string', description: 'Omit when exactly one Card is granted.' }, mode: { type: 'string', enum: ['summary', 'structure'] } } } }),
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.press, description: 'Press one control of a Card the person granted for operation (their Browser card menu: Chat 조작 허용), by the ref from the last egdesk_card_read in structure mode. A same-site link, a read-only search button and a view tab run at once; a control that may change something asks the person first (give expectText: the text the page will show afterwards); sign-in, payment, permission and credentials are only the person\'s.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.press, description: 'Press one control of a Card the person granted for operation (their Browser card menu: Chat 조작 허용), by the ref from the last egdesk_card_read in structure mode. A same-site link, a read-only search button and a view tab run at once; an auto-marked requested radio, checkbox or named button may be pressed once; a control that may change something asks the person first (give expectText: the text the page will show afterwards); sign-in, payment, permission and credentials are only the person\'s.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['ref'], properties: { cardId: { type: 'string' }, ref: { type: 'string' }, expectText: { type: 'string', description: 'Text expected on the page after the press; needed when the press may change something.' } } } }),
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.type, description: 'Type text into one text field of a Card the person granted for operation (their Browser card menu: Chat 조작 허용), by the ref from the last egdesk_card_read in structure mode. It never presses Enter and never submits. Password, card and ID-number fields are only the person\'s.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.type, description: 'Type text into one text field of a Card the person granted for operation (their Browser card menu: Chat 조작 허용), by the ref from the last egdesk_card_read in structure mode. For an auto-marked native select use the offered option value as text. It never presses Enter and never submits. Password, card and ID-number fields are only the person\'s.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['ref', 'text'], properties: { cardId: { type: 'string' }, ref: { type: 'string' }, text: { type: 'string', maxLength: PAGE_LIMITS.typeChars } } } }),
   Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.open, description: 'Open an http(s) page in a new Browser Card, from a Card the person granted for operation (their Browser card menu: Chat 조작 허용). The page belongs to the person\'s own browser; sign-in pages of AI services cannot be opened.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', maxLength: PAGE_LIMITS.urlChars }, cardId: { type: 'string', description: 'The granted Card to open it from; omit when exactly one is granted.' } } } }),
@@ -61,11 +62,12 @@ function parse(response) {
  *   ledger:  the approval ledger of the command and file tools (check({ sessionId, turnId, cwd, command, floor, identity })); without it nothing that needs approval is done
  */
 // taskTool (L8 a1, optional): the browser task tool (egdesk-browser-task-tool.mjs) served beside these four (its flag EGDESK_BROWSER_TASK_TOOL); without it nothing changes.
-export function createPageToolsProvider({ mode = () => 'off', browser = null, ledger = null, env = process.env, limits = {}, taskTool = null } = {}) {
+export function createPageToolsProvider({ mode = () => 'off', browser = null, ledger = null, env = process.env, limits = {}, taskTool = null, messageOf = () => null, scopeOf = null } = {}) {
   const L = { ...PAGE_LIMITS, ...limits }
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const last = new Map() // `${runId}/${cardId}` -> { observationId, snapshot, options }
   const calls = new Map()
+  const namedSpent = new WeakSet() // at most one unknown-effect auto press per run, including failed attempts
   const remember = (run, cardId, value) => { last.set(`${run?.runId ?? run?.answerId}/${cardId}`, value); while (last.size > L.observations) last.delete(last.keys().next().value) }
   const recall = (run, cardId) => last.get(`${run?.runId ?? run?.answerId}/${cardId}`) ?? null
   const opaque = url => authOpaqueOn(env) && isAuthOpaqueUrl(url)
@@ -96,8 +98,31 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     return value
   }
 
+  // The engine's ref, text or expectText is NOT evidence of user intent. Reuse the loop's
+  // page-state/choice predicates on the actual turn and the unchanged candidate set.
+  async function requested(run, event, cardId, obs) {
+    try {
+      const goal = messageOf(run)
+      if (!scopeOf || typeof goal !== 'string' || !goal.trim()) return null
+      if (!obs.requested) {
+        if (obs.judged) return null
+        obs.judged = true
+        const options = buildReflexCandidates(obs.snapshot, { namedButtonRequest: goal, textComboboxes: true }).options
+        if (!options.some(o => o.item.kind === 'choice' || o.item.named)) return null
+        const scope = scopeOf(run, event, cardId)
+        if (!scope?.client || !scope.isDecisionCurrent()) return null
+        const decision = await decideReflexStep({ goal, snapshot: withoutPageText(obs.snapshot), options, client: scope.client,
+          thresholds: decisionThresholds(), authorizeDispatch: scope.authorizeDispatch })
+        if (decision.kind !== 'act' || !(decision.option.item.kind === 'choice' || decision.option.item.named)) return null
+        obs.requested = { goal, option: decision.option, current: scope.isDecisionCurrent }
+      }
+      const proof = obs.requested
+      return !obs.spent && proof.goal === messageOf(run) && proof.current() && !(proof.option.item.named && namedSpent.has(run)) ? proof.option : null
+    } catch { return null }
+  }
+
   /** What an action on this element would do: 'auto' | 'approval' | 'person' | 'disabled' (code only). */
-  function classify(snapshot, options, element) {
+  function classify(snapshot, options, element, requestedOption) {
     if (element.disabled === true) return { act: 'disabled' }
     const label = String(element.label ?? '')
     if (CREDENTIAL_ROLES.has(String(element.role)) || String(element.type ?? '').toLowerCase() === 'password' || CREDENTIAL_LABEL.test(label)) return { act: 'person', why: 'credential' }
@@ -109,6 +134,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const judged = classifyAction({ mode: 'activate', label: element.label, role: element.role, tag: element.tag, url: snapshot.url })
     const gate = actionGate(judged, RECOMMENDED_ACTION_GATE_POLICY)
     if (gate === 'user-step' || gate === 'deny') return { act: 'person', why: judged.category }
+    if (judged.category === 'none' && requestedOption?.item?.element.ref === element.ref) return { act: 'auto', option: requestedOption }
     return { act: 'approval', why: judged.category === 'none' ? 'unproven' : judged.category }
   }
   const isFieldElement = element => ['textbox', 'searchbox', 'combobox', 'textarea'].includes(String(element.role)) || ['input', 'textarea'].includes(String(element.tag).toLowerCase())
@@ -134,12 +160,13 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const { lines, truncated } = condense(snapshot)
     const body = { status: 'read', cardId: picked.card.cardId, host: hostOf(snapshot.url), path: pathOf(snapshot.url), title: short(snapshot.title ?? snapshot.text?.[0] ?? '', 160), lines, truncated }
     if (args.mode === 'structure') {
+      const granted = picked.card.permission === 'interact' && await requested(run, event, picked.card.cardId, obs)
       const elements = []
       for (const element of Array.isArray(snapshot.interactiveElements) ? snapshot.interactiveElements : []) {
         if (elements.length >= L.elements) break
         if (typeof element?.ref !== 'string') continue
-        const verdict = classify(snapshot, obs.options, element)
-        elements.push({ ref: element.ref, role: String(element.role ?? ''), label: short(element.label, L.labelChars), ...(element.href ? { href: pathOf(element.href) ?? undefined } : {}), ...(element.value ? { value: short(element.value, 60) } : {}), act: verdict.act })
+        const verdict = classify(snapshot, obs.options, element, granted)
+        elements.push({ ref: element.ref, role: String(element.role ?? ''), label: short(element.label, L.labelChars), ...(element.href ? { href: pathOf(element.href) ?? undefined } : {}), ...(element.value ? { value: short(element.value, 60) } : {}), ...(verdict.option?.item.kind === 'choice' && element.tag === 'select' ? { options: [verdict.option.item.desired] } : {}), act: verdict.act })
       }
       body.elements = elements
       body.forYouOnly = INTERNAL_NOTE
@@ -167,11 +194,27 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const element = (snapshot.interactiveElements ?? []).find(item => item.ref === args.ref)
     if (!element) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
     if (opaque(element.href) || opaque(snapshot.url)) return respond(true, { status: 'refused', code: 'BROWSER_CARD_OPAQUE' })
-    const verdict = classify(snapshot, obs.options, element)
+    const eligible = obs.options.some(o => o.item.element.ref === element.ref && (o.item.kind === 'choice' || o.item.kind === 'press'))
+    const granted = eligible && await requested(run, event, cardId, obs)
+    const verdict = classify(snapshot, obs.options, element, granted)
     const label = short(element.label, L.labelChars)
     if (verdict.act === 'disabled') return respond(true, { status: 'refused', code: 'PAGE_CONTROL_DISABLED' })
     if (verdict.act === 'person') return respond(true, { status: 'person_step', cardId, label, why: verdict.why, written: false, forYouOnly: INTERNAL_NOTE })
     const base = { cardId, observationId: obs.observationId, expectedRevision: snapshot.revision }
+    if (granted && verdict.option === granted) {
+      const select = element.tag === 'select'
+      const matchesText = select && (element.options ?? []).filter(o => o.value === args.text || o.label === args.text).length === 1 &&
+        element.options.some(o => o.value === granted.item.desired && (o.value === args.text || o.label === args.text))
+      if (select ? kind !== 'type' || !matchesText : kind !== 'press') return respond(true, { status: 'refused', code: select ? 'PAGE_TEXT_INVALID' : 'PAGE_NOT_A_FIELD' })
+      // No await between checking and consuming, even for simultaneous distinct call IDs.
+      if (obs.spent || !obs.requested.current() || obs.requested.goal !== messageOf(run) || (granted.item.named && namedSpent.has(run))) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
+      obs.spent = true
+      if (granted.item.named) namedSpent.add(run)
+      const plan = reflexActionArgs(granted, { cardId, observationId: obs.observationId, snapshot })
+      const done = await call(run, event, plan.tool, plan.args, kind)
+      if (done.data?.status !== 'postcondition-observed') done.ok = false
+      return result(done, { status: select ? 'typed' : 'pressed', via: 'auto', cardId, label, ...(select ? { submitted: false } : {}) }, run, cardId)
+    }
     if (kind === 'type') {
       if (!isFieldElement(element)) return respond(true, { status: 'refused', code: 'PAGE_NOT_A_FIELD' })
       const text = typeof args.text === 'string' ? args.text : ''
