@@ -1,3 +1,4 @@
+import { undecidedField } from './egdesk-browser-field-text.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
@@ -672,7 +673,7 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
-  textComboboxes = false, onPage = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
+  textComboboxes = false, onPage = null, firstFieldText = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -914,6 +915,26 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     if ((decision.kind === 'uncertain' || alikeAsk) && typedTexts.length) {
       const top = options.find(option => option.value === decision.ranked?.[0]?.value)
       if (top && typedSearch(top, typedTexts)) { decision = { ...decision, kind: 'act', option: top }; entry.rule = 'typed_search' }
+    }
+    // The empty DuckDuckGo home has a search-mode radio named like the submitter (which only appears AFTER typing).
+    // Before handing an undecided first entry step to a person, try the existing field/span choice. An explicit
+    // request for guidance, a non-content page or an occupied field is not an invitation to type. If no span fits,
+    // keep the original follow-up. Use this observation's guarded fill, never a press or submission here.
+    if (step === 1 && !resumeState && !pending.size && typeof firstFieldText === 'function' &&
+        ((decision.kind === 'uncertain' && personOnly.length) || alikeAsk)) {
+      const field = undecidedField({ ranked: decision.ranked, soleField: !alikeAsk && fields.length === 1 ? fields[0].value : null })
+      const box = fields.find(option => option.value === field)
+      if (box && !box.item.element.value) {
+        const text = await firstFieldText(field)
+        if (signal?.aborted) return finish('aborted')
+        if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
+        if (typeof text === 'string' && text.length) {
+          pending.set(field, text)
+          const typed = await typePending(entry, snapshot, observationId, fields)
+          if (typed.result) return typed.result
+          if (typed.typed || typed.retry) continue
+        }
+      }
     }
     // c23: no way forward was found (undecided, scroll_more, blocked) and the page has controls only the person may operate: one follow-up
     // asks whether the request is about one of them (a decided yes is the person's step, whatever the options were). Never for a decided step.
