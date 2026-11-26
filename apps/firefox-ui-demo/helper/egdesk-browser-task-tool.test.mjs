@@ -369,3 +369,37 @@ test('a1 the wiring uses the runtime\'s hooks: the step events go to browserTask
   assert.deepEqual(received.map(r => [r.event.op, r.ids.taskId, r.ids.cardId]), [['open', entryTask.taskId, 'card'], ['end', entryTask.taskId, 'card']])
   assert.match(out.forYouOnly, /Not for the person/)
 })
+
+test('a1 D33 one navigation rule: a link lands on its host and path whatever query the site adds, or on a redirect inside its own site; never while still where it started', async () => {
+  const { navigationLanded } = await import('./egdesk-browser-reflex.mjs')
+  const from = 'https://www.google.com/'
+  assert.equal(navigationLanded({ actual: 'https://about.google/?fg=1&utm_source=google-KR&utm_medium=referral', expected: 'https://about.google/?fg=1&utm_source=hp', from }), true)
+  assert.equal(navigationLanded({ actual: 'https://about.google/intl/ko/', expected: 'https://about.google/?fg=1', from }), true, 'a redirect inside the link\'s own site')
+  assert.equal(navigationLanded({ actual: from, expected: 'https://about.google/', from }), false, 'still where it started')
+  assert.equal(navigationLanded({ actual: 'https://evil.example/', expected: 'https://about.google/', from }), false, 'another site')
+  assert.equal(navigationLanded({ actual: 'https://duckduckgo.com/?q=x&ia=web', expected: 'https://duckduckgo.com/?q=x', from: 'https://duckduckgo.com/', submitted: true }), true)
+  assert.equal(navigationLanded({ actual: 'https://duckduckgo.com/?q=y', expected: 'https://duckduckgo.com/?q=x', from: 'https://duckduckgo.com/', submitted: true }), false)
+  // the page tools' site path: the site question allowed, the navigation read a failure, the page moved with added parameters -> pressed
+  const calls = []
+  let url = 'https://www.google.com/'
+  const page = () => ({ url, title: 'Google', revision: calls.length, documentId: url, readyState: 'complete', text: ['Google'],
+    interactiveElements: url.startsWith('https://www.google.com') ? [{ ref: 'about', role: 'link', tag: 'a', label: 'Google 정보', href: 'https://about.google/?fg=1&utm_source=hp', value: '' }] : [] })
+  const ok = body => ({ success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(body) }] })
+  const browser = { dispatch: async (_run, event) => {
+    calls.push(event.tool)
+    if (event.tool === 'egdesk_browser_observe') return ok({ observationId: `o${calls.length}`, snapshot: page() })
+    if (event.tool === 'egdesk_browser_request_site') return ok({ status: 'site-allowed' })
+    if (event.tool === 'egdesk_browser_navigate') { url = 'https://about.google/?fg=1&utm_source=google-KR&utm_medium=referral'; return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ status: 'postcondition-not-observed' }) }] } }
+    return ok({ status: 'wait-condition-met' })
+  } }
+  const tools = createPageToolsProvider({ mode: () => 'on', browser })
+  await tools.dispatch(RUN(), { tool: 'egdesk_card_read', callId: 'd1', arguments: { mode: 'structure' } })
+  const out = parse(await tools.dispatch(RUN(), { tool: 'egdesk_card_press', callId: 'd2', arguments: { ref: 'about' } }))
+  assert.deepEqual([out.status, out.via, out.outcome], ['pressed', 'site', 'navigation-observed'], JSON.stringify(out))
+  url = 'https://www.google.com/'
+  const stays = { dispatch: async (run, event) => (event.tool === 'egdesk_browser_navigate' ? { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: 'BROWSER_NAVIGATION_FAILED' } }) }] } : browser.dispatch(run, event)) }
+  const unmoved = createPageToolsProvider({ mode: () => 'on', browser: stays })
+  await unmoved.dispatch(RUN(), { tool: 'egdesk_card_read', callId: 'd3', arguments: { mode: 'structure' } })
+  const failed = parse(await unmoved.dispatch(RUN(), { tool: 'egdesk_card_press', callId: 'd4', arguments: { ref: 'about' } }))
+  assert.equal(failed.status, 'not_done', 'a page that did not move is still a failure')
+})
