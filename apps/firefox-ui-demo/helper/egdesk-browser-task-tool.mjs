@@ -192,10 +192,13 @@ export function outcomeBody(task, result, { outside = [] } = {}) {
  */
 // pageText (default false): whether the loop's judgments may read the page's own text. Off (Main's brief of the owner's 16:00 answer: control names and values on every site, no body
 // text): they read the title and the controls instead (withoutPageText). On: the page text as the direct entry sends it (the run's page_text gate decides as always).
-export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(), now = Date.now, clock = Date.now, messageOf = null, onStep = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, maxSteps = MAX_TASK_STEPS, pageText = false } = {}) {
+// storeOf() (optional): the runtime's task store (the direct entry's, lane L5's browserTasks()): the tool and the entry then continue the same task; without it (or while it
+// answers null) the tool keeps its own store.
+export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(), storeOf = null, now = Date.now, clock = Date.now, messageOf = null, onStep = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, maxSteps = MAX_TASK_STEPS, pageText = false } = {}) {
   if (!browser || typeof browser.runDirectTask !== 'function' || typeof browser.reflexScope !== 'function') throw new TypeError('the task tool needs the Browser provider (runDirectTask, reflexScope)')
   const t = decisionThresholds(thresholds)
   const busy = new Set()
+  const tasksNow = () => { try { const shared = typeof storeOf === 'function' ? storeOf() : null; return shared && typeof shared.create === 'function' && typeof shared.active === 'function' ? shared : store } catch { return store } }
   const decisionOff = () => typeof browser.directEntryEnabled === 'function' && browser.directEntryEnabled() !== true
   const OFF = Object.freeze({ status: 'cannot', code: 'decision_unavailable', next: 'use_card_tools' })
   let pagePress = null // the page tools' own press (bound by the page tools provider): a link to another site goes through its site question
@@ -237,7 +240,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
   async function guide(run, event, task, choose, onPage, emit) {
     const offered = (task.offered || []).find(item => item.id === choose)
     if (!offered) return { outcome: 'guidance_unknown' }
-    const scope = browser.reflexScope(run, { callId: `${event?.callId ?? task.taskId}.guide`, namespace: null }, task.cardId)
+    const scope = browser.reflexScope(run, { callId: `${event?.callId ?? task.taskId}.guide`, namespace: null }, task.cardId, { actor: 'model' })
     const t0 = clock()
     if (offered.href) return outside(run, event, task, offered, scope, onPage, emit, t0)
     let observed
@@ -289,7 +292,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     return null
   }
 
-  async function work(run, event, task, args, started) {
+  async function work(run, event, task, args, started, store) {
     const steps = []
     const emit = eventsFor(run, task, steps)
     let page = task.lastPage ?? null
@@ -303,7 +306,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }
       const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState: task.state,
-        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, ...(pageText === true ? {} : { pageText: false }) })
+        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, actor: 'decision', ...(pageText === true ? {} : { pageText: false }) })
       values = {}
       task.state = record(out?.state) ? out.state : task.state
       task.steps += Array.isArray(out?.steps) ? out.steps.length : 0
@@ -341,6 +344,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     const conversationKey = run?.conversationId ?? run?.clientThreadId ?? null
     if (!conversationKey) return reply({ status: 'cannot', code: 'TASK_NO_CONVERSATION' })
     const cards = Array.isArray(run?.browserBinding?.cards) ? run.browserBinding.cards : []
+    const store = tasksNow()
     let task = null
     if (typeof args.goal === 'string' && args.goal.trim()) {
       const picked = pickTaskCard(cards, args.cardId)
@@ -350,14 +354,16 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       Object.assign(task, { toolTask: true, offered: [], spanTried: [], eventSeq: 0, lastPage: null })
     } else {
       task = store.active(conversationKey)
-      if (!task || task.toolTask !== true) return reply({ status: 'cannot', code: 'TASK_GOAL_REQUIRED' })
+      if (!task) return reply({ status: 'cannot', code: 'TASK_GOAL_REQUIRED' })
+      // a task the direct entry started (the shared store) is continued as it is: its page, its steps and what the person said stay
+      if (task.toolTask !== true) Object.assign(task, { toolTask: true, offered: task.offered ?? [], spanTried: task.spanTried ?? [], eventSeq: task.eventSeq ?? 0, lastPage: task.lastPage ?? null })
       if (args.cardId && args.cardId !== task.cardId) return reply({ status: 'cannot', code: 'TASK_CARD_MISMATCH' })
       if (!cards.some(card => card?.cardId === task.cardId && card.permission === 'interact')) return reply({ status: 'cannot', code: 'TASK_CARD_NOT_GRANTED' })
       if (decisionOff()) return reply(OFF)
     }
     if (busy.has(task.taskId)) return reply({ status: 'cannot', code: 'TASK_BUSY' })
     busy.add(task.taskId)
-    try { return reply(await work(run, event, task, args, started)) }
+    try { return reply(await work(run, event, task, args, started, store)) }
     catch { task.status = 'paused'; task.pause = { kind: 'cannot_proceed', code: 'tool_failed' }; return reply({ status: 'cannot', code: 'tool_failed', taskId: task.taskId }) }
     finally { busy.delete(task.taskId) }
   }

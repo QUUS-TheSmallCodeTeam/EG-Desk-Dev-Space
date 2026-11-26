@@ -26,6 +26,9 @@ const listTools = async w => {
 
 test('a1 Claude calls the task tool through the EG-Desk MCP server on the granted Card: the runtime gate passes it, the loop types where the value belongs and runs the read-only Google search', async t => {
   const w = world(t, { host: GOOGLE_HOST, pages: GOOGLE_PAGES, start: '/', hold: true, init: 'real', taskDecide: googleLoop })
+  const acts = []
+  const send = w.pw.transport.sendToUi.bind(w.pw.transport)
+  w.pw.transport.sendToUi = async request => { if (request.kind === 'act') acts.push([request.action?.type ?? null, request.actor ?? null]); return send(request) }
   const first = await w.browserSend('구글에서 우산 검색해줘'); await w.drain()
   assert.ok((await listTools(w)).includes(BROWSER_TASK_TOOL_NAME), 'the catalog offers it in a run with an interact Card')
   const out = await callTool(w, BROWSER_TASK_TOOL_NAME, { goal: '구글에서 우산 검색', values: { 검색어: '우산' } })
@@ -34,6 +37,7 @@ test('a1 Claude calls the task tool through the EG-Desk MCP server on the grante
   assert.equal(w.pw.state.cur.path, '/search', 'the GET search ran')
   assert.equal(out.page.host, GOOGLE_HOST)
   assert.deepEqual(w.ran, [], 'no shell command')
+  assert.ok(acts.length >= 2 && acts.every(([, actor]) => actor === 'decision'), `every act request the loop sent says who chose it: ${JSON.stringify(acts)}`)
   w.transports.at(-1).finish(); await w.settled(first)
 })
 

@@ -24,12 +24,15 @@ export function createPageToolsWiring({ env = process.env, getChat, ledger = nul
   // run. The runtime may offer browserTaskMessage(run) (the person's message of the turn: its spans are value candidates) and browserTaskStep(run, event) (the step events); without them
   // the tool still works (spans from the goal only, no step events leave it).
   const provider = () => { const live = getChat()?.browserToolProvider?.(); if (!live?.runDirectTask || !live?.reflexScope) throw new Error('no Browser provider'); return live }
+  let pageProvider = null // its runtime (set by the chat runtime) carries lane L5's hooks: browserTaskStep(run, info, ids) and browserTasks()
   const taskTool = browserTaskToolEnabled(env) ? createBrowserTaskTool({
     browser: { runDirectTask: (run, args) => provider().runDirectTask(run, args), reflexScope: (run, event, cardId) => provider().reflexScope(run, event, cardId),
       directEntryEnabled: () => { try { return provider().directEntryEnabled?.() === true } catch { return false } } },
     messageOf: run => getChat()?.browserTaskMessage?.(run) ?? null,
-    onStep: (run, event) => getChat()?.browserTaskStep?.(run, event),
+    onStep: (run, event) => { const hook = pageProvider?.runtime?.browserTaskStep; return typeof hook === 'function' ? hook(run, event, { taskId: event.taskId, cardId: event.cardId }) : getChat()?.browserTaskStep?.(run, event) },
+    storeOf: () => pageProvider?.runtime?.browserTasks?.() ?? null,
     pageText: env[BROWSER_TASK_PAGE_TEXT_FLAG] === 'on',
   }) : null
-  return { toolProviders: [createPageToolsProvider({ mode: () => 'on', browser, ledger, env, ...(taskTool ? { taskTool } : {}) })] }
+  pageProvider = createPageToolsProvider({ mode: () => 'on', browser, ledger, env, ...(taskTool ? { taskTool } : {}) })
+  return { toolProviders: [pageProvider] }
 }

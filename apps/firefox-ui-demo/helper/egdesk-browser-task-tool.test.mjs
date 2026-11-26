@@ -336,3 +336,36 @@ test('a1 page text: by default the task tool\'s loop sends the title and the con
   assert.equal(parse(await textTool.handle(RUN(), { callId: 'pt2', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } })).status, 'done')
   assert.match(withText.requests.map(request => JSON.stringify(request.input)).join('\n'), /방앗간/, 'pageText: true sends the page text as the direct entry does')
 })
+
+test('a1 who chose an action (actor) rides on the Browser dispatch a scope sends; a scope without one sends none (the direct entry is unchanged)', async () => {
+  const { createCodexBrowserToolProvider } = await import('./codex-browser-tool-provider.mjs')
+  const seen = []
+  const service = { dispatch: async (_run, event) => { seen.push(event); return { status: 'observed', cardId: 'card' } }, prepare() {}, bind: async () => ({ cards: [] }), cancelRun: async () => [], reset() {} }
+  const transport = { hasClient: () => true, runs: new Map(), sendToUi: async () => ({}), bindRun() {}, unbindRun() {}, reset() {} }
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'o', service, decision: { mode: () => 'on', configured: () => true, recipient: () => 'r', generation: () => 1, client: {} } })
+  provider.runtime = { emit() {}, currentEpoch: () => 1 }
+  const run = { runId: 'r1', executionPolicy: { mode: 'browserBounded' }, browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] }, status: 'inProgress' }
+  await provider.reflexScope(run, { callId: 'c' }, 'card', { actor: 'model' }).callTool('egdesk_browser_observe', { cardId: 'card' })
+  await provider.reflexScope(run, { callId: 'c' }, 'card', { actor: 'nobody' }).callTool('egdesk_browser_observe', { cardId: 'card' })
+  await provider.reflexScope(run, { callId: 'c' }, 'card').callTool('egdesk_browser_observe', { cardId: 'card' })
+  assert.deepEqual(seen.map(event => event.actor ?? null), ['model', null, null])
+})
+
+test('a1 the wiring uses the runtime\'s hooks: the step events go to browserTaskStep(run, event, ids) and the task lives in browserTasks() (the entry\'s store), whose paused task the tool continues', async () => {
+  const shared = createBrowserTaskStore()
+  const entryTask = shared.create({ conversationKey: 'conv-1', cardId: 'card', goal: '명세서 열기' })
+  entryTask.status = 'paused'; entryTask.state = { pending: [], assigned: [], attemptedRefs: [], unmatched: [], history: ['opened [L1] 명세서'] }
+  const received = [], directCalls = []
+  const live = { dispatch: async () => ({}), directEntryEnabled: () => true, reflexScope: () => ({ client: null, callTool: async () => ({}) }),
+    runDirectTask: async (_run, args) => { directCalls.push(args); args.onStep({ step: 1, action: 'egdesk_browser_navigate', ok: true, stepMs: 300, op: 'open', target: '11월 명세서' }); return { outcome: 'done', steps: [{ step: 1 }], state: args.resumeState } } }
+  const wired = createPageToolsWiring({ env: { EGDESK_PAGE_TOOLS: 'on', [BROWSER_TASK_TOOL_FLAG]: 'on' }, getChat: () => ({ browserToolProvider: () => live }) })
+  const page = wired.toolProviders[0]
+  page.runtime = { browserTaskStep: (run, event, ids) => { received.push({ event, ids }); return true }, browserTasks: () => shared }
+  const out = parse(await page.dispatch(RUN(), { tool: BROWSER_TASK_TOOL_NAME, callId: 'w1', arguments: {} }))
+  assert.equal(out.status, 'done')
+  assert.equal(out.taskId, entryTask.taskId, 'the entry\'s task, continued')
+  assert.deepEqual(directCalls[0].resumeState.history, ['opened [L1] 명세서'], 'from where the entry left it')
+  assert.equal(directCalls[0].actor, 'decision')
+  assert.deepEqual(received.map(r => [r.event.op, r.ids.taskId, r.ids.cardId]), [['open', entryTask.taskId, 'card'], ['end', entryTask.taskId, 'card']])
+  assert.match(out.forYouOnly, /Not for the person/)
+})
