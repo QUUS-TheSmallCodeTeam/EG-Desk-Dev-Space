@@ -13,10 +13,10 @@ export { BROWSER_TASK_TOOL_NAME } // L8's name, the one constant
 export const ALTERNATE_VALUE = 'alternate'
 
 const RULE_HEAD = 'EG-Desk\'s Decision model already worked on this browser request in the person\'s Card before your turn. This note says what it did and where it stopped (status, code). Do not redo those steps, and read the page only for what the note does not say.'
-const RULE_DONE = 'status done: tell the person the result in one message.'
+const RULE_DONE = 'status done: if the person asked what appeared and the note lacks it, read the current Card; do not press again. Tell the person the result in one message.'
 const RULE_VALUE_TOOL = `next continue_with_egdesk_browser_task: call ${BROWSER_TASK_TOOL_NAME} this turn without a goal. For needs_value, infer the value from the conversation and pass it in values under ask.field; ask the person one short question only if you cannot infer it. For needs_guidance, read the Card if needed and continue the task; use only option ids the tool offers. For need_context, follow the note's next.`
 const RULE_VALUE_ASK = 'A status that needs a value or a choice (needs_value, needs_guidance, need_context): when the conversation already settles it (the person said it, or it follows plainly from what they said), continue from where it stopped yourself; otherwise ask the person one short question.'
-const RULE_CANNOT = 'human_step, cannot or cannot_proceed: tell the person what is left for them to do on the page. Never ask the person for something they already said.'
+const RULE_CANNOT = 'human_step and press_needs_expected_effect are for the person. For cannot or cannot_proceed, distinguish a refused or unverified action from a person-only control: read the Card if needed, do not repeat an uncertain press or claim it was not pressed. Never ask the person for something they already said.'
 
 /** The rule, in the same words for both engines. toolOffered: the browser task tool is in this turn's tools (only then is it named). */
 export function browserTaskRule({ toolOffered = false } = {}) {

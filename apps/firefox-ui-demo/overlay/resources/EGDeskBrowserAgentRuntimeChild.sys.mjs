@@ -975,6 +975,20 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       const regionLabel = this.compact(region ? (region.getAttribute?.("aria-label") || region.querySelector?.("legend,h1,h2,h3,h4")?.textContent || "") : "", 60);
       const facts = { type, sensitiveRegion, regionLabel, form: null, controls: null };
       const form = tag === "button" || tag === "input" ? node.form || null : null;
+      // Only native, unassociated buttons outside anchors/forms qualify for the named-button path.
+      if (tag === "button" && !form && node.closest && !node.closest("a,form,[data-sensitive],[data-private]") && node.hasAttribute && !node.hasAttribute("form") && !node.hasAttribute("formaction") && node.getRootNode?.() === node.ownerDocument && node.ownerDocument === this.document) {
+        // An inner label must not hide a sensitive outer section. Only offer complete, bounded ancestry.
+        const labels = [];
+        let p = node.parentElement;
+        for (let depth = 0; p && depth < 48; depth++, p = p.parentElement) {
+          if (!p.matches?.("fieldset,section,form,[role=region],[role=dialog],[aria-label],[aria-labelledby]")) continue;
+          if (p.hasAttribute("aria-labelledby")) break;
+          const label = p.getAttribute("aria-label") || p.querySelector("legend,h1,h2,h3,h4")?.textContent || "";
+          if (label.length > 100 || labels.length >= 8) break;
+          if (label) labels.push(label);
+        }
+        if (!p) { facts.standalone = true; facts.regionLabels = labels; }
+      }
       if (form && type !== "button") {
         const method = String(node.getAttribute?.("formmethod") || form.getAttribute?.("method") || "get").toLowerCase();
         const fields = [], params = [];

@@ -19,6 +19,8 @@ const target = { type: 'object', additionalProperties: false, required: ['ref', 
   properties: { ...Object.fromEntries(['ref', 'role', 'label', 'href', 'value', 'tag'].map(key => [key, { type: 'string' }])),
     disabled: { type: 'boolean' }, bounds: { type: 'object', additionalProperties: false,
       properties: Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, { type: 'number' }])) } } }
+// In-process identity, not an accepted model JSON argument or a change to pinned tool schemas.
+export const NAMED_CHANGE = Object.freeze({ kind: 'named-page-change', value: 'same-document' })
 const postcondition = { type: 'object', additionalProperties: false, required: ['kind', 'value'],
   properties: { kind: { type: 'string', enum: ['visible-text', 'url', 'target-value'] }, value: { type: 'string' } } }
 const base = { cardId: { type: 'string' }, observationId: { type: 'string' }, expectedRevision: { type: 'integer' } }
@@ -350,7 +352,7 @@ function validateArgs(tool, args) {
     }
     return
   }
-  if (!validPostcondition(args.postcondition, ['egdesk_browser_fill', 'egdesk_browser_type'].includes(tool) ? MAX_FILL_TEXT : 512)) {
+  if (!(tool === 'egdesk_browser_click' && args.postcondition === NAMED_CHANGE) && !validPostcondition(args.postcondition, ['egdesk_browser_fill', 'egdesk_browser_type'].includes(tool) ? MAX_FILL_TEXT : 512)) {
     reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   }
   if (tool === 'egdesk_browser_navigate') {
@@ -1086,6 +1088,33 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     const common = { cardId: card.cardId, action: action.type, dispatchReceipt: dispatchReceipt || null,
       after: after || null, observation: response.receipt.observation || null, timing: { ...trace },
       ...(dialog ? { dialog } : {}) }
+    if (condition === NAMED_CHANGE) {
+      // Poll observations only, never repeat input. A receipt alone, revision bump, disappearing button,
+      // spinner or unrelated document cannot finish a read-after-click request.
+      const before = observed.snapshot
+      const elements = s => s.interactiveElements.map(e => JSON.stringify([e.role, e.label, e.value, e.disabled]))
+      const prior = new Set(elements(before))
+      const loading = s => s.text.some(line => /^(?:loading|please wait|로딩\s*중|불러오는\s*중)[.!…\s]*$/iu.test(String(line).trim())) || s.interactiveElements.some(e => e.role === 'progressbar')
+      let sawLoading = readbackIsCurrent && loading(after)
+      const end = performance.now() + Math.min(timeoutMs, 8000)
+      card.busy = true
+      try {
+        while (readbackIsCurrent && !dialog && performance.now() < end && !binding.closed) {
+          const response = await requestUi({ kind: 'observe', runId: binding.runId, clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
+            options: { textLimit: 60, elementLimit: 80 } }, binding, run, {}, { budgetMs: Math.max(1, Math.floor(end - performance.now())) })
+          const fresh = observationFrom(response, card.cardId)
+          if (binding.closed || binding.ownerKey !== ownerNow(binding) || run.status !== 'inProgress' || response.dialog || fresh.url !== before.url || fresh.documentId !== before.documentId) break
+          if (loading(fresh)) sawLoading = true
+          else if (sawLoading || fresh.text.some(line => !before.text.includes(line)) || elements(fresh).some(item => !prior.has(item))) {
+            recordObservation(card, fresh)
+            return { ...common, after: fresh, observationId: card.observation.id, status: 'postcondition-observed', postcondition: { ...condition, matched: true }, externalEffectVerified: false }
+          }
+          await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(250, end - performance.now()))))
+        }
+      } catch (error) { markUnknown(); throw error } finally { card.busy = false }
+      markUnknown()
+      return { ...common, status: 'postcondition-unverified', externalEffectVerified: false }
+    }
     if (containerScroll) {
       // Readback: the container's offsets in the current after-snapshot.
       const afterContainer = readbackIsCurrent ? scrollContainerOf(after, args.ref) : null

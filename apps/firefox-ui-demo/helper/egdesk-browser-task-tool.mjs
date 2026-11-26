@@ -116,7 +116,7 @@ export function outcomeBody(task, result, { outside = [] } = {}) {
       if (r.reason === 'uncertain') return offer(task, (r.ranked || []).map(row => row?.value), 'uncertain', far)
       if (r.reason === 'blocked' && far.length) return offer(task, [], 'outside_site', far)
       task.offered = []
-      if (r.reason === 'press_needs_expected_effect') return { status: 'cannot', code: 'press_needs_expected_effect', ...(r.suggestion?.option ? { target: strip(r.suggestion.option) } : {}), next: 'egdesk_card_press' }
+      if (r.reason === 'press_needs_expected_effect') return { status: 'human_step', code: 'press_needs_expected_effect', ...(r.suggestion?.option ? { target: strip(r.suggestion.option) } : {}) }
       return { status: 'cannot', code: CODE.test(r.reason ?? '') ? r.reason : 'blocked', ...(CODE.test(r.code ?? '') ? { detail: r.code } : {}) }
     }
     case 'max_steps': if (r.reason === 'step_limit' && far.length) return offer(task, [], 'outside_site', far); task.offered = []; return { status: 'cannot', code: r.reason === 'step_limit' ? 'step_limit' : 'step_rejected', ...(CODE.test(r.code ?? '') ? { detail: r.code } : {}) }

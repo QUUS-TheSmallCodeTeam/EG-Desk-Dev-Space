@@ -2,7 +2,7 @@ import { requestedMotion, runRequestedMotion, isHistory } from './egdesk-browser
 import { undecidedField } from './egdesk-browser-field-text.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded } from './egdesk-browser-url-policy.mjs'
-import { sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
+import { NAMED_CHANGE, sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { labelKey, priorFacts, recordedChoice, safePath as safePathOf } from './egdesk-browser-task-memory.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
@@ -195,6 +195,12 @@ export const personTargetAsk = control => (PRESSED_ROLES.has(String(control.role
   : `Is this control, ${quoteControl(control)}, the one this request asks to change?`)
 const quoteControl = control => `"${String(control.label).replace(/"/g, "'")}" (${control.role}${control.value ? `, now "${String(control.value).replace(/"/g, "'")}"` : ''})`
 const SAFE_GET_FIELDS = new Set(['hidden', 'text', 'search', 'textarea', 'select', 'select-one', 'select-multiple', 'radio', 'checkbox', 'number', 'date', 'month', 'week', 'range', 'submit', 'button', 'image', 'reset'])
+// Match the whole observed label, ignoring typography, never a prefix of a different word.
+function namesButton(request, label) {
+  const norm = s => String(s ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  const name = norm(label), words = norm(request)
+  return !!name && new RegExp('(?:^| )' + name + '(?:을|를|버튼)?(?: |$)', 'u').test(words)
+}
 export function readOnlyPress(element, snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl } = {}) {
   const nav = element?.nav
   if (!record(nav) || nav.sensitiveRegion === true) return null
@@ -276,7 +282,7 @@ function elementKind(element, { textComboboxes = false } = {}) {
  * options: [{ value, description, item: { kind: 'navigate'|'press'|'fill', element } }]
  * Values are '[L1] label' (links), '[B1] label' (buttons, tabs), '[F1] label' (text fields).
  */
-export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS, askSite = false, textComboboxes = false } = {}) {
+export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS, namedButtonRequest, askSite = false, textComboboxes = false } = {}) {
   const elements = Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []
   const entries = []
   const excluded = { disabled: 0, gated: 0, offSite: 0, sensitive: 0, unlabeled: 0, overflow: 0, unsupported: 0 }
@@ -311,6 +317,12 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     // credential or payment field, not in a sensitive region, address words classified). Only a submit judgement by label yields to that proof: pay, grant
     // and delete words never do, and a POST or a button without the proof stays withheld.
     const readOnly = kind === 'press' ? readOnlyPress(element, snapshot, { classify, isAllowedUrl }) : null
+    const nav = element.nav
+    const named = !readOnly && kind === 'press' && element.tag === 'button' && element.role === 'button' && !element.href &&
+      nav?.standalone === true && nav.form === null && nav.sensitiveRegion === false && typeof nav.regionLabel === 'string' &&
+      Array.isArray(nav.regionLabels) && nav.regionLabels.every(label => !SENSITIVE_REGION.test(label) && classify({ mode: 'activate', label, role: 'region', url: snapshot.url })?.category === 'none') &&
+      !SENSITIVE_REGION.test(element.label) && !SENSITIVE_REGION.test(nav.regionLabel) && (!nav.regionLabel || classify({ mode: 'activate', label: nav.regionLabel, role: 'region', url: snapshot.url })?.category === 'none') &&
+      namesButton(namedButtonRequest, element.label) && elements.filter(e => e?.role === 'button' && namesButton(namedButtonRequest, e.label)).length === 1
     const yieldsToProof = judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && readOnly?.kind === 'get_form'
     // c25: a same-site LINK is a page change; 등록 in its label (a registering phrase, not the noun inside 주민등록) is no reason to withhold it. The
     // address words are still classified below; a link to another site is withheld as before.
@@ -347,7 +359,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     if (!label) { excluded.unlabeled++; continue }
     counters.press++
     entries.push({ label: `[B${counters.press}] ${label}`, description: readOnly?.kind === 'get_form' ? `${element.role} on this page; opens ${pathOf(readOnly.url)} (a read-only search)`
-      : readOnly?.kind === 'view' ? `${element.role} on this page; shows another part of this page` : `${element.role} on this page`, item: { kind, element, ...(readOnly ? { readOnly } : {}) } })
+      : readOnly?.kind === 'view' ? `${element.role} on this page; shows another part of this page` : named ? `${element.role} named in the request; press once and wait for the changed page` : `${element.role} on this page`, item: { kind, element, ...(readOnly ? { readOnly } : {}), ...(named ? { named: true } : {}) } })
   }
   const kept = entries.slice(0, Math.max(0, maxOptions))
   excluded.overflow = entries.length - kept.length
@@ -390,6 +402,7 @@ export function reflexActionArgs(option, { cardId, observationId, snapshot, text
   // leaves its document cannot be confirmed by a readback and would leave the card uncertain)
   if (readOnly?.kind === 'get_form') return { tool: 'egdesk_browser_navigate', args: { ...base, url: readOnly.url, postcondition: { kind: 'url', value: readOnly.url } } }
   if (readOnly?.kind === 'view') return { tool: 'egdesk_browser_click', args: { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), postcondition: { kind: 'visible-text', value: readOnly.text } } }
+  if (option.item.named) return { tool: 'egdesk_browser_click', args: { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), postcondition: NAMED_CHANGE } }
   return { escalate: 'press_needs_expected_effect' }
 }
 
@@ -681,7 +694,7 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  * callTool(name, args) → the egdesk_browser_* tool result (throws on refusal).
  * → { outcome, reason?, steps, ... } — see the module header for outcomes.
  */
-export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
+export async function runBrowserReflex({ cardId, goal, namedButtonRequest, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
   textComboboxes = false, onPage = null, firstFieldText = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
@@ -868,7 +881,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     steps.push(entry)
     const seen = pageText === false ? withoutPageText(snapshot) : snapshot // a1: what the step's judgments read (the page's own text only when it may be sent)
     // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
-    const built = buildReflexCandidates(snapshot, { askSite: textComboboxes, ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    const built = buildReflexCandidates(snapshot, { namedButtonRequest, askSite: textComboboxes, ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
     const { excluded, personOnly, withheld, offSite } = built
     // L6c a2: a field the page actor refused as not editable on this document is no option of this task any more (its label stays as numbered)
     const options = notEditable.size ? built.options.filter(option => !(option.item.kind === 'fill' && notEditable.has(fieldKey(snapshot, option.item.element.ref)))) : built.options
@@ -1061,8 +1074,14 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         } : null
         const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (!done.ok) {
-          if (option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
+          if (option.item.named || option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue
+        }
+        if (option.item.named) {
+          const { status, after, observationId: freshId } = done.result ?? {}
+          if (signal?.aborted) return finish('aborted')
+          if (status !== 'postcondition-observed' || !freshId || !after) return finish('escalated', { reason: 'observe_failed' })
+          return finish('done', { url: after.url, observationId: freshId, text: after.text.slice(0, 40).map(line => compactText(line, 180)) })
         }
         const kind = typedSearch(option, typedTexts) ? 'search' : option.item.askSite ? 'link' : null
         if (kind && expectedUrl) arrival = { kind, goal, from: snapshot.url, expected: expectedUrl }
