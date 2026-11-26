@@ -503,9 +503,10 @@ export const STEP_GROUPS = Object.freeze({
   press_other: Object.freeze({ question: 'step_press', description: 'Press one of the other buttons or tabs on this page (which one is asked separately).', ask: 'If the next step presses one of the other buttons or tabs on this page, which one?' }),
 })
 /** crowdedStep(options) -> null (not crowded) | { direct: options asked in next_step itself, groups: { open_link?: [options], press_other?: [options] } } (page order kept). */
-export function crowdedStep(options) {
+export function crowdedStep(options, entrySiteLinks = false) {
   if (!Array.isArray(options) || options.length <= CROWDED_STEP_OPTIONS) return null
-  const decisive = option => option.item?.kind === 'choice' || option.item?.kind === 'fill' || option.item?.readOnly?.kind === 'get_form'
+  // A selected site link asks the Card (not the conversation model) for permission. On entry, keep those bounded links in the main choice.
+  const decisive = option => option.item?.kind === 'choice' || option.item?.kind === 'fill' || option.item?.readOnly?.kind === 'get_form' || (entrySiteLinks && option.item?.askSite)
   const members = { open_link: options.filter(option => !decisive(option) && option.item?.kind === 'navigate'), press_other: options.filter(option => !decisive(option) && option.item?.kind !== 'navigate') }
   const groups = Object.fromEntries(Object.entries(members).filter(([, list]) => list.length >= 2)) // a kind with one target is offered as itself
   const grouped = new Set(Object.values(groups).flat())
@@ -530,9 +531,9 @@ function fannedChoice(next, answers, fan, thresholds) {
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const motion = requestedMotion(goal)
-  const fan = !motion && crowdedStep(options)
+  const fan = !motion && crowdedStep(options, entrySiteLinks)
   const choices = motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
@@ -547,7 +548,9 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   const result = await client.decide({
     input: [{ role: 'developer', content: options.some(o => o.item.kind === 'choice') ? REFLEX_RULES + '\n' + 'Pick [C] check/uncheck or list selections only for the exact choices and states explicitly requested by the person, never as an inferred prerequisite. For multiple requested choices, continue until each has the requested state.' : REFLEX_RULES }, { role: 'user', content: evidence }],
     questions: [
-      choiceQuestion('next_step', 'Which option moves toward the goal next?', choices),
+      choiceQuestion('next_step', entrySiteLinks && options.some(o => o.item.askSite)
+        ? 'Which option moves toward the goal next? Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
+        : 'Which option moves toward the goal next?', choices),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person explicitly request the exact named choice AND state of the selected check/uncheck/list action? No if merely inferred or unspecified.')] : []),
       ...pageStateQuestions(),
@@ -964,7 +967,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     try {
       if (recorded && !arrived) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
       decision = recorded && !arrived ? await decideRecordedStep({ chatTask: valuesFirst, goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: seen, options, history, arrived, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+        : await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: seen, options, history, arrived, entrySiteLinks: step === 1 && !resumeState && typeof firstFieldText === 'function', pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
