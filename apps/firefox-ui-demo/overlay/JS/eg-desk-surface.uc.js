@@ -24773,7 +24773,8 @@
     leaseId, requestId, deadlineMs, actionType, actionRef, actionUrl, innerWindowId, browsingContextId }) {
     const lease = browserToolActionLeases.get(leaseId);
     if (!lease) return false;
-    const deny = reason => { browserToolRecordFixtureAuthorization(lease, reason); return false; };
+    // L6 a1 (D25): the lease keeps which check denied the input (a closed word), so the refusal can say it (inputDeniedBy) instead of only "not sent".
+    const deny = reason => { lease.deniedBy = reason; browserToolRecordFixtureAuthorization(lease, reason); return false; };
     if (lease.authorized) return deny('lease-already-used');
     if (lease.requestId !== requestId) return deny('request-id-mismatch');
     if (lease.deadlineMs !== deadlineMs) return deny('deadline-mismatch');
@@ -24974,6 +24975,7 @@
         if (dialog) rejected.dialog = dialog;
         rejected.dispatchPhase = browserToolDispatchPhase({ phase: diagnosticPhase,
           leaseAuthorized: activityLease?.authorized === true, actor });
+        if (typeof activityLease?.deniedBy === 'string') rejected.inputDeniedBy = activityLease.deniedBy;
         const timing = browserToolTiming({ receivedAtMs, authorizedAtMs: activityLease?.authorizedAtMs }, actor?.timing);
         if (rejected.dispatchPhase === 'not-dispatched') {
           for (const key of BROWSER_TOOL_PERFORM_MS) delete timing[key];

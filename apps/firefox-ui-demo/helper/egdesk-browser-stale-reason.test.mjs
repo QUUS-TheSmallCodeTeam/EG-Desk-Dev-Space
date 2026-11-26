@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { BROWSER_STALE_REASONS, staleReasonOf } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INPUT_DENIED_REASONS, BROWSER_STALE_REASONS, staleReasonOf } from './egdesk-browser-tool-runtime.mjs'
 import { callTool, world } from './egdesk-claude-browser-world.fixture.mjs'
 
 const actorSource = fs.readFileSync(new URL('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs', import.meta.url), 'utf8')
@@ -30,6 +30,9 @@ test('staleBy: the Card\'s and the page actor\'s refusal words map to one closed
     ['Browser Card is already being operated', 'card-busy'],
     ['Browser action budget expired before dispatch', 'budget'],
     ['The user is operating this Browser Card directly; Agent requests are refused until the user allows control again from the Card', 'user-hold'],
+    ['Browser action authority was revoked before input [ui-denied]', 'input-authority'],
+    ['Browser action was reconciled as never sent; observe again', 'reply-lost'],
+    ['Browser action lease is missing or expired', 'budget'],
     ['Browser observation is stale [made-up-word]; observe again', 'other'],
     ['Browser observation is stale; observe the current page again', 'other'],
     [undefined, 'other'], [{ toString: () => 'stale [revision]' }, 'other'],
@@ -49,6 +52,12 @@ test('staleBy: every bracket word the page actor and the Card can write is a kno
   }
   assert.deepEqual([...written].filter(word => !BROWSER_STALE_REASONS.includes(word)), [])
   for (const word of ['document', 'viewport', 'revision', 'focus', 'url', 'identity', 'scroll']) assert.ok(written.has(word), word)
+  // the Card's last-moment input authorization: every deny word it can write is the helper's list, and the list has no word the Card never writes
+  const authorizer = surfaceSource.slice(surfaceSource.indexOf('function browserToolAuthorizePhysicalAction('), surfaceSource.indexOf('function browserToolUserHoldRefusal('))
+  const denied = [...new Set([...authorizer.matchAll(/deny\('([a-z-]+)'\)/g)].map(match => match[1]))].sort()
+  assert.deepEqual(denied, [...BROWSER_INPUT_DENIED_REASONS].sort())
+  assert.match(authorizer, /const deny = reason => \{ lease\.deniedBy = reason;/)
+  assert.match(surfaceSource, /if \(typeof activityLease\?\.deniedBy === 'string'\) rejected\.inputDeniedBy = activityLease\.deniedBy;/)
 })
 
 test('staleBy end to end: a fill the Card refuses as not sent carries the word to the page tool\'s result and to the browser.tool.failed record', async t => {
@@ -64,6 +73,24 @@ test('staleBy end to end: a fill the Card refuses as not sent carries the word t
   await w.drain()
   const failed = w.events.filter(event => event?.event === 'browser.tool.failed' || event?.type === 'browser.tool.failed' || JSON.stringify(event).includes('"browser.tool.failed"'))
   assert.ok(JSON.stringify(failed).includes('"staleBy":"viewport"'), 'the record names it too')
+  // the Card denies the input at the last moment (another run holds the Card's selection): 'input-authority', and which check, in the record
+  w.pw.transport.sendToUi = async request => (request.kind === 'act' && request.action.type === 'fill'
+    ? { requestId: request.requestId, status: 'rejected', error: 'Browser action authority was revoked before input [ui-denied]', dispatchPhase: 'not-dispatched', inputDeniedBy: 'selection-run-mismatch', timing: {} }
+    : send(request))
+  await callTool(w, 'egdesk_card_read', { mode: 'structure' })
+  const denied = await callTool(w, 'egdesk_card_type', { ref: 'q', text: '우산' })
+  assert.deepEqual([denied.status, denied.code, denied.staleBy], ['not_done', 'BROWSER_OBSERVATION_STALE', 'input-authority'], JSON.stringify(denied))
+  await w.drain()
+  assert.ok(JSON.stringify(w.events).includes('"inputDeniedBy":"selection-run-mismatch"'), 'the record names the denying check')
+  // a word the Card never writes is not carried
+  w.pw.transport.sendToUi = async request => (request.kind === 'act' && request.action.type === 'fill'
+    ? { requestId: request.requestId, status: 'rejected', error: 'Browser action authority was revoked before input [ui-denied]', dispatchPhase: 'not-dispatched', inputDeniedBy: 'see https://x', timing: {} }
+    : send(request))
+  await callTool(w, 'egdesk_card_read', { mode: 'structure' })
+  await callTool(w, 'egdesk_card_type', { ref: 'q', text: '우산' })
+  await w.drain()
+  assert.ok(!JSON.stringify(w.events).includes('see https://x'))
+  w.pw.transport.sendToUi = send
   // the helper's own copy: an observation that is not the latest one is refused before anything is sent to the Card (named 'observation' in the record)
   const sentToCard = w.pw.state.acts.length
   const own = await callTool(w, 'egdesk_browser_fill', { cardId: 'card', observationId: 'not-the-latest', expectedRevision: 1, ref: 'q', text: '우산',

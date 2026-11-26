@@ -132,8 +132,15 @@ function reject(code, message) { throw Object.assign(new Error(message), { code 
 //   document / revision / viewport / focus / url / identity / scroll / frame   the page actor's (or the Card's) observed-state guard, by the fact that moved
 //   site-rule    the Card's rule for the conversation's sites refused the move     target   the observed element changed or is not usable
 //   binding / card-generation / card-busy / budget / user-hold   the Card refused the request itself     reply-lost   the reply was lost; the actor proved it never entered
+//   input-authority   the Card did not authorize the input at the last moment (another run or binding holds the Card's selection, the lease or the document moved)
 export const BROWSER_STALE_REASONS = Object.freeze(['observation', 'document', 'revision', 'viewport', 'focus', 'url', 'identity', 'scroll', 'frame',
-  'site-rule', 'target', 'binding', 'card-generation', 'card-busy', 'budget', 'user-hold', 'reply-lost', 'other'])
+  'site-rule', 'target', 'binding', 'card-generation', 'card-busy', 'budget', 'user-hold', 'input-authority', 'reply-lost', 'other'])
+// With input-authority: which check of the Card's last-moment authorization denied the input (browserToolAuthorizePhysicalAction's deny words).
+export const BROWSER_INPUT_DENIED_REASONS = Object.freeze(['lease-already-used', 'request-id-mismatch', 'deadline-mismatch', 'deadline-expired',
+  'browser-identity-mismatch', 'browsing-context-identity-mismatch', 'window-global-identity-mismatch', 'window-global-not-current',
+  'inner-window-id-mismatch', 'browsing-context-id-mismatch', 'run-binding-changed', 'run-cancelled', 'run-stopped', 'card-lease-changed', 'card-closed',
+  'card-browser-mismatch', 'interaction-not-granted', 'selection-run-mismatch', 'action-type-mismatch', 'action-ref-mismatch', 'action-url-mismatch',
+  'live-binding-changed', 'live-binding-unavailable'])
 export function staleReasonOf(text) {
   const message = typeof text === 'string' ? text.slice(0, 600) : ''
   const named = /\bstale \[([a-z-]{1,24})\]/.exec(message)?.[1]
@@ -144,7 +151,9 @@ export function staleReasonOf(text) {
   if (/run binding is missing or changed|profile or account (?:epoch|context) changed|Card, profile or account context changed/.test(message)) return 'binding'
   if (/different Card generation/.test(message)) return 'card-generation'
   if (/Browser Card is (?:already )?being operated/.test(message)) return 'card-busy'
-  if (/budget expired/.test(message)) return 'budget'
+  if (/authority was revoked before input/.test(message)) return 'input-authority'
+  if (/reconciled as never sent/.test(message)) return 'reply-lost'
+  if (/budget expired|lease is missing or expired|budget is too short/.test(message)) return 'budget'
   if (/operating this Browser Card directly/.test(message)) return 'user-hold'
   return 'other'
 }
@@ -1004,6 +1013,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
         restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
           { code: 'BROWSER_OBSERVATION_STALE', staleBy: staleReasonOf(response.error), dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
+            ...(BROWSER_INPUT_DENIED_REASONS.includes(response.inputDeniedBy) ? { inputDeniedBy: response.inputDeniedBy } : {}),
             ...(obscuredBy ? { obscuredBy } : {}) })
       }
       markUnknown()
