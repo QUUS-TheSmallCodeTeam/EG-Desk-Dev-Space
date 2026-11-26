@@ -120,7 +120,7 @@ test('a2 typedSearch: only a read-only GET search that submits exactly a text th
 })
 
 // ---- the real-window request through the alternate entry (fieldText on), the real loop, page text off; answers shaped like the measured real ones ----
-function duckCard({ crowded = false, searchTop = 0.74 } = {}) {
+function duckCard({ crowded = false, searchTop = 0.74, goalOnResults = true, more = false, mismatch = false } = {}) {
   let cur = { url: `${D}/`, revision: 1, value: '' }
   const calls = [], requests = []
   const extra = crowded ? Array.from({ length: 34 }, (_, i) => (i % 2 ? { ref: `b${i}`, role: 'button', tag: 'button', label: `도움말 ${i}`, href: '', value: '', nav: { type: 'button', sensitiveRegion: false, regionLabel: '', form: null, controls: null } }
@@ -137,7 +137,7 @@ function duckCard({ crowded = false, searchTop = 0.74 } = {}) {
     if (name === 'egdesk_browser_observe') return { observationId: `o${calls.length}`, snapshot: snapshot() }
     if (name === 'egdesk_browser_fill') { cur = { ...cur, value: args.text, revision: cur.revision + 1 }; return { status: 'postcondition-observed' } }
     if (name === 'egdesk_browser_navigate') {
-      cur = { url: `${args.url}&ia=web`, revision: cur.revision + 1, value: '' }
+      cur = { url: mismatch ? `${D}/?q=wrong` : `${args.url}&ia=web`, revision: cur.revision + 1, value: '' }
       const error = new Error('url postcondition not observed'); error.code = 'TOOL_FAILED'; throw error // DuckDuckGo extends the address (a1)
     }
     return { status: 'wait-condition-met' }
@@ -155,8 +155,9 @@ function duckCard({ crowded = false, searchTop = 0.74 } = {}) {
         const onResults = /URL: https:\/\/duckduckgo\.com\/\?q=/.test(evidence)
         const typed = /filled \[F1\]/.test(evidence)
         // measured (real gpt-6-luna, l8b-a2): home 0.61 / 0.49 (crowded) for the field; after typing the search at 0.74 (short page) / 0.92 (crowded); the results page: goal met
-        const pick = onResults ? [['goal_met', 0.61], [FIELD, 0.16]] : typed ? [['[B2] 검색', crowded ? 0.92 : searchTop], [FIELD, 0.14]] : [[FIELD, crowded ? 0.49 : 0.61], ['[B1] react-search-form', 0.15]]
-        answers.push(ranked('next_step', pick), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onResults ? 0.97 : 0.01 })
+        const pick = onResults ? (more ? [['scroll_more', 0.98], [FIELD, 0.01]] : [['goal_met', 0.61], [FIELD, 0.16]]) : typed ? [['[B2] 검색', crowded ? 0.92 : searchTop], [FIELD, 0.14]] : [[FIELD, crowded ? 0.49 : 0.61], ['[B1] react-search-form', 0.15]]
+        answers.push(ranked('next_step', pick), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onResults && goalOnResults ? 0.97 : 0.01 })
+        if (names.includes('arrival_finishes')) answers.push({ name: 'arrival_finishes', type: 'predicate', probability: more ? 0.01 : 0.98 })
         for (const q of request.questions.filter(item => /^step_/.test(item.name))) answers.push(ranked(q.name, [[q.choices[0].value, 0.6], [q.choices[1].value, 0.2]]))
       } else for (const q of request.questions) answers.push(q.type === 'choice' ? ranked(q.name, [[q.choices[0].value, 0.9]]) : { name: q.name, type: 'predicate', probability: 0.02 })
       return { ok: true, text: async () => JSON.stringify({ answers }) }
@@ -189,4 +190,48 @@ test('a2 the typed-search rule needs the search to be the top choice: a short pa
   const out = await createDirectBrowserEntry({ provider: w.provider, store: createBrowserTaskStore(), fieldText: () => true }).handle({ run: w.run, conversationKey: 'dm', message: MESSAGE, hosts: { card: 'duckduckgo.com' } })
   assert.equal(out.status, 'paused')
   assert.equal(w.calls.includes('egdesk_browser_navigate'), false, 'nothing submitted')
+})
+
+for (const [what, opts, goal, expected] of [
+  ['search alone', {}, MESSAGE, 'done'],
+  ['more browser work', { more: true }, MESSAGE + ', 아래로 내려줘', 'max_steps'],
+  ['wrong query landed', { mismatch: true }, MESSAGE, 'needs_user_context'],
+]) test(`b verified GET landing: ${what}`, async () => {
+  const w = duckCard({ goalOnResults: false, ...opts })
+  const out = await w.provider.runDirectTask(w.run, { cardId: 'card', goal, maxSteps: 3, values: { [FIELD]: QUERY }, valuesFirst: true, textComboboxes: true, pageText: false })
+  assert.equal(out.outcome, expected)
+  if (opts.more) assert.ok(w.calls.includes('egdesk_browser_scroll'))
+  assert.equal(out.steps.some(s => s.rule === 'search_arrived'), expected === 'done')
+  assert.equal(w.requests.some(r => r.questions.some(q => q.name === 'arrival_finishes')), !opts.mismatch)
+})
+
+for (const [status, mode, reason] of [
+  ['site-allowed', 'normal', undefined], ['site-refused', 'normal', 'site_not_allowed'],
+  ['site-pending', 'normal', 'site_pending'], ['site-allowed', 'gone', 'tool_failed'], ['site-allowed', 'abort', undefined],
+]) test(`b Card site question: ${status}, ${mode}`, async () => {
+  const href = 'https://namu.wiki/w/Cat', calls = [], controller = new AbortController()
+  let url = `${D}/?q=cat`, answered = false, asked, answer
+  const started = new Promise(resolve => { asked = resolve })
+  const reply = new Promise(resolve => { answer = resolve })
+  const client = fakeClient(req => {
+    const landing = req.questions.some(q => q.name === 'arrival_finishes')
+    return { next_step: ranked('next_step', [[landing ? 'goal_met' : '[L1] Cat', landing ? 0.6 : 0.99]]), goal_met: { type: 'predicate', probability: 0.01 }, ...(landing ? { arrival_finishes: { type: 'predicate', probability: 0.99 } } : {}) }
+  })
+  const result = runBrowserReflex({ cardId: 'card', goal: '첫 결과를 열고 요약해줘', textComboboxes: true, client, signal: controller.signal, callTool: async (tool, args) => {
+    calls.push(tool.replace('egdesk_browser_', ''))
+    if (tool.endsWith('_observe')) return { observationId: `o${calls.length}`, snapshot: { revision: calls.length, documentId: url, url, text: ['Cat'], interactiveElements: url === href || (mode === 'gone' && answered) ? [] : [{ ref: 'a', role: 'link', tag: 'a', label: 'Cat', href }] } }
+    if (tool.endsWith('_request_site')) { assert.equal(args.site, 'namu.wiki'); asked(); await reply; answered = true; return { status } }
+    if (tool.endsWith('_navigate')) { assert.equal(args.observationId, 'o3'); assert.equal(args.expectedRevision, 3); assert.equal(args.url, href); url = args.url }
+    return {}
+  } })
+  await started
+  assert.deepEqual(calls, ['observe', 'request_site'])
+  if (mode === 'abort') controller.abort()
+  answer()
+  const out = await result
+  assert.equal(out.reason, reason)
+  const success = status === 'site-allowed' && mode === 'normal'
+  assert.equal(out.outcome, success ? 'done' : mode === 'abort' ? 'aborted' : 'escalated')
+  assert.equal(calls.filter(c => c === 'navigate').length, success ? 1 : 0)
+  if (success) { assert.equal(calls.at(-1), 'observe'); assert.equal(out.steps.at(-1).rule, 'link_arrived') }
 })

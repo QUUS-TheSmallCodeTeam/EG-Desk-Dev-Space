@@ -1,5 +1,6 @@
 import { undecidedField } from './egdesk-browser-field-text.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
+import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded } from './egdesk-browser-url-policy.mjs'
 import { sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { labelKey, priorFacts, recordedChoice, safePath as safePathOf } from './egdesk-browser-task-memory.mjs'
@@ -217,14 +218,7 @@ export function readOnlyPress(element, snapshot, { classify = classifyAction, is
 // t ...), so the exact address the form predicted is not the address that loads, and the navigation's url postcondition reads a failure. formResultLanded(actual, expected): the
 // page that loaded is that search's result: the same origin and path as the form's action, and every parameter the form submitted with a value is there with the same value
 // (a parameter the site adds is no evidence against it; one it drops or changes is). Code only: nothing is judged.
-export function formResultLanded(actual, expected) {
-  let a, e
-  try { a = new URL(actual); e = new URL(expected) } catch { return false }
-  const path = url => url.pathname.replace(/\/+$/, '') || '/'
-  if (a.origin !== e.origin || path(a) !== path(e)) return false
-  const submitted = [...e.searchParams].filter(([, value]) => value !== '')
-  return submitted.length > 0 && submitted.every(([name, value]) => a.searchParams.getAll(name).includes(value))
-}
+export { formResultLanded } from './egdesk-browser-url-policy.mjs'
 // a1 (Main 16:55, D33: a link to about.google opened after the site was allowed, yet the call read a failure: the site redirected and added fg and utm parameters). One rule for the
 // loop's steps and the page tools' presses: navigationLanded({ actual, expected, from?, submitted? }) -> the page that loaded is where the navigation we asked for went.
 //   submitted (a read-only GET search): formResultLanded (the form's own parameters with their values are there; added ones are the site's).
@@ -281,14 +275,14 @@ function elementKind(element, { textComboboxes = false } = {}) {
  * options: [{ value, description, item: { kind: 'navigate'|'press'|'fill', element } }]
  * Values are '[L1] label' (links), '[B1] label' (buttons, tabs), '[F1] label' (text fields).
  */
-export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS, textComboboxes = false } = {}) {
+export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS, askSite = false, textComboboxes = false } = {}) {
   const elements = Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []
   const entries = []
   const excluded = { disabled: 0, gated: 0, offSite: 0, sensitive: 0, unlabeled: 0, overflow: 0, unsupported: 0 }
   const counters = { navigate: 0, press: 0, fill: 0 }
   const personOnly = [] // c22: the controls only the person may operate (no action exists for them), named for the step
   const withheld = [] // c26: every control withheld as the person's own (a button withheld by vocabulary, a control with no action), in page order, named for the note
-  const offSite = [] // a1: links to another site (never options: the loop follows same-site links only), in page order, for the task tool's guidance (the person is asked about the site)
+  const offSite = [] // In page order for guidance. The chat-task loop also offers plain anchors, conditional on a Card grant.
   for (const element of elements) {
     if (!record(element) || typeof element.ref !== 'string' || !element.ref) continue
     const kind = elementKind(element, { textComboboxes })
@@ -335,7 +329,12 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
       if (!isAllowedUrl(element.href, snapshot)) {
         excluded.offSite++
         const words = hrefWords(element.href)
-        if (label && offSite.length < MAX_OFF_SITE && !(words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none')) offSite.push({ label, href: element.href })
+        if (label && offSite.length < MAX_OFF_SITE && !(words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none')) {
+          offSite.push({ label, href: element.href })
+          if (askSite && String(element.tag).toLowerCase() === 'a' && evaluateNavigation(element.href, DEFAULT_NAVIGATION_POLICY, { fromUrl: snapshot.url, layer: 'tool' }).reason === 'outside-site') {
+            entries.push({ label: `[L${++counters.navigate}] ${label}`, description: `link on ${hostOfUrl(element.href)} (requires Card site permission)`, item: { kind, element, askSite: true } })
+          }
+        }
         continue
       }
       const words = hrefWords(element.href)
@@ -486,7 +485,7 @@ function fannedChoice(next, answers, fan, thresholds) {
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const fan = crowdedStep(options)
   const choices = fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
@@ -506,6 +505,7 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', 'Does the current page already satisfy the goal?'),
+      ...(arrived ? [predicateQuestion('arrival_finishes', arrived === 'search' ? 'Is displaying the results of this search the ONLY requested browser outcome? No if a result still needs to be opened, or anything else selected, filtered or visited.' : 'Was opening this selected link the last requested browser action, with at most reading this page for a chat answer left? No if another page or control is needed.')] : []),
     ],
     timeoutMs, signal, authorizeDispatch,
   })
@@ -519,6 +519,7 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
   if (out.pageState && HANDOFF_STATES.has(out.pageState)) return { kind: 'handoff', ...out }
   if (out.pageState && BLOCKED_STATES.has(out.pageState)) return { kind: 'blocked', ...out }
   if (out.pageState !== 'content') return { kind: 'page_unclear', ...out }
+  if (arrived && readPredicate(result.answers, 'arrival_finishes', thresholds.done).state === 'yes') return { kind: 'done', rule: arrived + '_arrived', ...out }
   if (goalMet.state === 'yes') return { kind: 'done', ...out }
   // c16 (real s10: needs_user_context at 0.70, below the bar, ended as "uncertain" with no candidates): an undecided next step whose top is
   // the fixed ask option, or a page holding two or more same-kind elements, asks the person which; the candidates are built by code.
@@ -711,9 +712,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   // foreground deadline once; later decisions of the run reuse the warm connection and the default.
   let warmed = false
   let lastFailure = null
-  const typedTexts = [] // a2: the texts this run typed (typedSearch below)
+  const typedTexts = arr(seed.typedTexts).slice(-MAX_VALUES) // a2: the texts this run typed (typedSearch below)
+  let arrival = seed.arrival?.goal === goal ? seed.arrival : null
   const finish = (outcome, extra = {}) => ({ outcome, steps, decisions: steps.filter(step => step.decision).length,
-    state: { pending: [...pending], assigned: [...assigned], attemptedRefs: [...attemptedRefs], unmatched: [...unmatched], history: history.slice(-8), ...(notEditable.size ? { notEditable: [...notEditable] } : {}) },
+    state: { ...(typedTexts.length ? { typedTexts: typedTexts.slice(-MAX_VALUES) } : {}), ...(arrival ? { arrival } : {}), pending: [...pending], assigned: [...assigned], attemptedRefs: [...attemptedRefs], unmatched: [...unmatched], history: history.slice(-8), ...(notEditable.size ? { notEditable: [...notEditable] } : {}) },
     ...(unmatched.size ? { unmatchedValues: [...unmatched] } : {}), ...extra })
 
   // One tool call; two consecutive failures with the same code stop the loop.
@@ -862,7 +864,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     steps.push(entry)
     const seen = pageText === false ? withoutPageText(snapshot) : snapshot // a1: what the step's judgments read (the page's own text only when it may be sent)
     // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
-    const built = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    const built = buildReflexCandidates(snapshot, { askSite: textComboboxes, ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
     const { excluded, personOnly, withheld, offSite } = built
     // L6c a2: a field the page actor refused as not editable on this document is no option of this task any more (its label stays as numbered)
     const options = notEditable.size ? built.options.filter(option => !(option.item.kind === 'fill' && notEditable.has(fieldKey(snapshot, option.item.element.ref)))) : built.options
@@ -900,11 +902,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     const conflict = prior.conflict && !contextLines.length
     if (conflict) entry.historyConflict = true
 
+    const arrived = arrival && !pending.size && navigationLanded({ actual: snapshot.url, expected: arrival.expected, from: arrival.from, submitted: arrival.kind === 'search' }) ? arrival.kind : null
+    arrival = null // proof is for the immediate landing only (loading steps above do not consume it)
     let decision
     try {
-      if (recorded) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
-      decision = recorded ? await decideRecordedStep({ goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ goal, snapshot: seen, options, history, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+      if (recorded && !arrived) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
+      decision = recorded && !arrived ? await decideRecordedStep({ goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
+        : await decideReflexStep({ goal, snapshot: seen, options, history, arrived, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
@@ -912,6 +916,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     } catch (error) { return signal?.aborted ? finish('aborted') : finish('fallback', { reason: failure(error) }) }
     if (signal?.aborted) return finish('aborted')
     if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
+    if (decision.rule) entry.rule = decision.rule
     entry.decision = { kind: decision.kind, pageState: decision.pageState, next: decision.next, goalMet: decision.goalMet,
       // c18: the numbers the calibration log keeps per step (the page-state predicates, the top two probabilities, how many values were offered)
       pageChecks: decision.pageChecks ?? null, targets: decision.targets ?? null, top: decision.ranked?.[0]?.probability ?? null, second: decision.ranked?.[1]?.probability ?? null,
@@ -1017,7 +1022,25 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       }
       default: {
         const option = decision.option
-        const action = reflexActionArgs(option, { cardId, observationId, snapshot })
+        let origin = { cardId, observationId, snapshot }
+        if (option.item.askSite) {
+          // The existing Card question owns the 55s deadline and the conversation grant. Nothing is dispatched while it is pending.
+          let answer, fresh
+          try { answer = await callTool('egdesk_browser_request_site', { cardId, site: hostOfUrl(option.item.element.href) }) }
+          catch (error) { return finish('escalated', { reason: 'tool_failed', code: PUBLIC_CODE.test(error?.code) ? error.code : 'TOOL_FAILED' }) }
+          if (signal?.aborted) return finish('aborted')
+          if (answer?.status !== 'site-allowed') return finish('escalated', { reason: answer?.status === 'site-pending' ? 'site_pending' : 'site_not_allowed' })
+          try { fresh = await callTool('egdesk_browser_observe', { cardId }) } catch { return finish('escalated', { reason: 'observe_failed' }) }
+          if (signal?.aborted) return finish('aborted')
+          if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
+          const now = fresh?.snapshot, el = option.item.element
+          if (typeof fresh?.observationId !== 'string' || !Number.isSafeInteger(now?.revision) || now.url !== snapshot.url || now.documentId !== snapshot.documentId ||
+              !buildReflexCandidates(now, { askSite: true, classify, isAllowedUrl }).options.some(o => o.item.askSite && o.item.element.label === el.label && o.item.element.href === el.href)) {
+            return finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OBSERVATION_STALE' })
+          }
+          origin = { cardId, observationId: fresh.observationId, snapshot: now }
+        }
+        const action = reflexActionArgs(option, origin)
         if (action.needsText) return finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) })
         if (action.escalate) {
           return finish('escalated', { reason: action.escalate, observationId,
@@ -1033,9 +1056,11 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         } : null
         const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (!done.ok) {
-          if (done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
+          if (option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue
         }
+        const kind = typedSearch(option, typedTexts) ? 'search' : option.item.askSite ? 'link' : null
+        if (kind && expectedUrl) arrival = { kind, goal, from: snapshot.url, expected: expectedUrl }
         history.push(`opened ${option.value}`)
         entry.opened = { option: option.value, to: action.args.url ?? action.url, ...(recorded && decision.next?.by === 'code' ? { recordedAsked: recorded.item.asked } : {}) } // for the caller's content-minimal task record
         if (signal?.aborted) return finish('aborted')

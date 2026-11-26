@@ -432,7 +432,7 @@ export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision',
     ...(typeof status === 'string' && EVENT_CODE.test(status) ? { status } : {}) })
 }
 
-const CANNOT = new Set(['blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_rejected'])
+const CANNOT = new Set(['site_not_allowed', 'site_pending', 'blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_rejected'])
 const PUBLIC_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
 const tally = (task, result) => {
   for (const step of result.steps || []) {
