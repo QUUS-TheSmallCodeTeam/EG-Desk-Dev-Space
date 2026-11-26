@@ -416,3 +416,24 @@ test('only reading for the chat answer remains: done beats an otherwise ambiguou
   const b = tools([LIST_PAGE]); const result = await runBrowserReflex({ cardId: 'c', goal: '첫 번째 검색 결과 제목이 뭐야?', valuesFirst: true, textComboboxes: true, callTool: b.callTool, client })
   assert.equal(result.outcome, 'done'); assert.deepEqual(b.calls.map(c => c.name), ['egdesk_browser_observe'])
 })
+
+test('same destination has one representative title; distinct fragments and queries still need their own site question', () => {
+  const els = [['other.org','https://OTHER.org:443/x'], ['https://other.org/x','https://other.org/x'], ['First article','https://other.org/x'], ['Chapter','https://other.org/x#a'], ['Variant','https://other.org/x?q=b']].map(([label,href],i) => element(`e${i}`, 'link', label, { href }))
+  const b = buildReflexCandidates(page(REPORTS,els), { askSite:true })
+  assert.deepEqual(b.options.map(o=>o.item.element.label), ['First article','Chapter','Variant']); assert.ok(b.options.every(o=>o.item.askSite)); assert.equal(b.offSite.length,3)
+})
+
+test('read here wins over uncertain next step only on ordinary content; no action or site request', async () => {
+  for (const state of ['content','login_required']) {
+    const { client } = decisions(q => q.name === 'page_state' ? choice(state,.99) : q.name === 'next_step' ? choice('needs_user_context',.5,.48) : { type:'predicate', probability:q.name === 'read_here' ? .99 : .61 })
+    const b=tools([LIST_PAGE]), out=await runBrowserReflex({ cardId:'card',goal:'Table 1에서 Jason의 이메일이 뭐야?',firstFieldText:async()=>null,client,callTool:b.callTool })
+    assert.equal(out.outcome,state === 'content'?'done':'handoff'); assert.deepEqual(b.calls.map(c=>c.name),['egdesk_browser_observe'])
+  }
+})
+
+test('matching child load after selected open-only action ends the entry without working on the unbound child',async()=>{
+  const { client } = decisions(q => q.name === 'page_state' ? choice('content',.99) : q.name === 'next_step' ? choice(q.choices[0].value,.99) : {type:'predicate',probability:q.name==='open_only'?.99:.01})
+  const b=tools([LIST_PAGE]); let checked=0
+  const out=await runBrowserReflex({cardId:'card',goal:'Click Here 눌러줘',firstFieldText:async()=>null,client,callTool:b.callTool,watchPopupLoad(id,url){assert.equal(id,'card');assert.equal(url,Q3);return ()=>{checked++;return true}}})
+  assert.equal(checked,1);assert.deepEqual([out.outcome,out.steps[0].rule],['done','popup_loaded']);assert.deepEqual(b.calls.map(c=>c.name),['egdesk_browser_observe','egdesk_browser_navigate'])
+})

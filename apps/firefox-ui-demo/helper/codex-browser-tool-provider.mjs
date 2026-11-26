@@ -89,7 +89,7 @@ export function isCurrentBrowserReflexHandoff(response, run, event) {
 }
 
 // `ownerKeyFor(engineProfileId)` (L1 c24): the account of the slot running the room; default = the one sign-in `getOwnerKey()` answers, as before.
-export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKeyFor = () => getOwnerKey(), schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey, ownerKeyFor }) }) {
+export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKeyFor = () => getOwnerKey(), schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, watchPopupLoad = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey, ownerKeyFor }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
   let resetting = 0
   const fixtureAttestations = new Map()
@@ -381,7 +381,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
     async runDirectTask(run, { cardId, goal, namedButtonRequest, values = null, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null, signal = undefined, textComboboxes = false, onPage = null, firstFieldText = null, valuesFirst = false, pageText = null, actor = null }) {
       if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
       const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId, actor === 'decision' ? { actor } : {})
-      const result = await runReflex({ cardId, goal, namedButtonRequest, ...(values && typeof values === 'object' && Object.keys(values).length ? { values } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}), ...(typeof onPage === 'function' ? { onPage } : {}), ...(valuesFirst === true ? { valuesFirst: true } : {}), ...(typeof pageText === 'boolean' ? { pageText } : {}),
+      const result = await runReflex({ cardId, goal, namedButtonRequest, ...(firstFieldText && watchPopupLoad ? { watchPopupLoad } : {}), ...(values && typeof values === 'object' && Object.keys(values).length ? { values } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}), ...(typeof onPage === 'function' ? { onPage } : {}), ...(valuesFirst === true ? { valuesFirst: true } : {}), ...(typeof pageText === 'boolean' ? { pageText } : {}),
         ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(typeof firstFieldText === 'function' ? { firstFieldText } : {}), ...(today ? { today } : {}), ...(signal ? { signal } : {}),
         callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
       if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })

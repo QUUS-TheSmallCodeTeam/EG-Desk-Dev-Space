@@ -235,6 +235,13 @@ export async function openWorkflowRuntime({
 
   return {
     bus, files,
+    // The public workflow event omits query and fragment. Never use it to prove a destination that requires either.
+    watchPopupLoad(opener, href) {
+      const url = new URL(href), cursor = bus.stats().seq
+      if (url.search || url.hash) return null
+      return () => bus.recent({ owner, since: cursor }).events.some(({ topic, payload }) => topic === 'browser.loaded' &&
+        payload.openerCardId === opener && payload.cardId !== opener && payload.origin === url.origin && payload.path === url.pathname)
+    },
     get sources() { return sources },
     get graph() { return graph },
     get adapter() { return adapter },

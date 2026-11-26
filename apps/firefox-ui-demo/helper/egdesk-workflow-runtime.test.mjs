@@ -335,3 +335,11 @@ test('a written gate answer is kept bound to its gate, Board and owner; secret-l
   await reopened.recordAnswer({ ...gate, text: 'third' })
   assert.throws(() => reopened.answerText({ textRef, ...gate }), { code: 'TASK_INPUT_UNRESOLVED' }, 'the oldest answer is dropped past the bound')
 })
+
+test('child-load witness excludes past, unrelated, merely navigated and query-dependent destinations',async t=>{
+  const {runtime}=await bridge(t), url='https://example.org/windows/new'
+  const emit=(openerCardId,path,topic='browser.loaded')=>runtime.bus.publish({owner:'egdesk-local',topic,payload:{cardId:'child',openerCardId,origin:'https://example.org',path}})
+  emit('parent','/windows/new');const check=runtime.watchPopupLoad('parent',url)
+  emit('other','/windows/new');emit('parent','/else');emit('parent','/windows/new','browser.navigated');assert.equal(check(),false)
+  emit('parent','/windows/new');assert.equal(check(),true);assert.equal(runtime.watchPopupLoad('parent',url+'?q=1'),null)
+})

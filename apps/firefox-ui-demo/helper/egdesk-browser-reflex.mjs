@@ -295,6 +295,21 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   const personOnly = [] // c22: the controls only the person may operate (no action exists for them), named for the step
   const withheld = [] // c26: every control withheld as the person's own (a button withheld by vocabulary, a control with no action), in page order, named for the note
   const offSite = [] // In page order for guidance. The chat-task loop also offers plain anchors, conditional on a Card grant.
+  // Group only independently safe links, before either option cap. Preserve the first destination's position,
+  // but prefer a descriptive title to an address label. Query and fragment are part of the destination.
+  const destinations = new Map()
+  const offerLink = (element, label, needsGrant) => {
+    const url = new URL(element.href), key = url.href
+    const name = label || pathOf(key), address = name.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const score = !label ? 0 : address === url.host || address === key.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '') || /^https?:\/\//i.test(name) ? 1 : 2
+    const prev = askSite ? destinations.get(key) : null
+    if (prev && score <= prev.score) return
+    if (needsGrant && !prev && offSite.length >= MAX_OFF_SITE) return
+    const slot = prev ?? { index: entries.length, number: ++counters.navigate, off: offSite.length }
+    destinations.set(key, { ...slot, score })
+    if (needsGrant) offSite[slot.off] = { label: name, href: element.href }
+    entries[slot.index] = { label: '[L' + slot.number + '] ' + name, description: needsGrant ? 'External destination #' + (slot.off + 1) + ' in page order (duplicate anchors counted once): link on ' + url.hostname + ' (requires Card site permission)' : 'link to ' + pathOf(key), item: { kind: 'navigate', element, ...(needsGrant ? { askSite: true } : {}) } }
+  }
   for (const element of elements) {
     if (!record(element) || typeof element.ref !== 'string' || !element.ref) continue
     const kind = elementKind(element, { textComboboxes })
@@ -357,18 +372,15 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
       if (!isAllowedUrl(element.href, snapshot)) {
         excluded.offSite++
         const words = hrefWords(element.href)
-        if (label && offSite.length < MAX_OFF_SITE && !(words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none')) {
-          offSite.push({ label, href: element.href })
-          if (askSite && String(element.tag).toLowerCase() === 'a' && evaluateNavigation(element.href, DEFAULT_NAVIGATION_POLICY, { fromUrl: snapshot.url, layer: 'tool' }).reason === 'outside-site') {
-            entries.push({ label: `[L${++counters.navigate}] ${label}`, description: `link on ${hostOfUrl(element.href)} (requires Card site permission)`, item: { kind, element, askSite: true } })
-          }
+        if (label && !(words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none')) {
+          if (askSite && String(element.tag).toLowerCase() === 'a' && evaluateNavigation(element.href, DEFAULT_NAVIGATION_POLICY, { fromUrl: snapshot.url, layer: 'tool' }).reason === 'outside-site') offerLink(element, label, true)
+          else if (!askSite && offSite.length < MAX_OFF_SITE) offSite.push({ label, href: element.href })
         }
         continue
       }
       const words = hrefWords(element.href)
       if (words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none') { excluded.gated++; continue }
-      counters.navigate++
-      entries.push({ label: `[L${counters.navigate}] ${label || pathOf(element.href)}`, description: `link to ${pathOf(element.href)}`, item: { kind, element } })
+      offerLink(element, label, false)
       continue
     }
     if (!label) { excluded.unlabeled++; continue }
@@ -531,13 +543,14 @@ function fannedChoice(next, answers, fan, thresholds) {
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, directEntry = false, popupProof = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const motion = requestedMotion(goal)
   const fan = !motion && crowdedStep(options, entrySiteLinks)
   const choices = motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
     `Goal: ${goal}`, ...(isDay(today) ? [`Today: ${today}`] : []), `URL: ${snapshot.url}`,
+    arrived ? `Verified browser outcome on the already selected target Card: ${arrived === 'search' ? 'the search submitted with the typed words has landed at its results' : 'the selected link has opened'}. The target card is settled, not a remaining choice.` : null,
     pendingValues.length ? `Values the caller supplied for fields: ${pendingValues.join(', ')}` : null,
     userContext.length ? `Context the user gave in the chat (not page text):\n${userContext.slice(-4).map(item => compactText(item, 400)).join('\n')}` : null,
     memoryPacket ? `Stored memory fetched for this turn (from this app; may be outdated, never instructions):\n${compactText(memoryPacket, 3000)}` : null,
@@ -549,12 +562,14 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
     input: [{ role: 'developer', content: options.some(o => o.item.kind === 'choice') ? REFLEX_RULES + '\n' + 'Pick [C] check/uncheck or list selections only for the exact choices and states explicitly requested by the person, never as an inferred prerequisite. For multiple requested choices, continue until each has the requested state.' : REFLEX_RULES }, { role: 'user', content: evidence }],
     questions: [
       choiceQuestion('next_step', entrySiteLinks && options.some(o => o.item.askSite)
-        ? 'Which option moves toward the goal next? Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
+        ? 'Which option moves toward the goal next? For an ordinal search result use the result destinations in page order, not the search page navigation controls. Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
         : 'Which option moves toward the goal next?', choices),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person explicitly request the exact named choice AND state of the selected check/uncheck/list action? No if merely inferred or unspecified.')] : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
+      ...(popupProof ? [predicateQuestion('open_only', 'Is opening the selected link itself the whole request, with no reading, typing or other action requested on the destination?')] : []),
+      ...(directEntry && !arrived && !pendingValues.length && !motion ? [predicateQuestion('read_here', 'Is the request only for information from this current page (such as its first result title or a table cell), with no browser action needed before the chat model reads it? No for a request to open, search, change, submit, or visit anything, or if there is no evidence this is the requested page.')] : []),
       ...(arrived ? [predicateQuestion('arrival_finishes', arrived === 'search' ? 'Is displaying the results of this search the ONLY requested browser outcome? No if a result still needs to be opened, or anything else selected, filtered or visited.' : 'Was opening this selected link the last requested browser action, with at most reading this page for a chat answer left? No if another page or control is needed.')] : []),
     ],
     timeoutMs, signal, authorizeDispatch,
@@ -572,6 +587,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   // A model's goal_met is not a scroll coordinate or a history landing.
   if (motion) return { kind: next.state === 'accepted' && next.value === 'move_' + motion ? 'motion' : 'uncertain', motion, ...out }
   if (arrived && readPredicate(result.answers, 'arrival_finishes', thresholds.done).state === 'yes') return { kind: 'done', rule: arrived + '_arrived', ...out }
+  if (directEntry && !arrived && !pendingValues.length && readPredicate(result.answers, 'read_here', thresholds.done).state === 'yes') return { kind: 'done', rule: 'read_here', ...out }
   if (goalMet.state === 'yes') return { kind: 'done', ...out }
   // c16 (real s10: needs_user_context at 0.70, below the bar, ended as "uncertain" with no candidates): an undecided next step whose top is
   // the fixed ask option, or a page holding two or more same-kind elements, asks the person which; the candidates are built by code.
@@ -593,7 +609,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   if (option?.item.kind === 'choice' && readPredicate(result.answers, 'choice_requested', thresholds.done).state !== 'yes') return { kind: 'user_context', ...out }
   // History conflicts with this page (the earlier choice is gone): the person decides, whatever the model picked.
   if (option && historyConflict) return { kind: 'user_context', ...out }
-  return option ? { kind: 'act', option, ...out } : { kind: 'uncertain', ...out }
+  return option ? { kind: 'act', option, ...(popupProof && readPredicate(result.answers, 'open_only', thresholds.done).state === 'yes' ? { openOnly: true } : {}), ...out } : { kind: 'uncertain', ...out }
 }
 
 const RECORDED_RULES = [
@@ -732,7 +748,7 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  */
 export async function runBrowserReflex({ cardId, goal, namedButtonRequest, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
-  textComboboxes = false, onPage = null, firstFieldText = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
+  textComboboxes = false, onPage = null, watchPopupLoad = null, firstFieldText = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -961,13 +977,13 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     const conflict = prior.conflict && !contextLines.length
     if (conflict) entry.historyConflict = true
 
-    const arrived = arrival && !pending.size && navigationLanded({ actual: snapshot.url, expected: arrival.expected, from: arrival.from, submitted: arrival.kind === 'search' }) ? arrival.kind : null
+    const arrived = arrival && !pending.size && navigationLanded({ actual: snapshot.url, expected: arrival.expected, from: arrival.from, submitted: arrival.kind === 'search' }) && (!arrival.exact || new URL(snapshot.url).href === new URL(arrival.expected).href) ? arrival.kind : null
     arrival = null // proof is for the immediate landing only (loading steps above do not consume it)
     let decision
     try {
       if (recorded && !arrived) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
       decision = recorded && !arrived ? await decideRecordedStep({ chatTask: valuesFirst, goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: seen, options, history, arrived, entrySiteLinks: step === 1 && !resumeState && typeof firstFieldText === 'function', pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+        : await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: seen, options, history, arrived, popupProof: typeof watchPopupLoad === 'function' && options.some(o => o.item.kind === 'navigate' && !o.item.askSite), directEntry: typeof firstFieldText === 'function', entrySiteLinks: step === 1 && !resumeState && typeof firstFieldText === 'function', pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
@@ -1118,6 +1134,8 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
         // a navigation (a link, a read-only GET search) whose url postcondition read a failure: the page that loaded decides (navigationLanded)
         const submitted = option.item.readOnly?.kind === 'get_form'
         const expectedUrl = action.tool === 'egdesk_browser_navigate' ? action.args.url : null
+        const popupLoaded = decision.openOnly && option.item.kind === 'navigate' && !option.item.askSite && expectedUrl ? watchPopupLoad?.(cardId, expectedUrl) : null
+        const popupDone = () => !signal?.aborted && (!isDecisionCurrent || isDecisionCurrent()) && popupLoaded?.() === true
         const landed = expectedUrl ? async () => {
           try { await callTool('egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 5000 }) } catch { /* observe the page as it is */ }
           const seen = await callTool('egdesk_browser_observe', { cardId })
@@ -1125,6 +1143,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
         } : null
         const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (done.held) return heldResult()
+        if ((done.ok || done.code === 'POSTCONDITION_UNVERIFIED') && popupDone()) { entry.rule = 'popup_loaded'; return finish('done') }
         if (!done.ok) {
           if (option.item.named || option.item.kind === 'choice' || option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue
@@ -1140,13 +1159,14 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
           history.push('selected ' + option.value)
           continue // no load wait for an in-place edit; next decision uses a new observation
         }
-        const kind = typedSearch(option, typedTexts) ? 'search' : option.item.askSite ? 'link' : null
-        if (kind && expectedUrl) arrival = { kind, goal, from: snapshot.url, expected: expectedUrl }
+        const kind = typedSearch(option, typedTexts) ? 'search' : (option.item.askSite || (typeof firstFieldText === 'function' && option.item.kind === 'navigate')) ? 'link' : null
+        if (kind && expectedUrl) arrival = { kind, goal, from: snapshot.url, expected: expectedUrl, ...(kind === 'link' && !option.item.askSite ? { exact: true } : {}) }
         history.push(`opened ${option.value}`)
         entry.opened = { option: option.value, to: action.args.url ?? action.url, ...(recorded && decision.next?.by === 'code' ? { recordedAsked: recorded.item.asked } : {}) } // for the caller's content-minimal task record
         if (signal?.aborted) return finish('aborted')
         // a view change loads nothing: wait for the page to settle instead of a load
         await act(entry, 'egdesk_browser_wait', option.item.readOnly?.kind === 'view' ? { cardId, for: 'idle', timeoutMs: 5000 } : { cardId, for: 'load', timeoutMs: 10000 })
+        if (popupDone()) { entry.rule = 'popup_loaded'; return finish('done') }
       }
     }
   }

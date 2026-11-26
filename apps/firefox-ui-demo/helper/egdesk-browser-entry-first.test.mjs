@@ -13,7 +13,7 @@ const submit = (method, label = '검색') => ({ ...el('go', 'button', 'button', 
 const pred = (name, probability) => ({ name, type: 'predicate', probability })
 const choice = (name, a, p, b, p2) => ({ name, type: 'choice', choice: a, confidence: p, probabilities: [{ value: a, probability: p }, ...(b ? [{ value: b, probability: p2 }] : [])] })
 
-async function replay(initial, { chooseText = true, later = submit('get') } = {}) {
+async function replay(initial, { twoCards = false, chooseText = true, later = submit('get') } = {}) {
   let snapshot = structuredClone(initial)
   const actions = [], asks = []
   const client = { async decide({ questions }) {
@@ -25,7 +25,8 @@ async function replay(initial, { chooseText = true, later = submit('get') } = {}
         const search = q.choices.find(c => c.value === '[B1] 검색' || /^\[B\d+\] 검색$/.test(c.value))?.value
         answers[q.name] = actions.length === 0 ? choice(q.name, 'needs_free_text', .68, field, .25) : search ? choice(q.name, search, .74, field, .20) : choice(q.name, 'blocked', .95)
       } else if (q.name === 'field_text') answers[q.name] = choice(q.name, chooseText ? QUERY : q.choices.at(-1).value, .97)
-      else if (q.name === 'goal_met') answers[q.name] = pred(q.name, actions.includes('GET') ? .98 : .01)
+      else if (q.name === 'arrival_finishes' && twoCards) answers[q.name] = pred(q.name, .98)
+      else if (q.name === 'goal_met') answers[q.name] = pred(q.name, actions.includes('GET') && !twoCards ? .98 : .01)
       else if (q.type === 'choice') answers[q.name] = choice(q.name, q.choices[0].value, .95)
       else if (!(q.name in answers)) answers[q.name] = pred(q.name, ['browser_entry', 'browser_entry_card_0', 'person_target_1'].includes(q.name) ? .97 : .01)
     }
@@ -44,8 +45,8 @@ async function replay(initial, { chooseText = true, later = submit('get') } = {}
   const scope = { callTool, client, isDecisionCurrent: () => true }
   const provider = { directEntryEnabled: () => true, reflexScope: () => scope, runDirectTask: (_run, args) => runBrowserReflex({ ...args, ...scope, pageText: false }) }
   const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), fieldText: () => true, canContinue: () => true })
-  const run = { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }
-  const out = await entry.handle({ run, conversationKey: 'dm', message: MESSAGE, hosts: { card: 'duckduckgo.com' } })
+  const run = { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }, ...(twoCards ? [{cardId:'other',permission:'interact'}] : [])] } }
+  const out = await entry.handle({ run, conversationKey: 'dm', message: MESSAGE, hosts: { card: 'duckduckgo.com', other:'httpbin.org' } })
   return { status: out.status, code: JSON.parse(out.note).egdesk_browser_task.code, next: JSON.parse(out.note).egdesk_browser_task.next, actions, askedPerson: asks.includes('person_target_1'), askedText: asks.includes('field_text') }
 }
 
@@ -72,4 +73,8 @@ test('the direct entry hands over POST submission and payment; neither is operat
     const out = await replay({ ...home, interactiveElements: [button] })
     assert.deepEqual([out.code, out.actions, out.askedText], ['human_step', [], false])
   }
+})
+
+test('only the selected target card needs to land the requested search', async () => {
+  const out=await replay(home,{twoCards:true});assert.deepEqual([out.status,out.actions],['done',['fill','GET']])
 })
