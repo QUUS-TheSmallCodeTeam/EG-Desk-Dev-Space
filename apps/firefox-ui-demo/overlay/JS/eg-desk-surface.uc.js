@@ -25136,7 +25136,7 @@
       for (const [field, leaseField] of [['innerWindowId', 'guardInnerWindowId'], ['browsingContextId', 'guardBrowsingContextId']]) {
         if (!Object.hasOwn(request.guard, field)) continue;
         if (!Number.isSafeInteger(request.guard[field]) || request.guard[field] <= 0) {
-          throw new Error('Browser observation is stale; the observed document identity is invalid');
+          throw new Error('Browser observation is stale [identity]; the observed document identity is invalid');
         }
         guardIdentity[leaseField] = request.guard[field];
       }
@@ -28433,10 +28433,12 @@
       if (!windowGlobal) throw new Error('Browser document is unavailable');
       let currentUrl = browserState.uri;
       try { currentUrl = windowGlobal.documentURI?.spec || currentUrl; } catch {}
-      if ((Object.hasOwn(guard, 'innerWindowId') && guard.innerWindowId !== windowGlobal.innerWindowId) ||
-          (Object.hasOwn(guard, 'browsingContextId') && guard.browsingContextId !== context.id) ||
-          (compareUrl && typeof guard.url === 'string' && guard.url !== currentUrl && guard.url !== browserState.uri)) {
-        throw Object.assign(new Error('Browser observation is stale; observe the current page again'),
+      // L6 a1 (D25): the same checks; the refusal names which one moved in one closed word (the helper's staleBy).
+      const moved = (Object.hasOwn(guard, 'innerWindowId') && guard.innerWindowId !== windowGlobal.innerWindowId) ||
+          (Object.hasOwn(guard, 'browsingContextId') && guard.browsingContextId !== context.id) ? 'identity'
+        : compareUrl && typeof guard.url === 'string' && guard.url !== currentUrl && guard.url !== browserState.uri ? 'url' : null;
+      if (moved) {
+        throw Object.assign(new Error(`Browser observation is stale [${moved}]; observe the current page again`),
           { browserToolActor: { dispatchPhase: 'not-dispatched' } });
       }
     };

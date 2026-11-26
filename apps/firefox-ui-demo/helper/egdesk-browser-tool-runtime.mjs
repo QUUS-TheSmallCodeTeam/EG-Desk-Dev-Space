@@ -125,6 +125,29 @@ export const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze(['egdesk_browser_nav
 const READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
 
 function reject(code, message) { throw Object.assign(new Error(message), { code }) }
+// L6 a1 (D25): which observed fact made a Browser action "not sent" (BROWSER_OBSERVATION_STALE), in one closed word. Every refusal before any input
+// reached the helper as that one code, so a deterministic refusal (the Card's site rule, a viewport or focus that moves, another binding) could not be told
+// from a page that really changed. Read from the Card's or the page actor's refusal text, never from page content: a word outside this list is 'other'.
+//   observation  the helper's own copy: not the latest observation of this Card, or another revision (nothing was sent to the Card)
+//   document / revision / viewport / focus / url / identity / scroll / frame   the page actor's (or the Card's) observed-state guard, by the fact that moved
+//   site-rule    the Card's rule for the conversation's sites refused the move     target   the observed element changed or is not usable
+//   binding / card-generation / card-busy / budget / user-hold   the Card refused the request itself     reply-lost   the reply was lost; the actor proved it never entered
+export const BROWSER_STALE_REASONS = Object.freeze(['observation', 'document', 'revision', 'viewport', 'focus', 'url', 'identity', 'scroll', 'frame',
+  'site-rule', 'target', 'binding', 'card-generation', 'card-busy', 'budget', 'user-hold', 'reply-lost', 'other'])
+export function staleReasonOf(text) {
+  const message = typeof text === 'string' ? text.slice(0, 600) : ''
+  const named = /\bstale \[([a-z-]{1,24})\]/.exec(message)?.[1]
+  if (named && BROWSER_STALE_REASONS.includes(named)) return named
+  if (/outside the allowed sites/.test(message)) return 'site-rule'
+  if (/Browser frame is stale/.test(message)) return 'frame'
+  if (/Browser target (?:changed|is unavailable|is not an editable field)|observed element reference/.test(message)) return 'target'
+  if (/run binding is missing or changed|profile or account (?:epoch|context) changed|Card, profile or account context changed/.test(message)) return 'binding'
+  if (/different Card generation/.test(message)) return 'card-generation'
+  if (/Browser Card is (?:already )?being operated/.test(message)) return 'card-busy'
+  if (/budget expired/.test(message)) return 'budget'
+  if (/operating this Browser Card directly/.test(message)) return 'user-hold'
+  return 'other'
+}
 function record(value) { return value && typeof value === 'object' && !Array.isArray(value) }
 function short(value, max = 512) { return typeof value === 'string' && value.length > 0 && value.length <= max }
 function sameTarget(left, right) {
@@ -813,7 +836,9 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     if (card.uncertain && !(pointerAfterClick && card.uncertainAction?.action === 'click')) {
       reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
     }
-    if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
+    if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) {
+      throw Object.assign(new Error('Observe this Browser Card again before acting'), { code: 'BROWSER_OBSERVATION_STALE', staleBy: 'observation' })
+    }
     if (tool === 'egdesk_browser_history') return historyMove(run, binding, card, args, observed)
     const byRef = Object.hasOwn(args, 'ref')
     if (byRef) {
@@ -933,7 +958,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
         // The no-effect click's own lock stays; only the unsent press is undone.
         restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
-          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false,
+          { code: 'BROWSER_OBSERVATION_STALE', staleBy: 'reply-lost', dispatchPhase: 'not-dispatched', dispatched: false,
             reconcile: outcome.summary, timing: { ...trace } })
       }
       error.dispatchPhase = outcome.dispatched === true ? 'dispatched' : 'unknown'
@@ -978,7 +1003,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
       if (provenNotDispatched(response) && !response.dialog) {
         restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
-          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
+          { code: 'BROWSER_OBSERVATION_STALE', staleBy: staleReasonOf(response.error), dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
             ...(obscuredBy ? { obscuredBy } : {}) })
       }
       markUnknown()
@@ -1194,7 +1219,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     if (response?.status !== 'acted' || !record(receipt)) {
       if (record(response) && provenNotDispatched(response)) {
         throw Object.assign(new Error('History move was not sent; observe this Browser Card again'),
-          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace } })
+          { code: 'BROWSER_OBSERVATION_STALE', staleBy: staleReasonOf(response.error), dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace } })
       }
       throw Object.assign(new Error(response?.error || 'History move was not confirmed'),
         { code: 'BROWSER_ACTION_UNVERIFIED', timing: { ...trace }, dispatchPhase: 'unknown', dispatched: 'unknown' })

@@ -23,6 +23,14 @@ function webUrl(value) {
 function canonicalHost(hostname) {
   return String(hostname || '').toLowerCase().replace(/\.$/, '');
 }
+// L6 a1 (D25): the Card's set of a conversation's allowed sites is made in the browser window, another
+// global than this module (ChromeUtils.importESModule gives it its own), where `instanceof Set` is false
+// (EGDeskViewportExtras.sys.mjs has the same note for a Map): every allowed site used to read as none.
+// A Set from any global, or an array, is read by its entries; anything else is no sites.
+function siteSet(sites) {
+  if (Array.isArray(sites) || Object.prototype.toString.call(sites) === '[object Set]') return new Set(sites);
+  return new Set();
+}
 // Registrable domain of a host, or null for an IP, single-label or unknown
 // host (then the exact origin is the site). A failing lookup means null.
 function siteWith(siteForHost, hostname) {
@@ -59,7 +67,7 @@ export function browserSitePatterns(site) {
 // the sites the person allowed in this conversation).
 export function browserNavigationPolicy(sites) {
   const allow = [];
-  for (const site of sites instanceof Set ? sites : Array.isArray(sites) ? sites : []) {
+  for (const site of siteSet(sites)) {
     for (const pattern of browserSitePatterns(site)) if (!allow.includes(pattern)) allow.push(pattern);
   }
   return { scope: 'same-site', allow, block: [], allowDowngrade: false };
@@ -86,7 +94,7 @@ export function browserGrantNavigation(toUrl, fromUrl, sites, siteForHost) {
     const same = fromSite && toSite ? fromSite === toSite : from.origin === to.origin;
     if (same) return decide(true, 'same-site', host);
   }
-  const allowed = sites instanceof Set ? sites : new Set(Array.isArray(sites) ? sites : []);
+  const allowed = siteSet(sites);
   if (allowed.has(toSite || to.origin) || allowed.has(host)) return decide(true, 'allowed-site', host);
   return decide(false, from ? 'outside-site' : 'no-base', host);
 }
@@ -108,7 +116,7 @@ export function browserGrantState(grant, current, { now = Date.now(), idleMs = B
   // The Card may sit on its granted site or on a site this conversation allowed;
   // a person steering it elsewhere ends the grant (D-B3 site change).
   const site = browserGrantSite(current.url, siteForHost);
-  const allowed = sites instanceof Set ? sites : new Set(Array.isArray(sites) ? sites : []);
+  const allowed = siteSet(sites);
   if (!site || (site !== grant.site && !allowed.has(site))) return { valid: false, reason: 'site-changed' };
   return { valid: true, reason: 'valid' };
 }
