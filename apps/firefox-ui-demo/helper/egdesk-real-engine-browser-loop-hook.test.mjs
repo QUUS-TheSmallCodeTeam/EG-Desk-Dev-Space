@@ -15,6 +15,8 @@ import { BROWSER_LOOP_SET, buildBrowserLoopScript } from './egdesk-browser-answe
 import { NOTE_KEY } from './egdesk-real-engine-browser-answer-hook.mjs'
 import { checkBrowserLoop } from './egdesk-real-engine-browser-loop-hook.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["end to end on the fake engine: entry by the Decision model"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const tmp = t => { const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-browser-loop-')); t.after(() => fs.rmSync(base, { recursive: true, force: true })); return base }
 const GOOD = { '다음 결제일이 언제야?': '다음 결제일은 2026년 12월 14일입니다.',

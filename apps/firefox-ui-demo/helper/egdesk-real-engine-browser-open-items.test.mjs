@@ -14,6 +14,8 @@ import { NOTE_KEY } from './egdesk-real-engine-browser-answer-hook.mjs'
 import { checkBrowserLoop } from './egdesk-real-engine-browser-loop-hook.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["end to end on the fake engine: the Decision settles the option","c43 (c64: the referent read the short replies"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const tmp = t => { const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-loop2-')); t.after(() => fs.rmSync(base, { recursive: true, force: true })); return base }
 const FIRST = '내 다음 공연 예매 내역 알려줘'

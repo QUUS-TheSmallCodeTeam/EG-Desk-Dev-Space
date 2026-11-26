@@ -8,6 +8,8 @@ import { familyAnswers } from './egdesk-browser-live-families.mjs'
 import { HOLDOUT_HOSTS, HOLDOUT_PAGES, HOLDOUT_PHASE_DEFS, holdoutChecks } from './egdesk-browser-live-holdout.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["all five pre-registered phases, stand-in"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const PREREG = readFileSync(new URL('../scripts/egdesk-browser-live-holdout-preregistration.md', import.meta.url), 'utf8')
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'
