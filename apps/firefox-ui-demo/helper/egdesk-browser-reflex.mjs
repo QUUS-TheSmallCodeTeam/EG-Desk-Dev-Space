@@ -522,13 +522,22 @@ export function validateReflexArgs(args) {
 const PUBLIC_CODE = /^[A-Z][A-Z0-9_]{2,63}$/
 const failure = error => (error instanceof DecisionError ? error.code : 'unreachable')
 
+// a1 (the task tool, egdesk-browser-task-tool.mjs): what one page action of the loop was, for the step observer. Closed words and the element's own short
+// name only (never the text typed, never an address): op 'open' a link | 'submit' a read-only GET search | 'press' a view button | 'fill' a field | 'scroll' | 'wait'.
+const OP_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'open', egdesk_browser_click: 'press', egdesk_browser_fill: 'fill', egdesk_browser_scroll: 'scroll', egdesk_browser_wait: 'wait' })
+export const STEP_TARGET_CHARS = 40
+export const optionTarget = option => compactText(String(option?.item?.element?.label ?? option?.value ?? '').replace(/^\[[A-Z]\d+\]\s*/, ''), STEP_TARGET_CHARS) || null
+export const optionOp = option => (option?.item?.kind === 'fill' ? 'fill' : option?.item?.kind === 'navigate' ? 'open' : option?.item?.readOnly?.kind === 'get_form' ? 'submit' : 'press')
+const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch { return null } }
+
 /**
  * runBrowserReflex({ cardId, goal, values?, maxSteps?, callTool, client, thresholds?, classify?, isAllowedUrl?, timeoutMs?, signal? })
  * callTool(name, args) → the egdesk_browser_* tool result (throws on refusal).
  * → { outcome, reason?, steps, ... } — see the module header for outcomes.
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
-  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null } = {}) {
+  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
+  textComboboxes = false, onPage = null } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -544,6 +553,15 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   const assigned = new Map(arr(seed.assigned)) // value name → frozen field and observation scope
   const attemptedRefs = new Set(arr(seed.attemptedRefs))
   const unmatched = new Set(arr(seed.unmatched))
+  // a1: values the caller gives when it resumes the task (the task tool's needs_value answer) join the pending ones. A name already typed (its field was
+  // tried) is never typed again; any other name given again is matched again on the page as it is now.
+  if (resumeState) {
+    for (const [key, value] of Object.entries(values || {})) {
+      const bound = assigned.get(key)
+      if (bound && attemptedRefs.has(bound.ref)) continue
+      assigned.delete(key); unmatched.delete(key); pending.set(key, value)
+    }
+  }
   const history = arr(seed.history).map(String).slice(-8)
   const contextLines = arr(userContext).filter(item => typeof item === 'string' && item.trim()).slice(-4)
   // The first decision of a run may open a cold connection (recorded cold calls 1.4-2.2 s against the 1.5 s
@@ -557,17 +575,24 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
 
   // One tool call; two consecutive failures with the same code stop the loop.
   // Read-only observer for progress facts (step number and whether a tool call just succeeded); it cannot change the loop.
-  const observe = (step, action) => { try { onStep?.({ step, ...(action ? { action } : {}) }) } catch { /* an observer never affects the loop */ } }
-  async function act(entry, tool, args) {
+  const tell = info => { try { onStep?.(info) } catch { /* an observer never affects the loop */ } }
+  const observe = (step, action) => tell({ step, ...(action ? { action } : {}) })
+  // a1: each page action also tells the observer what it was (op, the element's short name, the NAME of the value typed) and how long it took (ms: the call,
+  // stepMs: since the step began, its decision included). A refused call is told as `failed` (never `action`: the progress facts count only done actions).
+  let stepStart = Date.now()
+  const described = (tool, meta) => ({ op: meta.op ?? OP_OF_TOOL[tool] ?? 'act', target: typeof meta.target === 'string' && meta.target ? meta.target : null, ...(typeof meta.valueName === 'string' && meta.valueName ? { valueName: compactText(meta.valueName, 60) } : {}) })
+  async function act(entry, tool, args, meta = {}) {
+    const t0 = Date.now()
     try {
       const result = await callTool(tool, args)
       entry.actions.push({ tool, ok: true, status: typeof result?.status === 'string' ? result.status : null })
-      observe(entry.step, tool)
+      tell({ step: entry.step, action: tool, ok: true, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...described(tool, meta) })
       lastFailure = null
       return { ok: true, result }
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'TOOL_FAILED'
       entry.actions.push({ tool, ok: false, code })
+      tell({ step: entry.step, failed: tool, ok: false, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...(PUBLIC_CODE.test(code) ? { code } : {}), ...described(tool, meta) })
       const repeated = lastFailure === code
       lastFailure = code
       return { ok: false, code, repeated }
@@ -576,6 +601,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
 
   for (let step = 1; step <= maxSteps; step++) {
     if (signal?.aborted) return finish('aborted')
+    stepStart = Date.now()
     observe(step, null)
     let observed
     try { observed = await callTool('egdesk_browser_observe', { cardId }) }
@@ -588,7 +614,9 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     }
     const entry = { step, observationId, revision: snapshot.revision, url: snapshot.url, actions: [] }
     steps.push(entry)
-    const { options, excluded, personOnly, withheld } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}) })
+    // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
+    try { onPage?.({ step, title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOfUrl(snapshot.url) }) } catch { /* an observer never affects the loop */ }
+    const { options, excluded, personOnly, withheld } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
     entry.excluded = excluded
     // Code rule (R3/R5): nothing on this page may be chosen and something was withheld as the person's own control (submit, payment,
     // permission, delete). There is nothing to judge, so no request is made: the step is the person's. Real measurement (2026-11-25):
@@ -712,7 +740,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
         if (action.needsText) return finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100) })
         attemptedRefs.add(action.args.ref)
-        const done = await act(entry, action.tool, action.args)
+        const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
         if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`) }
         else return finish('escalated', { reason: 'tool_failed', code: done.code })
         continue
@@ -754,7 +782,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
           return finish('escalated', { reason: action.escalate, observationId,
             suggestion: { ref: option.item.element.ref, option: option.value, expectedTarget: expectedTargetOf(option.item.element) } })
         }
-        const done = await act(entry, action.tool, action.args)
+        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option) })
         if (!done.ok) {
           if (done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue

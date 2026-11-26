@@ -346,10 +346,13 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
     // Reflex and Decisions gating is identical to the tool: mode on and a key, or nothing is called.
     // The account the run belongs to (history records are scoped to it).
     currentOwnerKey() { const key = getOwnerKey(); return typeof key === 'string' && key ? key : null },
-    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null, signal = undefined }) {
+    // a1 (the task tool, egdesk-browser-task-tool.mjs): `values` the conversation model named (typed into the fields they match; joined to a resumed task's pending ones) and
+    // `textComboboxes` (a search box that announces itself as a combobox on a <textarea>, as Google's does, is a text field, as it is for the page tools). Neither is given by the direct entry.
+    async runDirectTask(run, { cardId, goal, values = null, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null, signal = undefined, textComboboxes = false, onPage = null }) {
       if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
       const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId)
-      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(today ? { today } : {}), ...(signal ? { signal } : {}),
+      const result = await runReflex({ cardId, goal, ...(values && typeof values === 'object' && Object.keys(values).length ? { values } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}), ...(typeof onPage === 'function' ? { onPage } : {}),
+        ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(today ? { today } : {}), ...(signal ? { signal } : {}),
         callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
       if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })
       return result

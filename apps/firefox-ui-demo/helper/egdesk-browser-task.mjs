@@ -403,6 +403,26 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
   }
 }
 
+// a1 ('교대' round): the step event contract. One event per page action of a browser task (the direct entry's loop and the task tool alike); lane L1 draws
+// it, lane L5 carries it through the runtime. Closed words, the element's own short name and the NAME of a typed value only: never the text typed, an
+// address or page text. by: 'decision' (the objective loop decided the step) | 'model' (the conversation model chose it, the task tool's guidance).
+// status: only on the task tool's last event of a call (op 'end'). A wait is part of the step before it: no event of its own.
+export const STEP_EVENT_OPS = Object.freeze(['open', 'submit', 'press', 'fill', 'scroll', 'end'])
+const EVENT_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
+export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision', status = null } = {}) {
+  if (!task || !info || typeof info !== 'object') return null
+  const end = info.op === 'end'
+  if (!end && typeof info.action !== 'string' && typeof info.failed !== 'string') return null
+  if (!STEP_EVENT_OPS.includes(info.op)) return null
+  const ms = Number.isFinite(info.stepMs) ? info.stepMs : Number.isFinite(info.ms) ? info.ms : null
+  return Object.freeze({ taskId: task.taskId, cardId: cardId ?? task.cardId ?? null, seq: Number.isSafeInteger(seq) ? seq : 0, op: info.op,
+    target: typeof info.target === 'string' && info.target ? compactText(info.target, 40) : null,
+    valueName: typeof info.valueName === 'string' && info.valueName ? compactText(info.valueName.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) || null : null, // a field's own option value as the name ('[F1] 검색') reads as its label
+    ok: info.ok === true, ms: ms === null ? null : Math.max(0, Math.round(ms)), by: by === 'model' ? 'model' : 'decision',
+    ...(typeof info.code === 'string' && EVENT_CODE.test(info.code) ? { code: info.code } : {}),
+    ...(typeof status === 'string' && EVENT_CODE.test(status) ? { status } : {}) })
+}
+
 const CANNOT = new Set(['blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_rejected'])
 const PUBLIC_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
 const tally = (task, result) => {
@@ -507,7 +527,8 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
 // pageTextInNote(): whether this run's models may receive Browser data (the run's egress gate, page_text); off by default.
 // cardTextInEntry(): whether the entry may quote what each card shows (the run's egress gate, page_text); off by default.
 // inRunChange(): whether a message that replaces the task is recognised (the in-run messages flag); off by default.
-export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false } = {}) {
+// onStepEvent(run, event) (a1, optional): each page action as the step event contract (taskStepEvent); an observer only, it never changes the task.
+export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false, onStepEvent = null } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -549,6 +570,11 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
     }
   }
 
+  function stepEvent(run, task, info) {
+    if (typeof onStepEvent !== 'function') return
+    try { const event = taskStepEvent(task, info, { seq: (task.eventSeq ?? 0) + 1 }); if (event) { task.eventSeq = event.seq; onStepEvent(run, event) } } catch { /* an observer never affects the task */ }
+  }
+
   async function loop(run, task, hosts) {
     if (!task.cardHost && typeof hosts?.[task.cardId] === 'string') task.cardHost = hosts[task.cardId].toLowerCase() // the card's host, for the brief
     // Segments of a few steps; the task's total budget survives pauses.
@@ -560,7 +586,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       const controller = new AbortController()
       task.abort = controller
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
-        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info), today: localDay(now()), signal: controller.signal })
+        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => { store.progress?.(task, info); stepEvent(run, task, info) }, today: localDay(now()), signal: controller.signal })
       if (task.abort === controller) task.abort = null
       task.liveStep = 0
       recordSteps(result)
