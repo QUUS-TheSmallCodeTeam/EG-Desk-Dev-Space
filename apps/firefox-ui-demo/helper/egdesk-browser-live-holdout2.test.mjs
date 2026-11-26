@@ -10,6 +10,8 @@ import { ENTRY_ANSWER_ASK, ENTRY_PAGES_HEADING, ENTRY_WEB_ASK } from './egdesk-b
 import { HOLDOUT2_PAGES, HOLDOUT2_PHASE_DEFS, holdout2Checks } from './egdesk-browser-live-holdout2.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["all seven pre-registered phases, stand-in: every code-determ","c26 stuck plan: the c24 form page and the settings error pag","c27 entry plan: seven entry requests, no step request, under","c28 entry plan v2: four entry requests under 2k; the members","c29 entry plan v3: the same four entry requests under the tw"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const PREREG = readFileSync(new URL('../scripts/egdesk-browser-live-holdout2-preregistration.md', import.meta.url), 'utf8')
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'

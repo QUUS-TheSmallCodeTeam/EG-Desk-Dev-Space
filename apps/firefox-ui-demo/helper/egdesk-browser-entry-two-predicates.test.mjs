@@ -6,6 +6,8 @@ import { ENTRY_ANSWER, ENTRY_ANSWER_ASK, ENTRY_WEB, ENTRY_WEB_ASK, createBrowser
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { triageTurn } from './egdesk-turn-memory.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["c33: through the entry the real numbers end as an error_page"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const cards = [{ cardId: 'card', host: 'streamly.example.test', title: '멤버십 관리 | 스트리밍플러스', shows: ['멤버십 관리', '이용 중인 요금제: 프리미엄', '다음 결제일: 2026-12-14'] }]
 const P = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { type: 'predicate', probability: v }]))

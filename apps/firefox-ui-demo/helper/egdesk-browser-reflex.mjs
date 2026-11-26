@@ -380,17 +380,31 @@ export function reflexActionArgs(option, { cardId, observationId, snapshot, text
 // the page body; a value that looks like a credential is never listed. Options, fields and the finished page's text for the caller's code still come from the real snapshot.
 const CONTROL_WORD = Object.freeze({ link: 'link', button: 'button', textbox: 'text field', searchbox: 'search field', search: 'search field', email: 'text field', number: 'number field', combobox: 'list or field', tab: 'tab', checkbox: 'check box', radio: 'option', switch: 'switch', select: 'list', listbox: 'list', slider: 'slider', menuitem: 'menu item', option: 'option' })
 export const MAX_CONTROL_LINES = 40
-export function withoutPageText(snapshot) {
-  const lines = [`Page title: "${compactText(typeof snapshot?.title === 'string' ? snapshot.title : '', 120).replace(/"/g, "'")}" (the page's own text is not sent; its controls are listed instead)`]
-  for (const element of (Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []).slice(0, MAX_CONTROL_LINES)) {
-    if (!record(element)) continue
-    const label = compactText(element.label, 60)
-    if (!label) continue
-    const role = String(element.role ?? '')
-    const value = role !== 'password' && !SENSITIVE_LABEL.test(label) && typeof element.value === 'string' && element.value && element.value !== element.label ? compactText(element.value, 30) : ''
-    lines.push(`${CONTROL_WORD[role] ?? 'control'}: ${label}${value ? ` (now "${value.replace(/"/g, "'")}")` : ''}${element.disabled === true ? ' (disabled)' : ''}`)
+// a1 (Main 17:1x; the person was told at 15:58 "본문 글은 보내지 않습니다"): ONE flag for every Decision request of the objective loop, the direct entry and the task tool. Off (the default):
+// the page's own text is never sent, its title and controls are (withoutPageText; the entry quotes a card's controls instead of its first lines). On: the page text as before.
+export const PAGE_TEXT_FLAG = 'EGDESK_BROWSER_TASK_PAGE_TEXT'
+export const pageTextOn = (env = process.env) => { try { return env?.[PAGE_TEXT_FLAG] === 'on' } catch { return false } }
+// The controls are those the loop's own candidate rule lists (buildReflexCandidates): its options, the controls only the person may operate that have no action (a toggle, a list), and
+// links to another site. A control withheld as a payment, permission, delete or writing submit, and a credential or code field, is never named: only counted, in closed words.
+export function controlLines(snapshot, { limit = MAX_CONTROL_LINES, textComboboxes = false } = {}) {
+  const built = buildReflexCandidates(snapshot, { textComboboxes })
+  const line = (role, label, value = '') => `${CONTROL_WORD[role] ?? 'control'}: ${compactText(label, 60)}${value ? ` (now "${compactText(value, 30).replace(/"/g, "'")}")` : ''}`
+  const out = []
+  for (const option of built.options) {
+    const element = option.item.element
+    const label = compactText(element.label, 60) || compactText(String(option.value).replace(/^\[[A-Z]\d+\]\s*/, ''), 60)
+    if (label) out.push(line(String(element.role ?? ''), label, option.item.kind === 'fill' && typeof element.value === 'string' && element.value !== element.label ? element.value : ''))
   }
-  return { ...snapshot, text: lines }
+  for (const control of built.personOnly) out.push(line(String(control.role ?? ''), control.label, control.value))
+  for (const link of built.offSite) out.push(`link to another site: ${compactText(link.label, 60)}`)
+  const credentials = built.excluded.sensitive + (Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements.filter(element => String(element?.role ?? '') === 'password').length : 0)
+  const withheld = [credentials ? `${credentials} code or password field${credentials > 1 ? 's' : ''}` : null,
+    built.excluded.gated ? `${built.excluded.gated} control${built.excluded.gated > 1 ? 's' : ''} only the person may use (payment, permission, delete or a submit that writes)` : null].filter(Boolean)
+  return [...out.slice(0, Math.max(0, limit - (withheld.length ? 1 : 0))), ...(withheld.length ? [`Not named here: ${withheld.join(', ')}`] : [])]
+}
+export function withoutPageText(snapshot) {
+  const title = compactText(typeof snapshot?.title === 'string' ? snapshot.title : '', 120).replace(/"/g, "'")
+  return { ...snapshot, text: [`Page title: "${title}" (the page's own text is not sent; its controls are listed instead)`, ...controlLines(snapshot)] }
 }
 
 function visibleText(snapshot) {
@@ -590,7 +604,7 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
-  textComboboxes = false, onPage = null, valuesFirst = false, pageText = true } = {}) {
+  textComboboxes = false, onPage = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
