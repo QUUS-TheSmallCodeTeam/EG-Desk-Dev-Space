@@ -4,6 +4,8 @@ import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(name => name.startsWith('B-10')) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const marker = 'B10_SYNTHETIC_OBSERVATION'
 const url = 'https://example.test/b10'

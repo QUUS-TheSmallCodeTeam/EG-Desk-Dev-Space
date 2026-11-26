@@ -6,6 +6,8 @@ import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { buildReflexCandidates, runBrowserReflex, localDay } from './egdesk-browser-reflex.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["the three family plans are pre-registered within the hard li","(a) statement (c20): the card is named by code from its titl","(b) delivery: the recorded order number in another form is a","(c) settings (c23, v5): the toggles are never offered or act"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 // L8 c19 (generalisation): three task families unlike the invoice portal. Nothing is sent: every fetch is a local stand-in.
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'

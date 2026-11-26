@@ -14,6 +14,8 @@ import { NOTE_KEY } from './egdesk-real-engine-browser-answer-hook.mjs'
 import { checkBrowserLoop } from './egdesk-real-engine-browser-loop-hook.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["end to end on the fake engine: every harder flow ends as it "]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const tmp = t => { const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-loop2-')); t.after(() => fs.rmSync(base, { recursive: true, force: true })); return base }
 const SAYS = ['모래의 도시 반납 예정일 알려줘', '내 다음 공연 예매 내역 알려줘', '회의실 대관 신청해줘', '내 대기 순번 몇 번째야?', '다음 연금 수령일 언제야?']

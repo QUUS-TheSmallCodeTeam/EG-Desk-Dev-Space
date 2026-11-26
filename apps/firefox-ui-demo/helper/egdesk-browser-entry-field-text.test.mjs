@@ -131,3 +131,28 @@ test('a1 a GET search whose url postcondition failed but whose result page loade
   const plain = await runBrowserReflex({ cardId: 'card', goal: MESSAGE, values: { '[F1] 검색': '장화 신은 고양이' }, valuesFirst: true, callTool: elsewhere.provider.reflexScope().callTool, client: elsewhere.provider.reflexScope().client, maxSteps: 4 })
   assert.equal(plain.outcome, 'done', 'an address the site did not extend passes its postcondition as before')
 })
+
+test('a1 data boundary: by default neither the entry nor its steps send the page\'s own text (the card is quoted by its controls); EGDESK_BROWSER_TASK_PAGE_TEXT=on sends it for both, as before', async t => {
+  const { PAGE_TEXT_FLAG } = await import('./egdesk-browser-reflex.mjs')
+  const sent = async () => {
+    const w = duck()
+    const entry = createDirectBrowserEntry({ provider: w.provider, store: createBrowserTaskStore(), fieldText: () => true, cardTextInEntry: () => true })
+    const out = await entry.handle({ run: w.run, conversationKey: 'dm', message: MESSAGE, hosts: { card: 'duckduckgo.com' }, titles: { card: 'DuckDuckGo' } })
+    const entryBody = JSON.stringify(w.requests.find(request => request.questions.some(q => q.name === 'browser_entry'))?.input ?? null)
+    const stepBodies = w.requests.filter(request => request.questions.some(q => q.name === 'next_step')).map(request => JSON.stringify(request.input)).join('\n')
+    return { out, entryBody, stepBodies }
+  }
+  delete process.env[PAGE_TEXT_FLAG]
+  const off = await sent()
+  assert.equal(off.out.status, 'done', 'the flow finishes without the page text')
+  assert.match(off.entryBody, /has the controls/, 'the card is quoted by its controls')
+  assert.doesNotMatch(off.entryBody, /shows \\"DuckDuckGo\\"/, 'no first line of the page')
+  assert.doesNotMatch(off.stepBodies, /샤를 페로의 동화/, 'no line of the results page body in any step')
+  assert.match(off.stepBodies, /the page's own text is not sent/)
+  process.env[PAGE_TEXT_FLAG] = 'on'
+  t.after(() => { delete process.env[PAGE_TEXT_FLAG] })
+  const on = await sent()
+  assert.equal(on.out.status, 'done')
+  assert.match(on.entryBody, /shows/, 'the first lines, as before')
+  assert.match(on.stepBodies, /샤를 페로의 동화/, 'the page text, as before')
+})

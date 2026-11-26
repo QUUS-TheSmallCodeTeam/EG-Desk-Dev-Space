@@ -9,6 +9,8 @@ import { familyAnswers } from './egdesk-browser-live-families.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { ENTRY_ANSWER_ASK, ENTRY_WEB_ASK } from './egdesk-browser-task.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["holdout2-v2: the membership request, entry then step, under ","the first steps of the five families are byte-identical to s"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 
 const PREREG = readFileSync(new URL('../scripts/egdesk-browser-live-c30-preregistration.md', import.meta.url), 'utf8')
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'

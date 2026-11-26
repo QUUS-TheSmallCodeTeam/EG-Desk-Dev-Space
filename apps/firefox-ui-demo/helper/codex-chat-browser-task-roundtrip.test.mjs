@@ -13,6 +13,8 @@ import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry } from './egdesk-browser-task.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["C5 c22 ride-along through the runtime quotes what the card s"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 const STEP = `decide:${['next_step', ...PS_NAMES, 'goal_met'].join('+')}`
 
 // L8/C11: the objective browser loop <-> chat round trip in the 'on' path of the REAL chat runtime under completed-messages-only

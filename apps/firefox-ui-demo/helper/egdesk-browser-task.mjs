@@ -1,4 +1,4 @@
-import { localDay } from './egdesk-browser-reflex.mjs'
+import { controlLines, localDay, pageTextOn } from './egdesk-browser-reflex.mjs'
 import { randomBytes } from 'node:crypto'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { hostOf, hrefIdentifiers, identifiersOf, labelKey, outcomeCandidate, priorFromMemory, safePath } from './egdesk-browser-task-memory.mjs'
@@ -93,11 +93,14 @@ const q = text => `"${String(text).replace(/"/g, "'")}"`
 // 0.19 (decided no), so the entry, as designed, did not enter. Nothing said what the page shows. R1: the card's predicate also quotes the
 // first lines the card shows now (its heading and the next lines, each quoted on its own), where the run may receive page text.
 const shownLines = card => (Array.isArray(card.shows) ? card.shows : []).map(line => compactText(String(line ?? ''), ENTRY_LINE_CHARS)).filter(Boolean).slice(0, ENTRY_LINES)
+// a1: with the page's own text withheld (PAGE_TEXT_FLAG off, the default) a card is quoted by its controls instead of its first lines (names and roles only, never a value)
+export const ENTRY_CARD_CONTROLS = 6, ENTRY_CARD_CONTROL_CHARS = 40
+const shownControls = card => (Array.isArray(card.controls) ? card.controls : []).map(line => compactText(String(line ?? ''), ENTRY_CARD_CONTROL_CHARS + 16)).filter(Boolean).slice(0, ENTRY_CARD_CONTROLS)
 const quoteIdentity = card => (card.title ? `${q(compactText(card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`)
 const quotePage = card => {
   const page = quoteIdentity(card)
-  const lines = shownLines(card)
-  return lines.length ? `${page}, which now shows ${lines.map(q).join(' / ')}` : page
+  const lines = shownLines(card), controls = shownControls(card)
+  return lines.length ? `${page}, which now shows ${lines.map(q).join(' / ')}` : controls.length ? `${page}, whose controls include ${controls.map(q).join(' / ')}` : page
 }
 // c23 (real, browser-live-settings-v4, 2026-11-25): on an error page of the site (the card shown as "오류 | 계정" with the error text) the card predicate
 // answered 0, so the entry did not enter and the person was never told that the page shows an error. What the card shows then says nothing
@@ -130,7 +133,7 @@ export const ENTRY_PAGES_HEADING = 'The pages the user has open:'
 export function entryEvidence(cards) {
   const list = (Array.isArray(cards) ? cards : []).slice(0, MAX_ENTRY_CARDS).filter(card => card && (card.title || card.host))
   if (!list.length) return []
-  return [ENTRY_PAGES_HEADING, ...list.map(card => { const lines = shownLines(card); return `- ${quoteIdentity(card)}${lines.length ? ` shows ${lines.map(q).join(' / ')}` : ''}` })]
+  return [ENTRY_PAGES_HEADING, ...list.map(card => { const lines = shownLines(card), controls = shownControls(card); return `- ${quoteIdentity(card)}${lines.length ? ` shows ${lines.map(q).join(' / ')}` : controls.length ? ` has the controls ${controls.map(q).join(' / ')}` : ''}` })]
 }
 /** The entry questions: the request predicate, then (unless code chose the card) one predicate per card, that page alone. */
 export function entryQuestions(cards, { codeCard = null } = {}) {
@@ -239,6 +242,11 @@ export async function observeCardLines({ provider, run, message, cards, replyTo 
       const scope = provider?.reflexScope?.(run, { callId: 'direct-entry-observe', namespace: null }, card.cardId)
       if (typeof scope?.callTool !== 'function') return card
       const observed = await scope.callTool('egdesk_browser_observe', { cardId: card.cardId })
+      if (!pageTextOn()) {
+        // a1: the page's own text is not sent (the default): the card's controls by name and role (a credential-like name never), so the card question still has the page
+        const controls = observed?.snapshot ? controlLines(observed.snapshot, { limit: ENTRY_CARD_CONTROLS }).map(item => compactText(item, ENTRY_CARD_CONTROL_CHARS + 16)) : []
+        return controls.length ? { ...card, controls } : card
+      }
       const text = Array.isArray(observed?.snapshot?.text) ? observed.snapshot.text : []
       return text.length ? { ...card, shows: text.slice(0, ENTRY_LINES) } : card
     } catch { return card }

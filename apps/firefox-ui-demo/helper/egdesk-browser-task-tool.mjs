@@ -1,7 +1,7 @@
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { NO_FIELD_TEXT, candidateSpans, pickFieldText } from './egdesk-browser-field-text.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
-import { buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { PAGE_TEXT_FLAG, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-browser-task.mjs'
 
 // L8 a1 ('교대' round, owner 2026-11-26: "decision model 이랑 대화형 모델이 같은 세션에서 같은 맥락으로 번갈아가면서 사용자 요청을 빠르게 수행"): the browser task as ONE tool
@@ -23,7 +23,7 @@ import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-
 export const BROWSER_TASK_TOOL_NAME = 'egdesk_browser_task' // provisional: the owner names model-facing tools; change it here only
 export const BROWSER_TASK_TOOL_FLAG = 'EGDESK_BROWSER_TASK_TOOL'
 export const browserTaskToolEnabled = env => env?.[BROWSER_TASK_TOOL_FLAG] === 'on'
-export const BROWSER_TASK_PAGE_TEXT_FLAG = 'EGDESK_BROWSER_TASK_PAGE_TEXT' // on: the loop's judgments may read the page's own text (default: names and values of controls only)
+export const BROWSER_TASK_PAGE_TEXT_FLAG = PAGE_TEXT_FLAG // one flag (egdesk-browser-reflex.mjs) for the tool, the loop and the direct entry: on = the page's own text may be sent
 export const BROWSER_TASK_STATUSES = Object.freeze(['done', 'needs_value', 'needs_guidance', 'human_step', 'cannot'])
 export const BROWSER_TASK_LIMITS = Object.freeze({ goal: 500, values: 20, valueName: 80, valueChars: 500, choose: 40, cardId: 160, options: 6, optionLabel: 60, spans: 60, spanWords: 6, message: 600, segment: 6 })
 export { NO_FIELD_TEXT, candidateSpans, pickFieldText } // a1: the span choice lives in egdesk-browser-field-text.mjs (the direct entry uses it too)
@@ -260,7 +260,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }
       const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState: task.state,
-        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, actor: 'decision', ...(pageText === true ? {} : { pageText: false }) })
+        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, actor: 'decision', pageText: pageText === true })
       values = {}
       task.state = record(out?.state) ? out.state : task.state
       task.steps += Array.isArray(out?.steps) ? out.steps.length : 0

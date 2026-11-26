@@ -81,6 +81,8 @@ test('two cards, each quoting its own lines: the grouped request passes the grou
 
 // ---- c22: the ride-along questions (appended to the turn-start request) are built exactly like the standalone entry's ----
 import { decideBrowserEntry, observeCardLines, rideAlongEntry } from './egdesk-browser-task.mjs'
+import { pageTextFor } from './egdesk-page-text.fixture.mjs'
+pageTextFor(["on: one observation per card (a read, no Decision request); ","ride-along, on: one observation per card, the same quoting a","through the entry: the follow-up enters an error page and th","c27: the request predicate sees the open pages (title, site,"]) // a1: these pin what was sent WITH the page text (the flag on for them only; the default is off)
 const RIDE_CARDS = [{ cardId: 'card', host: 'account.example.test', title: '알림 설정 | 계정' }]
 const rideProvider = (calls = []) => ({ reflexScope: (_run, _call, cardId) => ({ callTool: async (name, args) => { calls.push([name, args.cardId, cardId]); return { observationId: 'o', snapshot: { text: SHOWS } } } }) })
 test('ride-along, off (the run may not receive page text): the questions are the c21 ones byte for byte and no card is observed', async () => {
