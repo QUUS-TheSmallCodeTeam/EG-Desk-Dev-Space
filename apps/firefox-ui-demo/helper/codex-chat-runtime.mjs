@@ -5633,8 +5633,9 @@ export class CodexChatRuntime {
   }
 
   /**
-   * The direct entry over a run (the pre-turn quiet run or a live run): the options both entry paths share. onStep(task, info): the loop's observer hook (the store's
-   * progress hook, egdesk-browser-task.mjs), given only when alternating. The run's egress gate decides what of the page reaches the note and the entry.
+   * The direct entry over a run (the pre-turn quiet run or a live run): the options both entry paths share. onStep: the loop's observer, given only when alternating;
+   * it hears the store's progress hook (task, info) (egdesk-browser-task.mjs) and, should the entry take an onStep option of its own, that one too (a step heard twice
+   * is shown once). The run's egress gate decides what of the page reaches the note and the entry.
    */
   directBrowserEntry(run, { onStep = null } = {}) {
     const cfg = this.decisionContext?.browserEntry, store = this.browserTasks() ?? (this.browserTaskStore ??= createBrowserTaskStore({ now: this.now }))
@@ -5645,14 +5646,18 @@ export class CodexChatRuntime {
       // c20: the finished task's status text goes into the note only where this run's models may receive Browser data; c21: the entry quotes the first lines each card shows, same gate
       pageTextInNote: pageText, cardTextInEntry: pageText,
       // c23: with in-run messages on, a message that replaces the task is recognised (the same flag, EGDESK_INRUN_MESSAGES)
-      inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn() })
+      inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn(), ...(onStep ? { onStep } : {}) })
   }
 
   /** a1: the loop's step hook for a run (or the pending send before the turn exists), or null while not alternating. One sink per entry call, so a step reported twice is shown once. */
   browserStepHook(target, phase) {
     if (!this.browserAlternateOn()) return null
     const sink = stepSink(details => this.emitTransient(target, BROWSER_TASK_STEP_EVENT, details))
-    return (task, info) => this.browserTaskStep(target, info, { taskId: task?.taskId ?? null, cardId: task?.cardId ?? null, phase, sink })
+    // (task, info) from the store's hook, or (info) from an onStep of the loop's own: the step's own ids then
+    return (first, second) => {
+      const task = second === undefined ? null : first, info = second === undefined ? first : second
+      return this.browserTaskStep(target, info, { taskId: task?.taskId ?? null, cardId: task?.cardId ?? null, phase, sink })
+    }
   }
 
   // u1: one more tool provider after construction (the bridge's optional wiring); the catalog reads this.toolProviders at every turn

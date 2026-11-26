@@ -327,3 +327,15 @@ test('prepareTurn is never in the way: an unknown or running conversation is ski
   assert.equal(w.transports.length, 1); assert.deepEqual(w.earlyWrites, [], 'the turn waited for the start in flight')
   assert.deepEqual(await w.claude.prepareTurn({ threadId }), { status: 'skipped' }, 'a turn is running')
 })
+
+test('the loop\'s step hook hears both ways a loop may report (the store hook (task, info) and an onStep (info) of its own) and shows a step heard twice once', { timeout: 20000 }, async t => {
+  const w = claudeWorld(t)
+  const target = { quiet: true, requestId: 'req-x', clientThreadId: 'ui-claude', conversationId: null, engine: { id: 'claude' } }
+  const hook = w.chat.browserStepHook(target, 'entry')
+  const info = { taskId: 'bt_77', cardId: 'card', seq: 2, op: 'press', target: '검색', ok: true, ms: 120, by: 'code' }
+  hook({ taskId: 'bt_77', cardId: 'card' }, info); hook(info)
+  hook({ taskId: 'bt_77', cardId: 'card' }, { ...info, seq: 3, op: 'type', valueName: '검색어' })
+  assert.deepEqual(w.steps().map(e => [e.requestId, e.runId, e.details.seq, e.details.op]), [['req-x', null, 2, 'press'], ['req-x', null, 3, 'type']])
+  const off = claudeWorld(t, { flag: 'on' })
+  assert.equal(off.chat.browserStepHook(target, 'entry'), null, 'not alternating: no hook, the store is the store')
+})
