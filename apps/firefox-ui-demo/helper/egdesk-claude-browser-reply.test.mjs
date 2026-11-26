@@ -100,6 +100,18 @@ test('hold: with the draft check off, a browser turn\'s talk before a tool is a 
   assert.deepEqual(notes(w, sent), [NARRATION])
 })
 
+test('first human-step turn: the MCP response after Claude reads a card ends with the existing reply rule, not a new chat bubble', async t => {
+  const w = world(t, { hold: true })
+  w.chat.browserEntryMode = () => 'alternate'
+  w.chat.runBrowserEntryOn = async () => ({ note: JSON.stringify({ egdesk_browser_task: { status: 'cannot_proceed', code: 'human_step' } }) })
+  const sent = await w.browserSend('로그인해줘')
+  await play(w, [{ tool: 'egdesk_card_read', args: {} }, QUESTION]); await settle(w, sent)
+  const response = w.transports.at(-1).replies.map(r => (r.write?.response?.response ?? r.response)?.mcp_response?.result).find(r => r?.content)
+  assert.deepEqual(response.content.at(-1), { type: 'text', text: REPLY_LANGUAGE })
+  assert.ok(response.content.length > 1)
+  assert.deepEqual(bubbles(w), [QUESTION])
+})
+
 test('hold: several tools with talk between them, ending in a question to the person (a value is missing): one bubble, the question; every line before it is a work note', async t => {
   const w = world(t, { hold: true })
   const sent = await w.browserSend('검색해줘')

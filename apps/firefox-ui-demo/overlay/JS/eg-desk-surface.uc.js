@@ -25032,6 +25032,9 @@
         if (typeof activityLease?.deniedBy === 'string') rejected.inputDeniedBy = activityLease.deniedBy;
         const timing = browserToolTiming({ receivedAtMs, authorizedAtMs: activityLease?.authorizedAtMs }, actor?.timing);
         if (rejected.dispatchPhase === 'not-dispatched') {
+          // A pause can revoke the lease AFTER dispatch preflight, before any input. Keep unknown/dispatched outcomes unchanged.
+          const held = browserToolUserHoldRefusal(request, receivedAtMs);
+          if (held) rejected.error = held.error;
           for (const key of BROWSER_TOOL_PERFORM_MS) delete timing[key];
           if (timing.performCallsBefore !== timing.performCallsAfter) {
             delete timing.performCallsBefore; delete timing.performCallsAfter;
