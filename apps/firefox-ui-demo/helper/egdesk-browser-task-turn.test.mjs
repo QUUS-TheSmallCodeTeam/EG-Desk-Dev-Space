@@ -18,7 +18,9 @@ import { createBrowserTaskStore } from './egdesk-browser-task.mjs'
 import { pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 import { entryWire } from './egdesk-browser-entry.fixture.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
-import { BROWSER_TASK_STEP_EVENT, BROWSER_TASK_STEP_FIELDS, BROWSER_TASK_TOOL_NAME, browserTaskRule, browserTaskStepDetails, stepSink, withBrowserTaskRule, withStepHook } from './egdesk-browser-task-turn.mjs'
+import { BROWSER_TASK_TOOL_NAME, browserStepFor, browserTaskRule, noteWords, withBrowserTaskRule } from './egdesk-browser-task-turn.mjs'
+import { createBrowserTaskTool } from './egdesk-browser-task-tool.mjs'
+import { callTool } from './egdesk-claude-browser-world.fixture.mjs'
 
 const KEY = 'egd-synthetic-not-a-key-0011'
 const OWNER = 'claude:fixture-owner'
@@ -80,19 +82,73 @@ function portal() {
   return { timeline, acts, client, browser }
 }
 
-const source = (n, threadId) => [{ id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
-  sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${O}/invoices` }, browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 },
+// The real-window case of 16:14 (Main): "덕덕고 카드에서 장화 신은 고양이 검색해줘" on a DuckDuckGo Card. The home page has a search box and a read-only GET search
+// button; Decisions answers as the real one did (a web task on this card; on the home page the step needs text nobody gave), and, when asked, chooses the span.
+const D = 'https://duckduckgo.com'
+const DUCK_MSG = '덕덕고 카드에서 장화 신은 고양이 검색해줘'
+function duckSite() {
+  const timeline = [], acts = []
+  let docSeq = 1, cur = { url: `${D}/`, documentId: 'd1', revision: 1, value: '' }
+  const submitUrl = () => `${D}/?q=${encodeURIComponent(cur.value)}`
+  const elements = () => (new URL(cur.url).searchParams.get('q') === null ? [
+    { ref: 'q', role: 'searchbox', tag: 'input', label: '검색', href: '', value: cur.value },
+    { ref: 's', role: 'button', tag: 'button', label: '검색', href: '', value: '', nav: { type: 'submit', sensitiveRegion: false, regionLabel: '', form: { method: 'get', fields: ['search', 'submit'], sensitive: false, submitUrl: submitUrl() }, controls: null } },
+    { ref: 'p', role: 'link', tag: 'a', label: '개인정보 보호', href: `${D}/privacy`, value: '' },
+  ] : [{ ref: 'r1', role: 'link', tag: 'a', label: '장화 신은 고양이 - 나무위키', href: 'https://namu.wiki/w/x', value: '' }])
+  const snap = () => ({ cardId: 'card', documentId: cur.documentId, revision: cur.revision, url: cur.url, readyState: 'complete', title: new URL(cur.url).searchParams.get('q') === null ? 'DuckDuckGo' : '장화 신은 고양이 at DuckDuckGo',
+    text: new URL(cur.url).searchParams.get('q') === null ? ['DuckDuckGo', '개인정보 보호'] : ['장화 신은 고양이', '장화 신은 고양이 - 나무위키'], viewport: { width: 300, height: 200, devicePixelRatio: 1 }, interactiveElements: elements() })
+  const client = createDecisionClient({ recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY,
+    fetchImpl: async (_e, { body }) => {
+      const request = JSON.parse(body), names = request.questions.map(q => q.name), evidence = request.input.map(item => item.content).join('\n')
+      timeline.push(`decide:${names[0]}`)
+      const answers = []
+      if (names.includes('browser_entry')) for (const q of request.questions) answers.push({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry_answer' ? 0.02 : 0.95 })
+      else if (names.includes('field_text')) { const q = request.questions[0]; answers.push(choice('field_text', q.choices.some(c => c.value === '장화 신은 고양이') ? '장화 신은 고양이' : q.choices.at(-1).value, 0.95)) }
+      else if (names.includes('next_step')) {
+        const q = request.questions.find(item => item.name === 'next_step'), onHome = /URL: https:\/\/duckduckgo\.com\/\n/.test(`${evidence}\n`), typed = /filled \[F1\]/.test(evidence)
+        answers.push(choice('next_step', !onHome ? 'goal_met' : typed ? q.choices.find(c => c.value.startsWith('[B')).value : 'needs_free_text', 0.95), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onHome ? 0.02 : 0.95 })
+      } else for (const q of request.questions) answers.push(q.type === 'choice' ? choice(q.name, q.choices[0].value, 0.95) : { name: q.name, type: 'predicate', probability: 0.02 })
+      return { ok: true, text: async () => JSON.stringify({ answers }) }
+    } })
+  const transport = { runs: new Map(), hasClient: id => id === 'ui',
+    bindRun: (id, thread, transportId) => { if (transport.runs.has(id)) throw new Error('already bound'); transport.runs.set(id, { clientThreadId: thread, transportId, ownerKey: OWNER }) },
+    unbindRun: id => transport.runs.delete(id),
+    async sendToUi(request) {
+      timeline.push(`ui:${request.kind}`)
+      const reply = { requestId: request.requestId }
+      if (request.kind === 'bind') return { ...reply, status: 'bound', binding: { cardId: 'card', cardEpoch: 'epoch', profileId: 'fixture', accountId: '', userContextId: 0, url: cur.url, engineAccountKey: OWNER, authorityEpoch: 1 } }
+      if (request.kind === 'observe') { const wait = request.options?.wait; return { ...reply, status: 'observed', snapshot: wait ? { ...snap(), wait: { for: wait.for, outcome: 'met', elapsedMs: 1 } } : snap() } }
+      if (request.kind === 'act') {
+        const a = request.action; acts.push({ type: a.type, ref: a.ref ?? null })
+        if (a.type === 'fill') cur = { ...cur, value: a.text, revision: cur.revision + 1 }
+        if (a.type === 'navigate') cur = { url: a.url, documentId: `d${++docSeq}`, revision: 1, value: '' }
+        return { ...reply, status: 'acted', receipt: { after: snap(), observation: {}, dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true, inputRoute: a.type === 'fill' ? 'dom-value-setter' : 'chrome-load-uri' } } }
+      }
+      if (request.kind === 'cancel') return { ...reply, status: 'cancelled' }
+      return { ...reply, status: 'rejected' }
+    } }
+  const browser = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, decision: { mode: () => 'on', configured: () => true, client,
+    recipient: () => decisionTopicRecipient(KEY, 1, undefined, client.model), generation: () => 0 } })
+  return { timeline, acts, client, browser, get cur() { return cur }, uri: `${D}/` }
+}
+
+const source = (n, threadId, uri = `${O}/invoices`) => [{ id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+  sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri }, browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 },
   browserToolSelection: { token: `token-${n}`, threadId } }]
 
 /** The bridge's Claude browser wiring in miniature (harness on, page tools on), with the direct entry configured by the bridge's own wiring from the flag value. */
-function claudeWorld(t, { flag = 'alternate', startDelayMs = 0 } = {}) {
+function claudeWorld(t, { flag = 'alternate', startDelayMs = 0, site = 'portal', hold = false, taskTool = false } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-l5a1-claude-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
-  const p = portal(), events = [], transports = [], earlyWrites = []
+  const p = site === 'duck' ? duckSite() : portal(), events = [], transports = [], earlyWrites = [], published = []
   let chat = null
   const wiring = createOwnToolsWiring({ env: { EGDESK_OWN_TOOLS: 'on', EGDESK_CLAUDE_HARNESS: 'on', PATH: '/usr/bin:/bin', HOME: '/home/synthetic' }, dataDir,
     spawn: () => { throw new Error('no command runs here') }, getChat: () => chat, home: '/home/synthetic', gitStatus: async () => '' })
-  const page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => p.browser.dispatch(run, event) }, ledger: wiring.ledger })
+  // taskTool: L8's browser task tool beside the page tools, wired as the bridge wires it (egdesk-page-tools-wiring.mjs): the runtime's message, step and store hooks
+  let page = null
+  const tool = taskTool ? createBrowserTaskTool({ browser: p.browser, messageOf: run => chat?.browserTaskMessage?.(run) ?? null,
+    onStep: (run, event) => page?.runtime?.browserTaskStep?.(run, event, { taskId: event.taskId, cardId: event.cardId }), storeOf: () => page?.runtime?.browserTasks?.() ?? null }) : null
+  page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => p.browser.dispatch(run, event) }, ledger: wiring.ledger, ...(tool ? { taskTool: tool } : {}) })
   const claude = createClaudeEngineAdapter({
     snapshot: () => ({ installed: true, version: '2.1.328', versionStatus: 'untested', auth: { status: 'signedIn', method: 'apiKey', account: 'synthetic', label: 'Claude API' } }),
     env: {}, defaultCwd: base, resolveExecutable: () => '/fake/claude',
@@ -110,8 +166,11 @@ function claudeWorld(t, { flag = 'alternate', startDelayMs = 0 } = {}) {
           setImmediate(() => {
             if (!this.inited) { this.inited = true; options.onMessage({ type: 'system', subtype: 'init', session_id: sid, model: 'claude-test', cwd: options.cwd, claude_code_version: '2.1.328', apiKeySource: 'ANTHROPIC_API_KEY',
               ...(options.bounded ? { permissionMode: 'dontAsk', tools: [], mcp_servers: [{ name: 'egdesk', status: 'connected' }], capabilities: [] } : {}) }) }
-            options.onMessage({ session_id: sid, type: 'assistant', parent_tool_use_id: null, message: { id: `m-${this.sent.length}`, role: 'assistant', content: [{ type: 'text', text: '네' }], usage: { input_tokens: 3, output_tokens: 2 } } })
-            options.onMessage({ session_id: sid, type: 'result', subtype: 'success', is_error: false })
+            const finish = () => {
+              options.onMessage({ session_id: sid, type: 'assistant', parent_tool_use_id: null, message: { id: `m-${this.sent.length}`, role: 'assistant', content: [{ type: 'text', text: '네' }], usage: { input_tokens: 3, output_tokens: 2 } } })
+              options.onMessage({ session_id: sid, type: 'result', subtype: 'success', is_error: false })
+            }
+            if (hold) this.finish = finish; else finish()
           })
         } }
       transports.push(transport); return transport
@@ -121,18 +180,18 @@ function claudeWorld(t, { flag = 'alternate', startDelayMs = 0 } = {}) {
   const browserEntry = createBrowserEntryConfig({ flag: () => flag, getAdapter: () => null, wiki: () => null })
   chat = new CodexChatRuntime({ engines: [codex, claude], store, requireStore: true, getOwnerKey: () => OWNER, toolProviders: [p.browser, page, ...wiring.toolProviders], ownTools: wiring.ownTools,
     verifyFile: async () => null, emit: event => events.push(event), emitLegacy: () => {},
-    decisionContext: { mode: () => 'on', configured: () => true, client: p.client, settingsGeneration: () => 0, budgetMs: 800, collect: async () => [], browserEntry } })
+    decisionContext: { mode: () => 'on', configured: () => true, client: p.client, settingsGeneration: () => 0, budgetMs: 800, collect: async () => [], browserEntry,
+      browserSteps: { publish: step => { published.push(step); return true } } } }) // lane L1's channel, as the bridge gives it
   const unsubscribe = claude.subscribe({ notification: (_, m) => chat.handleNotification(m), serverRequest: (_, m) => chat.handleServerRequest(m), connection: (id, s) => chat.setConnection(id, s.ready, s) })
   claude.syncStatus(); chat.setConnection('claude', true, {})
   const drain = async () => { await chat.queue; await tick(); await chat.queue }
   t.after(async () => { unsubscribe(); await claude.dispose(); await drain() })
   let n = 0
   const send = (message, extra = {}) => { n++; return chat.send({ message, engineId: 'claude', clientThreadId: 'ui-claude', requestId: `req-${n}`, browserTransportId: 'ui',
-    executionPolicy: { mode: 'browserBounded' }, selectedSources: source(n, 'ui-claude'), ...extra }) }
+    executionPolicy: { mode: 'browserBounded' }, selectedSources: source(n, 'ui-claude', p.uri), ...extra }) }
   const runOf = sent => chat.runs.get(`${sent.conversationId}/${sent.runId}`)
   const settled = async sent => { await until(() => ['completed', 'failed', 'interrupted'].includes(runOf(sent)?.status)); await drain(); return runOf(sent) }
-  const steps = () => events.filter(e => e.event === BROWSER_TASK_STEP_EVENT)
-  return { ...p, chat, claude, transports, events, send, settled, runOf, steps, page, earlyWrites }
+  return { ...p, chat, claude, transports, events, send, settled, runOf, drain, page, earlyWrites, published, get cur() { return p.cur } }
 }
 
 const noteOf = content => {
@@ -144,97 +203,115 @@ const noteOf = content => {
 test('the rule: the same words for both engines; it names the browser task tool only when the turn offers it; it rides beside the note, which stays as it is', () => {
   const plain = browserTaskRule(), tool = browserTaskRule({ toolOffered: true })
   assert.ok(!plain.includes(BROWSER_TASK_TOOL_NAME)); assert.ok(tool.includes(BROWSER_TASK_TOOL_NAME))
-  for (const text of [plain, tool]) for (const word of ['done', 'need_context', 'cannot_proceed', 'one message', 'one short question']) assert.ok(text.includes(word), word)
+  for (const text of [plain, tool]) for (const word of ['done', 'needs_value', 'needs_guidance', 'need_context', 'human_step', 'cannot_proceed', 'one message', 'one short question']) assert.ok(text.includes(word), word)
   assert.doesNotMatch(plain + tool, /https?:|제출/, 'no address and no submit word (the C9 note checks)')
   const note = JSON.stringify({ egdesk_browser_task: { id: 'bt_1', status: 'done', stepsDone: 2, actions: { fill: 0 }, next: 'report_to_user' } })
   const value = JSON.parse(withBrowserTaskRule(note, { toolOffered: true }))
   assert.deepEqual(value.egdesk_browser_task, JSON.parse(note).egdesk_browser_task, 'the note is untouched'); assert.equal(value.rule, tool)
   for (const other of ['not json', '[1]', '{"x":1}', null, 3]) assert.equal(withBrowserTaskRule(other), other, 'anything else is returned as it is')
+  assert.deepEqual(noteWords(note), { id: 'bt_1', status: 'done', code: null }); assert.equal(noteWords('x'), null)
 })
 
-test('a step for the screen: only the listed fields, checked; a typed value, an address or page text never leaves; the earlier loop shows only actions that changed something', () => {
-  const hostile = { taskId: 'bt_9', cardId: 'card', seq: 3, op: 'type', target: '  상품   검색  ', valueName: '검색어', ok: true, ms: 412.6, by: 'decision', status: 'running',
-    value: '우산', text: 'secret page line', url: 'https://shop.example.test/q?x=1', label: 'x', query: '우산' }
-  const details = browserTaskStepDetails(hostile, { phase: 'tool' })
-  assert.deepEqual(details, { taskId: 'bt_9', cardId: 'card', seq: 3, op: 'type', target: '상품 검색', valueName: '검색어', ok: true, ms: 413, by: 'decision', status: 'running', phase: 'tool' })
-  assert.deepEqual(Object.keys(details).filter(k => !BROWSER_TASK_STEP_FIELDS.includes(k)), [])
-  assert.doesNotMatch(JSON.stringify(details), /우산|secret|https?:/)
-  assert.equal(browserTaskStepDetails({ ...hostile, op: 'not a word!' }).op, undefined, 'a non-word operation is dropped')
-  assert.equal(browserTaskStepDetails({ seq: 1, op: 'press' }), null, 'no task: nothing to show')
-  assert.equal(browserTaskStepDetails('x', { taskId: 'bt_1' }), null)
-  // the earlier loop's reports ({ step, action }): a step start and reads/waits are not lines; an action is, under the screen's word
-  assert.equal(browserTaskStepDetails({ step: 1 }, { taskId: 'bt_1' }), null)
-  assert.equal(browserTaskStepDetails({ step: 1, action: 'egdesk_browser_observe' }, { taskId: 'bt_1' }), null)
-  assert.deepEqual(browserTaskStepDetails({ step: 2, action: 'egdesk_browser_navigate' }, { taskId: 'bt_1', cardId: 'card', phase: 'entry' }), { taskId: 'bt_1', cardId: 'card', seq: 2, op: 'open', phase: 'entry' })
-  // once per (task, phase, seq) for a report with its own seq; the earlier loop's numbers repeat per segment, so they are never dropped
-  const shown = [], sink = stepSink(d => { shown.push(d); return true })
-  assert.equal(sink({ seq: 1, op: 'press' }, { taskId: 'bt_1', phase: 'tool' }), true); assert.equal(sink({ seq: 1, op: 'press' }, { taskId: 'bt_1', phase: 'tool' }), false)
-  assert.equal(sink({ step: 1, action: 'egdesk_browser_click' }, { taskId: 'bt_1', phase: 'entry' }), true); assert.equal(sink({ step: 1, action: 'egdesk_browser_click' }, { taskId: 'bt_1', phase: 'entry' }), true)
-  assert.equal(shown.length, 3)
-})
-
-test('the store hook: progress still updates the task first, the hook sees every report, every other method and the size are the store\'s own', () => {
-  const store = createBrowserTaskStore({ now: () => 1000 }), seen = []
-  const hooked = withStepHook(store, (task, info) => { seen.push([task.taskId, info.step]); throw new Error('a screen failure never reaches the loop') })
-  const task = hooked.create({ conversationKey: 'k', goal: 'g', cardId: 'card' })
-  assert.equal(hooked.size, 1); assert.equal(store.get(task.taskId), task)
-  hooked.progress(task, { step: 4, action: 'egdesk_browser_click' })
-  assert.equal(task.liveStep, 4, 'the store\'s own progress ran'); assert.deepEqual(seen, [[task.taskId, 4]])
-  assert.equal(withStepHook(store, null), store)
+test('a step for the screen (lane L1\'s shape from L8\'s step contract): the screen\'s words, the hand-over with its reason, only the listed fields; no typed value, address or page text', () => {
+  const ids = { clientThreadId: 'ui-claude' }
+  const hostile = { taskId: 'bt_9', cardId: 'card', seq: 3, op: 'fill', target: '  상품   검색  ', valueName: '검색어', ok: true, ms: 412, by: 'decision', value: '우산', text: 'secret page line', url: 'https://shop.example.test/q?x=1' }
+  assert.deepEqual(browserStepFor(hostile, ids), { clientThreadId: 'ui-claude', taskId: 'bt_9', seq: 3, op: 'fill', cardId: 'card', target: '상품 검색', valueName: '검색어', ok: true, ms: 412, by: 'decision' })
+  assert.doesNotMatch(JSON.stringify(browserStepFor(hostile, ids)), /우산|secret|https?:/)
+  const ops = ['open', 'submit', 'press', 'fill', 'scroll'].map(op => browserStepFor({ taskId: 'bt_1', seq: 1, op }, ids).op)
+  assert.deepEqual(ops, ['navigate', 'submit', 'click', 'fill', 'scroll'], 'L8 press is a button: the screen\'s click')
+  const end = (status, code) => { const step = browserStepFor({ taskId: 'bt_1', seq: 9, op: 'end', status, ...(code ? { code } : {}) }, ids); return [step.op, step.status ?? null, step.reason ?? null] }
+  assert.deepEqual(end('done'), ['done', 'done', null])
+  assert.deepEqual(end('need_context', 'detail_needed'), ['handoff', 'needs_value', 'needs_value'])
+  assert.deepEqual(end('needs_value'), ['handoff', 'needs_value', 'needs_value'])
+  assert.deepEqual(end('needs_guidance', 'uncertain'), ['handoff', 'low_confidence', 'low_confidence'])
+  assert.deepEqual(end('need_context', 'choice_needed'), ['handoff', 'needs_user', 'needs_user'])
+  assert.deepEqual(end('human_step'), ['handoff', 'human_step', 'human_step'])
+  assert.deepEqual(end('cannot', 'blocked'), ['blocked', 'cannot', null])
+  assert.equal(browserStepFor({ taskId: 'bt_1', seq: 1, op: 'wait' }, ids), null, 'a wait is no line'); assert.equal(browserStepFor({ seq: 1, op: 'fill' }, ids), null, 'no task')
+  assert.equal(browserStepFor({ taskId: 'bt_1', op: 'fill' }, ids), null, 'no order'); assert.equal(browserStepFor({ taskId: 'bt_1', seq: 1, op: 'fill' }, {}), null, 'no conversation')
+  assert.equal(browserStepFor({ taskId: 'bt_1', seq: 1, op: 'fill', by: 'model' }, ids).by, 'model')
 })
 
 // ---- Claude: the entry first, the same context, one answer ----
-test('a Claude room: with the entry on the Decision model goes first (one bind, the entry decision, one step), the closed note reaches Claude\'s turn, and nothing new is shown with plain "on"', { timeout: 20000 }, async t => {
+test('a Claude room, "on": the Decision model goes first (one bind, the entry decision, one step), the closed note reaches Claude\'s turn, Claude\'s run holds the same binding, and the pause is one hand-over step on L1\'s channel', { timeout: 20000 }, async t => {
   const w = claudeWorld(t, { flag: 'on' })
   const sent = await w.send(MSG); assert.equal(sent.accepted, true)
   await w.settled(sent)
   assert.deepEqual(w.timeline.filter(x => /^(ui:bind|decide:|claude:)/.test(x)), ['ui:bind', 'decide:browser_entry', 'decide:next_step', 'claude:process', 'claude:started', 'claude:turn'])
   const note = noteOf(w.transports[0].sent[0])
   assert.deepEqual([note.egdesk_browser_task.status, note.egdesk_browser_task.code, note.egdesk_browser_task.next], ['need_context', 'choice_needed', 'ask_user_in_chat'])
-  assert.equal(note.rule, undefined, '"on": the note as it always was'); assert.deepEqual(w.steps(), [])
+  assert.equal(note.rule, undefined, '"on": the note as it always was')
   assert.equal(w.transports[0].sent[0].at(-1).text, MSG, 'the person\'s own words are the turn\'s message')
   assert.equal(w.runOf(sent).adoptedFrom, 'pre-req-1', 'Claude\'s run holds the same Card binding')
+  assert.deepEqual(w.published.map(step => [step.clientThreadId, step.taskId, step.op, step.status, step.by]), [['ui-claude', note.egdesk_browser_task.id, 'handoff', 'needs_user', 'decision']])
 })
 
-test('a Claude room, alternating: the rule rides beside the note; the person\'s answer resumes the same task, its steps reach the screen live (transient, no value), and Claude answers once per message', { timeout: 30000 }, async t => {
+test('a Claude room, alternating: the rule rides beside the note; the person\'s answer resumes the same task, its steps go to L1\'s channel before Claude\'s turn (no value, no address), and Claude answers once per message', { timeout: 30000 }, async t => {
   const w = claudeWorld(t)
   const first = await w.send(MSG); await w.settled(first)
   const note1 = noteOf(w.transports[0].sent[0])
-  assert.equal(note1.rule, browserTaskRule({ toolOffered: false }), 'the browser task tool is not offered here: the rule does not name it')
-  assert.equal(note1.egdesk_browser_task.status, 'need_context')
-  assert.deepEqual(w.steps(), [], 'asking needed no action: nothing to show')
+  assert.equal(note1.rule, browserTaskRule({ toolOffered: false }), 'no browser task tool in this world: the rule does not name it')
   assert.ok(w.chat.browserTasks().get(note1.egdesk_browser_task.id), 'the task lives in the one store a tool can reach')
   const second = await w.send('두 번째 사업자로', { conversationId: first.conversationId }); await w.settled(second)
   assert.deepEqual(w.acts.map(a => [a.type, a.url]), [['navigate', `${O}/biz/2`], ['navigate', `${O}/download/2.pdf`]])
   const note2 = noteOf(w.transports.at(-1).sent.at(-1))
   assert.deepEqual([note2.egdesk_browser_task.status, note2.egdesk_browser_task.id, note2.egdesk_browser_task.next], ['done', note1.egdesk_browser_task.id, 'report_to_user'])
   assert.equal(w.transports.reduce((sum, tr) => sum + tr.sent.length, 0), 2, 'one Claude turn per message: the loop did the steps, Claude only spoke')
-  const steps = w.steps()
-  assert.deepEqual(steps.map(e => [e.details.op, e.details.phase, e.details.taskId]), [['open', 'entry', note1.egdesk_browser_task.id], ['open', 'entry', note1.egdesk_browser_task.id]])
-  for (const e of steps) {
-    assert.deepEqual([e.type, e.v, e.engineId, e.requestId, e.clientThreadId, e.conversationId, e.runId, e.durable, e.transient], ['chat.event', 2, 'claude', 'req-2', 'ui-claude', first.conversationId, null, false, true])
-    assert.ok(Number.isSafeInteger(e.seq)); assert.doesNotMatch(JSON.stringify(e), /https?:|example\.test|987-65|우산/)
-  }
-  // shown before Claude's turn began: the steps are live, not a summary afterwards
-  const lastStep = w.events.indexOf(steps.at(-1)), started = w.events.findIndex(e => e.event === 'run.started' && e.requestId === 'req-2')
-  assert.ok(lastStep >= 0 && started > lastStep, 'every step reached the screen before the turn started')
-  // never stored: the history has no step
-  const stored = JSON.stringify(w.chat.store.listEvents?.('ui-claude') ?? [])
-  assert.doesNotMatch(stored, /browserTaskStep/)
+  const steps = w.published.filter(step => step.taskId === note1.egdesk_browser_task.id)
+  assert.deepEqual(steps.map(step => [step.op, step.status ?? null]), [['handoff', 'needs_user'], ['navigate', null], ['navigate', null], ['done', 'done']])
+  assert.deepEqual(steps.map(step => step.seq), [...steps.map(step => step.seq)].sort((a, b) => a - b), 'in order')
+  assert.ok(steps.every(step => step.clientThreadId === 'ui-claude')); assert.doesNotMatch(JSON.stringify(steps), /https?:|example\.test|\/biz|\.pdf/, 'no address (the control\'s own label is the line\'s target)')
+  assert.deepEqual(w.events.filter(e => /browserTask|browser\.task\.step/.test(e.event ?? e.type ?? '')), [], 'nothing of it is a stored chat event')
 })
 
-test('a tool\'s steps (the browser task tool, through the provider runtime) reach the screen under the run while alternating, and not at all with plain "on"', { timeout: 20000 }, async t => {
-  for (const flag of ['alternate', 'on']) {
-    const w = claudeWorld(t, { flag })
-    const sent = await w.send(MSG); await w.settled(sent)
-    const run = w.runOf(sent)
-    const shown = w.browser.runtime.browserTaskStep(run, { seq: 1, op: 'type', target: '검색', valueName: '검색어', ok: true, ms: 230, by: 'decision', value: '우산' }, { taskId: 'bt_tool', cardId: 'card' })
-    const steps = w.steps()
-    if (flag === 'on') { assert.equal(shown, false); assert.deepEqual(steps, []); continue }
-    assert.equal(shown, true)
-    assert.deepEqual(steps.map(e => [e.runId, e.conversationId, e.details.phase, e.details.op, e.details.valueName, e.transient]), [[run.runId, run.conversationId, 'tool', 'type', '검색어', true]])
-    assert.doesNotMatch(JSON.stringify(steps), /우산/)
-  }
+test('browserTaskMessage(run): the person\'s message of a browser turn, by its request id and by its pre-turn run, for the browser task tool\'s value candidates; nothing else', { timeout: 20000 }, async t => {
+  const w = claudeWorld(t, { flag: 'on' })
+  const sent = await w.send(MSG); await w.settled(sent)
+  assert.equal(w.chat.browserTaskMessage(w.runOf(sent)), MSG)
+  assert.equal(w.chat.browserTaskMessage({ runId: 'pre-req-1' }), MSG)
+  assert.equal(w.chat.browserTaskMessage({ requestId: 'unknown' }), null); assert.equal(w.chat.browserTaskMessage(null), null)
+})
+
+// ---- the real-window case of 16:14 (Main): a DuckDuckGo search ----
+test('DuckDuckGo (16:14 real window), "on": the entry runs, its first step needs the search text nobody gave, so it stops there (detail_needed): the Card does not move and Claude gets the hand-over', { timeout: 20000 }, async t => {
+  const w = claudeWorld(t, { flag: 'on', site: 'duck' })
+  const sent = await w.send(DUCK_MSG); await w.settled(sent)
+  assert.deepEqual(w.timeline.filter(x => /^decide:/.test(x)), ['decide:browser_entry', 'decide:next_step'], 'the entry\'s calls and one step: what the real window\'s call log showed')
+  assert.deepEqual(w.acts, [], 'nothing typed, nothing searched'); assert.equal(w.cur.url, `${D}/`)
+  const note = noteOf(w.transports[0].sent[0])
+  assert.deepEqual([note.egdesk_browser_task.status, note.egdesk_browser_task.code], ['need_context', 'detail_needed'])
+  assert.deepEqual(w.published.map(step => [step.op, step.status]), [['handoff', 'needs_value']])
+})
+
+test('DuckDuckGo, alternating: the Decision model fills the search box with the span of the person\'s message it chose and runs the GET search before Claude\'s turn; Claude gets "done" and speaks once', { timeout: 20000 }, async t => {
+  const w = claudeWorld(t, { site: 'duck' })
+  const sent = await w.send(DUCK_MSG); await w.settled(sent)
+  assert.ok(w.timeline.includes('decide:field_text'), 'the span was chosen'); assert.equal(new URL(w.cur.url).searchParams.get('q'), '장화 신은 고양이')
+  assert.deepEqual(w.acts.map(a => a.type), ['fill', 'navigate'])
+  assert.ok(w.timeline.indexOf('claude:turn') > w.timeline.lastIndexOf('ui:act'), 'the Card moved before Claude\'s turn')
+  const note = noteOf(w.transports[0].sent[0])
+  assert.equal(note.egdesk_browser_task.status, 'done'); assert.ok(note.rule)
+  assert.deepEqual(w.published.map(step => [step.op, step.target ?? null, step.status ?? null]), [['fill', '검색', null], ['submit', '검색', null], ['done', null, 'done']])
+  assert.doesNotMatch(JSON.stringify(w.published), /장화|https?:/, 'the typed text and the address never reach the channel')
+  assert.equal(w.transports[0].sent.length, 1, 'one Claude turn')
+})
+
+test('the browser task tool (L8) in a Claude run continues the task the entry stopped (its key is the person\'s chat, the shared store), with the person\'s message as the value candidates; the rule names it; its steps go to the same channel', { timeout: 20000 }, async t => {
+  const w = claudeWorld(t, { flag: 'on', site: 'duck', hold: true, taskTool: true })
+  const sent = await w.send(DUCK_MSG); await w.drain?.()
+  await until(() => w.transports[0]?.sent.length === 1)
+  const note = noteOf(w.transports[0].sent[0])
+  assert.equal(note.egdesk_browser_task.code, 'detail_needed')
+  const out = await callTool(w, BROWSER_TASK_TOOL_NAME, {})
+  assert.equal(out.status, 'done', JSON.stringify(out)); assert.equal(out.taskId, note.egdesk_browser_task.id, 'the same task')
+  assert.equal(new URL(w.cur.url).searchParams.get('q'), '장화 신은 고양이', 'its span came from the person\'s message (browserTaskMessage)')
+  assert.ok(w.published.some(step => step.op === 'fill' && step.clientThreadId === 'ui-claude'))
+  w.transports[0].finish(); await w.settled(sent)
+  // alternating with the tool on: the entry finishes by itself (fieldText) and the rule names the tool for anything that would still need it
+  const alt = claudeWorld(t, { site: 'duck', taskTool: true })
+  const s2 = await alt.send(DUCK_MSG); await alt.settled(s2)
+  assert.ok(alt.chat.collectToolSpecs('browserBounded', { browserInteraction: true, engineId: 'claude' }).specs.some(s => s.name === BROWSER_TASK_TOOL_NAME), 'offered with an interact Card')
+  assert.equal(noteOf(alt.transports[0].sent[0]).rule, browserTaskRule({ toolOffered: true }))
 })
 
 // ---- Codex: the same words ----
@@ -273,20 +350,6 @@ test('a Codex room, alternating: the same rule beside the same note in its addit
   assert.equal(JSON.stringify(alt.calls.find(c => c.method === 'thread/start').params), JSON.stringify(on.calls.find(c => c.method === 'thread/start').params), 'no thread instruction changes')
   const { additionalContext: a, ...restAlt } = alt.calls.find(c => c.method === 'turn/start').params, { additionalContext: b, ...restOn } = on.calls.find(c => c.method === 'turn/start').params
   assert.deepEqual(restAlt, restOn); assert.deepEqual(Object.keys(a), Object.keys(b))
-})
-
-test('the browser task tool (a Browser provider tool, L8) is offered and named only where interaction is: the rule then names it; an observe grant offers it not', { timeout: 20000 }, async t => {
-  const w = claudeWorld(t)
-  const own = w.browser.specs.bind(w.browser)
-  w.browser.specs = route => [...own(route), { type: 'function', name: BROWSER_TASK_TOOL_NAME, description: 'Continue the browser task (test stand-in).',
-    inputSchema: { type: 'object', additionalProperties: false, required: ['cardId'], properties: { cardId: { type: 'string' } } } }]
-  const names = interaction => w.chat.collectToolSpecs('browserBounded', { browserInteraction: interaction, engineId: 'claude' }).specs.map(s => s.name)
-  assert.ok(names(true).includes(BROWSER_TASK_TOOL_NAME), 'offered with an interaction grant')
-  assert.ok(!names(false).includes(BROWSER_TASK_TOOL_NAME), 'not with an observe grant')
-  assert.ok(!w.chat.collectToolSpecs(null, { engineId: 'claude' }).specs.some(s => s.name === BROWSER_TASK_TOOL_NAME), 'not in an ordinary conversation')
-  const sent = await w.send(MSG); await w.settled(sent)
-  const note = noteOf(w.transports[0].sent[0])
-  assert.equal(note.rule, browserTaskRule({ toolOffered: true })); assert.ok(note.rule.includes(BROWSER_TASK_TOOL_NAME))
 })
 
 test('the wiring: "alternate" is the entry "on" plus alternate(); "on" and anything else keep their meaning', () => {
@@ -328,14 +391,3 @@ test('prepareTurn is never in the way: an unknown or running conversation is ski
   assert.deepEqual(await w.claude.prepareTurn({ threadId }), { status: 'skipped' }, 'a turn is running')
 })
 
-test('the loop\'s step hook hears both ways a loop may report (the store hook (task, info) and an onStep (info) of its own) and shows a step heard twice once', { timeout: 20000 }, async t => {
-  const w = claudeWorld(t)
-  const target = { quiet: true, requestId: 'req-x', clientThreadId: 'ui-claude', conversationId: null, engine: { id: 'claude' } }
-  const hook = w.chat.browserStepHook(target, 'entry')
-  const info = { taskId: 'bt_77', cardId: 'card', seq: 2, op: 'press', target: '검색', ok: true, ms: 120, by: 'code' }
-  hook({ taskId: 'bt_77', cardId: 'card' }, info); hook(info)
-  hook({ taskId: 'bt_77', cardId: 'card' }, { ...info, seq: 3, op: 'type', valueName: '검색어' })
-  assert.deepEqual(w.steps().map(e => [e.requestId, e.runId, e.details.seq, e.details.op]), [['req-x', null, 2, 'press'], ['req-x', null, 3, 'type']])
-  const off = claudeWorld(t, { flag: 'on' })
-  assert.equal(off.chat.browserStepHook(target, 'entry'), null, 'not alternating: no hook, the store is the store')
-})

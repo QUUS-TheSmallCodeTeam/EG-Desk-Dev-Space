@@ -3396,7 +3396,8 @@ export class CodexChatRuntime {
     const gate = () => { try { return previous ? this.decisionEgressFor(previous).allows('page_text') === true : false } catch { return false } }
     const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg?.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
       calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
-      pageTextInNote: gate, cardTextInEntry: gate, inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn() })
+      pageTextInNote: gate, cardTextInEntry: gate, inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn(),
+      fieldText: () => this.browserAlternateOn(), onStepEvent: (stepRun, event) => this.browserTaskStep(stepRun, event) }) // a1: the same as the entry (above)
     return createBrowserOpenItems({ store: this.browserTaskStore, entry, change: () => this.inRunMessagesOn() })
   }
 
@@ -5652,7 +5653,8 @@ export class CodexChatRuntime {
       pageTextInNote: pageText, cardTextInEntry: pageText,
       // c23: with in-run messages on, a message that replaces the task is recognised (the same flag, EGDESK_INRUN_MESSAGES)
       inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn(),
-      onStepEvent: (stepRun, event) => this.browserTaskStep(stepRun, event) })
+      // a1: alternating, a field the step needs is filled with a span of the person's message the Decision model chooses (L8 fieldText), so the Card moves before the turn
+      fieldText: () => this.browserAlternateOn(), onStepEvent: (stepRun, event) => this.browserTaskStep(stepRun, event) })
   }
 
   /** a1: after the entry handled a message: the call's last step for the screen (done, or the hand-over to the conversation model with its reason). -> { note, handedOff } */
