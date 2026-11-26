@@ -27732,9 +27732,18 @@
       boardNotice('분리 환경 연결을 확인할 수 없어 주소를 열지 않았습니다.');
       return false;
     };
+    // A <browser> loads from its src attribute: a changed value starts this
+    // Card's own frame loader (XULFrameElement::AfterSetAttr → LoadSrc →
+    // nsFrameLoader::LoadFrame: the <browser>'s principal triggers it, in the
+    // Card's browsing context and container). Gecko drops a set to the value
+    // the attribute already holds, though the page may have moved on inside
+    // since, so an explicit move to that address clears it first and the same
+    // loader runs. Removing src loads nothing; an HTML iframe fallback already
+    // loads on a same-value set and is left as it was.
     const loadBrowserUri = (url) => {
       try {
         if (!requireBrowserContext()) return false;
+        if (xulBrowser?.localName === 'browser' && xulBrowser.getAttribute('src') === url) xulBrowser.removeAttribute('src');
         xulBrowser?.setAttribute?.('src', url);
         if ('src' in xulBrowser) xulBrowser.src = url;
         return true;
