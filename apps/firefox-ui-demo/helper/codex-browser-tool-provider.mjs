@@ -61,15 +61,17 @@ function reflexEnabled(decision) {
   catch { return false }
 }
 function reflexStepError(text) {
-  let code = 'TOOL_FAILED', staleBy = null
+  let code = 'TOOL_FAILED', staleBy = null, targetBy = null
   try {
     const parsed = JSON.parse(text)
     if (typeof parsed?.error?.code === 'string') code = parsed.error.code
     if (BROWSER_STALE_REASONS.includes(parsed?.error?.staleBy)) staleBy = parsed.error.staleBy
+    if (BROWSER_TARGET_REASONS.includes(parsed?.error?.targetBy)) targetBy = parsed.error.targetBy
   } catch {}
   const error = new Error('Browser reflex step failed')
   error.code = code
   if (staleBy) error.staleBy = staleBy // L6 a1b: which observed fact made the step "not sent" (one closed word), for the loop's same-document retry
+  if (targetBy) error.targetBy = targetBy // L6c a2: which element check refused it (one closed word): a field refused as not-editable leaves the task's fields
   return error
 }
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
