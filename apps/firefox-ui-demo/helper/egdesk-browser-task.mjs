@@ -515,7 +515,7 @@ export function finishedPageFacts(segments, ids = []) {
 const askName = field => compactText(field.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)
 
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], field = null }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], field = null, staleBy = null }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(task.goalChanges > 0 ? { goalChanges: Math.min(task.goalChanges, 9) } : {}), // c23: how many times the person changed the request while it ran
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
@@ -526,6 +526,7 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
     ...(Array.isArray(found) && found.length ? { found: found.slice(0, MAX_FOUND_SEGMENTS) } : {}),
     // c30: with no identifier to locate a status by, the page's own first lines (same gate as found)
     ...(Array.isArray(page) && page.length && !(Array.isArray(found) && found.length) ? { page: page.slice(0, MAX_PAGE_LINES) } : {}),
+    ...(staleBy === 'user-hold' ? { staleBy } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
   if (status === 'needs_value' && typeof field === 'string' && field) body.ask = { field: askName(field), kind: 'text' }
@@ -679,7 +680,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
     const status = continueTask ? (pause.code === 'detail_needed' && field ? 'needs_value' : 'needs_guidance') : pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
     task.askedField = status === 'needs_value' && result?.fieldTarget ? { ...result.fieldTarget, name: askName(field) } : null
     return { handled: true, status: 'paused', taskId: task.taskId,
-      note: subjectiveNote(task, { status, field, code: pause.code, candidates: extra.candidates, detail: extra.detail, recorded: extra.recorded }) }
+      note: subjectiveNote(task, { status, field, code: pause.code, candidates: extra.candidates, detail: extra.detail, staleBy: extra.staleBy, recorded: extra.recorded }) }
   }
 
   function fromResult(task, result) {
@@ -710,7 +711,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
         const humanStep = result.reason === 'human_step' || (result.reason === 'blocked' && (last?.excluded?.gated ?? 0) + (last?.excluded?.unsupported ?? 0) > 0)
         const code = humanStep ? 'human_step' : CANNOT.has(result.reason) ? result.reason : 'blocked'
         // c22: a person-only control the request is about is named (its label), so the person is told what to change themselves
-        return finishPause(task, { kind: 'cannot_proceed', code }, result, { detail: result.code, ...(Array.isArray(result.controls) && result.controls.length ? { candidates: result.controls.filter(label => typeof label === 'string').slice(0, 3) } : typeof result.target === 'string' && result.target ? { candidates: [result.target] } : {}) })
+        return finishPause(task, { kind: 'cannot_proceed', code }, result, { detail: result.code, staleBy: result.staleBy, ...(Array.isArray(result.controls) && result.controls.length ? { candidates: result.controls.filter(label => typeof label === 'string').slice(0, 3) } : typeof result.target === 'string' && result.target ? { candidates: [result.target] } : {}) })
       }
       case 'max_steps': return finishPause(task, { kind: 'cannot_proceed', code: 'step_rejected' }, result, { detail: result.code })
       case 'fallback': // the judge is unavailable: today's behaviour, the subjective model drives the tools itself

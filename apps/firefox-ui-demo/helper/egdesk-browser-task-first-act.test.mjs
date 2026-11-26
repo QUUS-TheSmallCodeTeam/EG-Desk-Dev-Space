@@ -127,3 +127,9 @@ test('a1b, unchanged: a first fill the Card accepts is typed once, with no extra
   assert.deepEqual(stepsOf(out).filter(([op]) => op === 'fill'), [['fill', true]])
   w.transports.at(-1).finish(); await w.settled(sent)
 })
+
+test('a person touching the card ends a refused fill immediately, with the trusted user-hold reason', async () => {
+  const { result, fills, effects, observed } = await loopRun('user-hold')
+  assert.deepEqual([result.outcome, result.reason, result.staleBy], ['escalated', 'human_step', 'user-hold'])
+  assert.deepEqual([fills.length, effects.length, observed()], [1, 0, 1])
+})

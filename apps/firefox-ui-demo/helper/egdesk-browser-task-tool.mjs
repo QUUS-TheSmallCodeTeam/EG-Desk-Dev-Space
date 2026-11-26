@@ -112,7 +112,7 @@ export function outcomeBody(task, result, { outside = [] } = {}) {
     case 'page_unclear': task.offered = []; return { status: 'needs_guidance', code: 'page_unclear', options: [], next: 'read_the_card' }
     case 'handoff': task.offered = []; return { status: 'human_step', code: CODE.test(r.pageState ?? '') ? r.pageState : 'sensitive_flow' }
     case 'escalated': {
-      if (r.reason === 'human_step') { task.offered = []; return { status: 'human_step', code: 'person_only_controls', ...(Array.isArray(r.controls) && r.controls.length ? { controls: r.controls.filter(label => typeof label === 'string').slice(0, 3).map(label => compactText(label, BROWSER_TASK_LIMITS.optionLabel)) } : {}) } }
+      if (r.reason === 'human_step') { task.offered = []; return { status: 'human_step', code: 'person_only_controls', ...(r.staleBy === 'user-hold' ? { staleBy: r.staleBy } : {}), ...(Array.isArray(r.controls) && r.controls.length ? { controls: r.controls.filter(label => typeof label === 'string').slice(0, 3).map(label => compactText(label, BROWSER_TASK_LIMITS.optionLabel)) } : {}) } }
       if (r.reason === 'uncertain') return offer(task, (r.ranked || []).map(row => row?.value), 'uncertain', far)
       if (r.reason === 'blocked' && far.length) return offer(task, [], 'outside_site', far)
       task.offered = []
@@ -289,7 +289,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     task.pause = task.status === 'paused' ? { kind: body.status === 'needs_value' || body.status === 'needs_guidance' ? 'need_context' : 'cannot_proceed', code: body.code ?? body.status } : null
     store.touch(task)
     const elapsedMs = Math.max(0, clock() - started)
-    emit({ op: 'end', ok: body.status === 'done', stepMs: elapsedMs }, 'decision', body.status)
+    emit({ op: 'end', code: body.code, ok: body.status === 'done', stepMs: elapsedMs }, 'decision', body.status)
     return { ...body, taskId: task.taskId,
       steps: steps.map(step => ({ op: step.op, ...(step.target ? { target: step.target } : {}), ...(step.valueName ? { valueName: step.valueName } : {}), ok: step.ok, ms: step.ms, ...(step.by === 'model' ? { by: 'model' } : {}) })),
       page: { title: page?.title ?? null, host: page?.host ?? null }, elapsedMs }

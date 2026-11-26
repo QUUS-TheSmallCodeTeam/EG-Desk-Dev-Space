@@ -347,7 +347,8 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
       (judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && judged.term === '확인') ||
       (judged?.category === 'pay' && judged.term === '예매' && /예매\s*(내역|현황|조회|확인|목록)/.test(String(element.label ?? ''))))
     const registerLink = phraseLink || (kind === 'navigate' && judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && /등록/.test(judged.term ?? '') && isAllowedUrl(element.href, snapshot))
-    if (judged?.category !== 'none' && !yieldsToProof && !registerLink) {
+    const writeSubmit = askSite && kind === 'press' && ['submit', 'image'].includes(element.nav?.type) && element.nav?.form?.method === 'post'
+    if (writeSubmit || (judged?.category !== 'none' && !yieldsToProof && !registerLink)) {
       excluded.gated++
       if (kind === 'press' && label && withheld.length < MAX_PERSON_TARGETS) withheld.push({ label, role: String(element.role) })
       continue
@@ -481,6 +482,7 @@ function visibleText(snapshot) {
   return out.join('\n')
 }
 
+const GOAL_MET_ASK = 'Is the browser part of the request complete on this page? For a question about an item or table on the current page, yes if only reading it for the chat answer remains. No if any requested navigation, input, selection or submission still remains.'
 const REFLEX_RULES = [
   'You pick the next step for EG-Desk browsing one page toward a goal.',
   'Options are elements on the current page: [L] links, [B] buttons or tabs, [F] text fields, plus control options.',
@@ -528,7 +530,7 @@ function fannedChoice(next, answers, fan, thresholds) {
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const motion = requestedMotion(goal)
   const fan = !motion && crowdedStep(options)
   const choices = motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
@@ -549,7 +551,7 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person explicitly request the exact named choice AND state of the selected check/uncheck/list action? No if merely inferred or unspecified.')] : []),
       ...pageStateQuestions(),
-      predicateQuestion('goal_met', 'Does the current page already satisfy the goal?'),
+      predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
       ...(arrived ? [predicateQuestion('arrival_finishes', arrived === 'search' ? 'Is displaying the results of this search the ONLY requested browser outcome? No if a result still needs to be opened, or anything else selected, filtered or visited.' : 'Was opening this selected link the last requested browser action, with at most reading this page for a chat answer left? No if another page or control is needed.')] : []),
     ],
     timeoutMs, signal, authorizeDispatch,
@@ -604,14 +606,14 @@ const quote = text => `"${compactText(String(text ?? ''), 80).replace(/"/g, "'")
  * goal questions remain, and for 'maybe' one predicate per candidate quotes that one option and the recorded choice, nothing else.
  * Code combines: exactly one decided yes (>= the done threshold) with every other one decided no (<= 1 - done) takes that option.
  */
-export async function decideRecordedStep({ goal, snapshot, recorded, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+export async function decideRecordedStep({ chatTask = false, goal, snapshot, recorded, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const same = recorded.kind === 'maybe' ? recorded.maybe : []
   const evidence = [`Goal: ${goal}`, ...(isDay(today) ? [`Today: ${today}`] : []), `URL: ${snapshot.url}`, `Visible text:\n${visibleText(snapshot) || '(none)'}`].join('\n\n')
   const result = await client.decide({
     input: [{ role: 'developer', content: RECORDED_RULES }, { role: 'user', content: evidence }],
     questions: [
       ...pageStateQuestions(),
-      predicateQuestion('goal_met', 'Does the current page already satisfy the goal?'),
+      predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
       ...same.map((option, index) => predicateQuestion(`same_${index}`, `Is this option, ${quote(labelKey(option.value))}, the same thing as the recorded choice, ${quote(recorded.item.chose)}?`)),
     ],
     timeoutMs, signal, authorizeDispatch,
@@ -759,6 +761,8 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
   // default, and an expired deadline aborts the socket, so the next call is cold again): give it the
   // foreground deadline once; later decisions of the run reuse the warm connection and the default.
   let warmed = false
+  const userHeld = error => error?.code === 'BROWSER_OBSERVATION_STALE' && error.staleBy === 'user-hold'
+  const heldResult = () => finish('escalated', { reason: 'human_step', staleBy: 'user-hold' })
   let lastFailure = null
   const typedTexts = arr(seed.typedTexts).slice(-MAX_VALUES) // a2: the texts this run typed (typedSearch below)
   let arrival = seed.arrival?.goal === goal ? seed.arrival : null
@@ -785,6 +789,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
       return { ok: true, result }
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : 'TOOL_FAILED'
+      if (userHeld(error)) return { ok: false, held: true }
       // a1: a navigation whose address the site changed (a redirect, added parameters): the page that loaded proves it (navigationLanded on a fresh observation); then it is done
       if (typeof meta.landed === 'function' && await meta.landed().catch(() => false) === true) {
         entry.actions.push({ tool, ok: true, status: meta.landedStatus ?? 'navigation-observed' })
@@ -876,6 +881,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
         if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) }) }
         attemptedRefs.add(action.args.ref)
         const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
+        if (done.held) return { result: heldResult() }
         if (done.ok && option.item.element.role === 'time' && done.result?.status !== 'postcondition-observed') return { result: finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OUTCOME_UNKNOWN' }) }
         if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`); typedTexts.push(action.args.text) }
         else if (done.code === 'BROWSER_OBSERVATION_STALE' && SAME_DOCUMENT_NOT_SENT.has(done.staleBy) && !staleRetried.has(ready)) {
@@ -902,7 +908,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     observe(step, null)
     let observed
     try { observed = await callTool('egdesk_browser_observe', { cardId }) }
-    catch (error) { return finish('escalated', { reason: 'observe_failed', code: typeof error?.code === 'string' ? error.code : null }) }
+    catch (error) { return userHeld(error) ? heldResult() : finish('escalated', { reason: 'observe_failed', code: typeof error?.code === 'string' ? error.code : null }) }
     if (signal?.aborted) return finish('aborted')
     const snapshot = observed?.snapshot
     const observationId = observed?.observationId
@@ -932,6 +938,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     if (snapshot.readyState === 'loading') {
       entry.rule = 'loading'
       const done = await act(entry, 'egdesk_browser_wait', { cardId, for: 'idle', timeoutMs: 5000 })
+      if (done.held) return heldResult()
       if (!done.ok && done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
       continue
     }
@@ -956,8 +963,8 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     let decision
     try {
       if (recorded && !arrived) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
-      decision = recorded && !arrived ? await decideRecordedStep({ goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ goal, snapshot: seen, options, history, arrived, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+      decision = recorded && !arrived ? await decideRecordedStep({ chatTask: valuesFirst, goal, snapshot: seen, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
+        : await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: seen, options, history, arrived, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
@@ -1005,7 +1012,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     }
     // c23: no way forward was found (undecided, scroll_more, blocked) and the page has controls only the person may operate: one follow-up
     // asks whether the request is about one of them (a decided yes is the person's step, whatever the options were). Never for a decided step.
-    if (personOnly.length && ['uncertain', 'scroll', 'blocked'].includes(decision.kind)) {
+    if ((personOnly.length || (valuesFirst && withheld.length)) && ['uncertain', 'scroll', 'blocked'].includes(decision.kind)) {
       let check = null
       // c36: the targets are the controls withheld as the person's own, buttons included (page order, at most three), not only those with no action
       const personTargets = withheld.map(control => personOnly.find(item => item.label === control.label) ?? { label: control.label, role: control.role, value: '' })
@@ -1067,12 +1074,14 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
       }
       case 'wait': {
         const done = await act(entry, 'egdesk_browser_wait', { cardId, for: 'idle', timeoutMs: 5000 })
+        if (done.held) return heldResult()
         if (!done.ok && done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
         continue
       }
       case 'motion': return runRequestedMotion({ motion: decision.motion, observed, cardId, callTool, act, entry, finish, signal, isDecisionCurrent })
       case 'scroll': {
         const done = await act(entry, 'egdesk_browser_scroll', { cardId, observationId, expectedRevision: snapshot.revision, direction: 'down', amount: 'page' })
+        if (done.held) return heldResult()
         if (done.ok) history.push('scrolled down')
         else if (done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
         continue
@@ -1112,6 +1121,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
           return navigationLanded({ actual: seen?.snapshot?.url, expected: expectedUrl, from: snapshot.url, submitted })
         } : null
         const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
+        if (done.held) return heldResult()
         if (!done.ok) {
           if (option.item.named || option.item.kind === 'choice' || option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
           continue
