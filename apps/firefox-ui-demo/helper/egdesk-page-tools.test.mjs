@@ -90,6 +90,16 @@ test('type: an ordinary text field is typed into (never Enter, never a submit) a
   assert.equal((await h.call(T.type, { ref: 'q', text: '' })).code, 'PAGE_TEXT_INVALID')
 })
 
+test('a preceding unverified fill locks a direct external press: never show a site question whose approval cannot move the card', async () => {
+  const h = await rig(); h.world.state.pages['/home'].elements[0].value = 'existing'
+  await h.call(T.read, { mode: 'structure' })
+  assert.equal((await h.call(T.type, { ref: 'q', text: 'existing' })).status, 'not_done')
+  await h.call(T.read, { mode: 'structure' })
+  const out = await h.call(T.press, { ref: 'ext' })
+  assert.deepEqual([out.status, out.code], ['not_done','BROWSER_OUTCOME_UNKNOWN'])
+  assert.ok(!h.dispatched.includes('egdesk_browser_request_site') && !h.dispatched.includes('egdesk_browser_navigate'))
+})
+
 test('approval: a control that may change something is not pressed until the person agrees (the same ledger as the command and file tools); the press needs the text it will produce; payment is never approved', async () => {
   const asks = []
   const ledger = { check: async arg => { asks.push(arg); return asks.length === 1 ? { decision: 'deny', note: JSON.stringify({ egdesk_command_gate: { status: 'needs_person', reasons: arg.floor, next: 'ask_user_in_chat' } }) } : { decision: 'allow' } } }
