@@ -780,7 +780,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       const labelled = labelledBy.split(/\s+/).map((id) => doc.getElementById(id)?.textContent || "").join(" ");
       if (labelled.trim()) return this.compact(labelled, 120);
     }
-    if (node.id) {
+    const associated = node.labels?.[0];
+    if (associated) {
+      const label = associated.cloneNode(true);
+      for (const field of label.querySelectorAll('input,select,textarea,button,script,style')) field.remove();
+      if (label.textContent?.trim()) return this.compact(label.textContent, 120);
+    }
+    if (!associated && node.id) {
       const label = doc.querySelector(`label[for="${CSS.escape(node.id)}"]`);
       if (label?.textContent?.trim()) return this.compact(label.textContent, 120);
     }
@@ -791,7 +797,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         || node.getAttribute?.("title")
         || node.getAttribute?.("placeholder")
         || node.getAttribute?.("aria-placeholder")
-        || (editor ? "" : node.innerText || node.textContent)
+        || (editor || /^(select|textarea)$/i.test(node.tagName) ? "" : node.innerText || node.textContent)
         || node.getAttribute?.("name")
         || node.getAttribute?.("id")
         || (editor ? "Editable text" : ""),
@@ -802,7 +808,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   valueFor(node) {
     if (this.isSensitiveControl(node)) return "";
     const tag = String(node.tagName || "").toLowerCase();
-    if (tag === "select") return this.compact(node.selectedOptions?.[0]?.textContent || node.value || "", 120);
+    if (tag === "select") return this.boundedValue(node.value || "");
+    if (tag === "input" && ['checkbox','radio'].includes(node.type)) return node.indeterminate ? 'mixed' : node.checked ? 'checked' : 'unchecked';
     if (tag === "textarea" || tag === "input") return this.boundedValue(node.value || "");
     if (node.isContentEditable) return this.boundedValue(this.editorText(node), { editor: true });
     if (tag === "label" || this.pointerSignals(node)) return this.hiddenChoiceInput(node)?.state || "";
@@ -951,10 +958,33 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       tag: String(node.tagName || "").toLowerCase(),
       href: node.href || node.getAttribute?.("href") || "",
       value: this.valueFor(node),
+      ...this.choiceFacts(node),
       disabled: this.isDisabled(node),
       bounds: this.roundedBounds(this.viewportRect(node)),
       ...(this.navigationFacts(node) ? { nav: this.navigationFacts(node) } : {}),
     };
+  }
+
+  choiceFacts(node) {
+    const tag = String(node.tagName || '').toLowerCase();
+    const toggle = tag === 'input' && ['checkbox','radio'].includes(node.type);
+    if ((!toggle && tag !== 'select' && !(tag === 'input' && ['date','time','number'].includes(node.type))) || this.isSensitiveControl(node)) return {};
+    const labels = [];
+    for (let p = node.parentElement; p; p = p.parentElement) {
+      if (p.matches?.('fieldset,section,form,[role=region],[role=dialog]')) labels.push(p.getAttribute('aria-label') || p.querySelector(':scope > legend,:scope > h1,:scope > h2,:scope > h3')?.textContent || '');
+    }
+    const choice = { inForm: !!node.form, sensitiveRegion: !!node.closest?.('[data-sensitive],[data-private]'), regionLabels: labels.map(s => this.compact(s, 120)),
+      immediate: ['onchange','onclick','oninput','aria-checked'].some(a => node.hasAttribute?.(a)) };
+    if (toggle) return { choice, checked: !!node.checked, choiceValue: this.boundedValue(node.value || '') };
+    if (tag !== 'select') return { choice };
+    choice.multiple = !!node.multiple;
+    choice.truncated = (node.options?.length ?? 0) > 32;
+    const options = [];
+    for (let i = 0; i < Math.min(32, node.options?.length ?? 0); i++) {
+      const o = node.options[i];
+      options.push({ label: this.compact(o.label, 100), value: String(o.value).slice(0, 120), disabled: !!o.disabled || o.parentElement?.disabled === true || o.value.length > 120 });
+    }
+    return { choice, options, selectedLabel: this.compact(node.selectedOptions?.[0]?.label || '', 100) };
   }
 
   // L8 c20: facts the helper's read-only-navigation proof reads for a button (the helper presses one only when they prove a same-site GET
