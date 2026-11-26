@@ -239,14 +239,20 @@ for (const [status, mode, reason] of [
   if (success) { assert.equal(calls.at(-1), 'observe'); assert.equal(out.steps.at(-1).rule, 'link_arrived') }
 })
 
-for (const [receipt, code] of [['site-allowed', undefined], ['site-refused', 'site_not_allowed'], ['site-pending', 'site_pending']]) {
-  test(`alternate entry on crowded results: selected external title -> Card ${receipt}`, async () => {
-    const page = ddgResultsSnapshot(), title = '장화 신은 고양이 - 나무위키'
+for (const [receipt, code, second] of [['site-allowed', undefined], ['site-refused', 'site_not_allowed'], ['site-pending', 'site_pending'], ['site-allowed', undefined, true]]) {
+  test(`alternate entry on crowded results: selected external title -> Card ${receipt}, result ${second ? 2 : 1}`, async () => {
+    const page = ddgResultsSnapshot(), title = second ? '장화신은 고양이: 끝내주는 모험 - 나무위키' : '장화 신은 고양이 - 나무위키'
+    // The role/name-only fixture reconstructs these two breadcrumbs as the same /w; real result URLs are distinct.
+    if (second) for (const el of page.interactiveElements.filter(el => ['el_31','el_32'].includes(el.ref))) el.href = 'https://namu.wiki/w/second-result'
     const href = page.interactiveElements.find(el => el.label === title).href
     let landed = false
     const calls = [], reply = Promise.withResolvers(), asked = Promise.withResolvers()
     const client = fakeClient(req => {
       const next = req.questions.find(q => q.name === 'next_step')
+      if (!landed && second) {
+        assert.ok(next.choices.every(c => /^\[L\d+\]/.test(c.value) || ['needs_user_context','blocked'].includes(c.value)))
+        assert.ok(!req.questions.some(q => ['open_only','read_here','field_text'].includes(q.name)))
+      }
       const picked = next.choices.find(c => c.value.endsWith('] ' + title))
       return { next_step: ranked('next_step', [[landed ? 'goal_met' : picked?.value ?? 'needs_user_context', 0.98]]),
         goal_met: { type: 'predicate', probability: 0.02 }, ...(landed ? { arrival_finishes: { type: 'predicate', probability: 0.45 } } : { open_only: { type: 'predicate', probability: 0.99 } }) }
@@ -262,7 +268,7 @@ for (const [receipt, code] of [['site-allowed', undefined], ['site-refused', 'si
     const provider = { directEntryEnabled: () => true, reflexScope: () => scope, runDirectTask: (_run, args) => runBrowserReflex({ ...args, ...scope, pageText: false }) }
     const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), fieldText: () => true })
     const yes = { type: 'predicate', probability: 0.98 }
-    const result = entry.handle({ run: { browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: '첫 번째 검색 결과 열어줘',
+    const result = entry.handle({ run: { browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: second ? '두 번째 결과 열어줘' : '첫 번째 검색 결과 열어줘',
       hosts: { card: 'duckduckgo.com' }, entryAnswers: { browser_entry: yes, browser_entry_card_0: yes, browser_entry_answer: { ...yes, probability: 0.02 } } })
     await Promise.race([asked.promise, result]); assert.deepEqual(calls, ['observe', 'request_site'])
     reply.resolve({ status: receipt })
@@ -271,3 +277,10 @@ for (const [receipt, code] of [['site-allowed', undefined], ['site-refused', 'si
     assert.deepEqual(calls, code ? ['observe', 'request_site'] : ['observe', 'request_site', 'observe', 'navigate', 'wait', 'observe'])
   })
 }
+
+test('ranked result open: an uncertain link (even a spurious field answer) is not a request to supply search text', async () => {
+  const calls = [], client = fakeClient(() => ({ next_step: ranked('next_step', [[FIELD, .62]]), goal_met: { type: 'predicate', probability: .99 } }))
+  const out = await runBrowserReflex({ cardId: 'card', goal: '두 번째 결과 열어줘', firstFieldText: () => { throw new Error('not a typing request') }, textComboboxes: true, valuesFirst: true, client,
+    callTool: async name => { calls.push(name); return { observationId: 'o1', snapshot: ddgResultsSnapshot() } } })
+  assert.deepEqual(calls, ['egdesk_browser_observe']); assert.equal(out.outcome, 'needs_user_context'); assert.deepEqual(out.candidates, [])
+})

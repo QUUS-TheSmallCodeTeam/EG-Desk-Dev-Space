@@ -93,7 +93,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const snapshot = out.data?.snapshot
     if (!out.ok || !snapshot) return { error: out.data?.error?.code ?? 'PAGE_OBSERVE_FAILED', detail: out.data?.error }
     if (opaque(snapshot.url)) return { error: 'BROWSER_CARD_OPAQUE' }
-    const value = { observationId: out.data.observationId, snapshot, options: buildReflexCandidates(snapshot, { textComboboxes: true }).options }
+    const value = { observationId: out.data.observationId, snapshot, uncertain: !!out.data.uncertainAction, options: buildReflexCandidates(snapshot, { textComboboxes: true }).options }
     remember(run, cardId, value)
     return value
   }
@@ -242,6 +242,8 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     // nothing moves, in closed words. Sign-in, payment and the other person-only kinds were already decided above; a link that is not a plain unproven one (a submit or delete word) still needs the person's yes.
     if (verdict.act === 'approval' && verdict.why === 'unproven' && String(element.tag).toLowerCase() === 'a' && typeof element.href === 'string' && /^https?:\/\//i.test(element.href)
         && evaluateNavigation(element.href, DEFAULT_NAVIGATION_POLICY, { fromUrl: snapshot.url, layer: 'tool' }).reason === 'outside-site') {
+      // A site grant is not a new action grant. This observation says the preceding action still locks navigation.
+      if (obs.uncertain) return respond(true, { status: 'not_done', code: 'BROWSER_OUTCOME_UNKNOWN', cardId, label, written: false })
       const site = hostOf(element.href)
       const asked = await call(run, event, 'egdesk_browser_request_site', { cardId, site }, 'site')
       if (!asked.ok || asked.data?.status !== 'site-allowed') return respond(true, { status: 'not_done', code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', site: typeof asked.data?.status === 'string' ? asked.data.status : 'site-refused', ...(typeof asked.data?.pendingBy === 'string' ? { pendingBy: asked.data.pendingBy } : {}), ...(Number.isSafeInteger(asked.data?.waitedMs) ? { waitedMs: asked.data.waitedMs } : {}), cardId, label, written: false })
