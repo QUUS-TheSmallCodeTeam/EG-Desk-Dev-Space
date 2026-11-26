@@ -216,6 +216,43 @@ test('actual Browser provider, actual B service and actual targeted transport bi
   assert.equal(events.find(event => event.event === 'browser.tool.completed').detail.originalProviderId, 'egdesk-browser')
 })
 
+test('Codex transport records parent and lease refusals without copying free text into the failure event', async () => {
+  const owner = 'codex:chatgpt:fixture-owner', events = []
+  const transport = new BrowserToolTransport({ getOwnerKey: () => owner })
+  let transportId, refusal
+  const url = 'https://example.test/'
+  const client = { chatProtocol: 2, closed: false, send(frame) {
+    const request = JSON.parse(frame.split('data: ')[1])
+    const reply = request.kind === 'bind' ? { status: 'bound', binding: { cardId: 'card-1', cardEpoch: 'epoch-1', profileId: 'firefox-default',
+      accountId: '', userContextId: 0, url, engineAccountKey: owner, authorityEpoch: 1 } }
+      : request.kind === 'observe' ? { status: 'observed', snapshot: { cardId: 'card-1', documentId: 'doc', revision: 1,
+        url, text: [], interactiveElements: [], viewport: { width: 720, height: 480, devicePixelRatio: 1 } } }
+      : request.kind === 'act' ? { status: 'rejected', dispatchPhase: 'not-dispatched', timing: {}, ...refusal } : { status: 'cancelled' }
+    queueMicrotask(() => transport.receive(transportId, { requestId: request.requestId, ...reply }))
+    return true
+  } }
+  transportId = transport.registerClient(client)
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => owner })
+  provider.runtime = { browserRegisteredThreads: new Set(['native-thread']), currentEpoch: () => 1, emit: (_run, event, detail) => events.push({ event, detail }) }
+  const source = { ...selected('interact')[0], browserToolIdentity: { cardEpoch: 'epoch-1', userContextId: 0, engineAccountKey: owner, authorityEpoch: 1 },
+    sourceRef: { viewId: 'card-1', profileId: 'firefox-default', accountId: '', uri: url } }
+  const run = { answerId: 'native-thread/native-turn', runId: 'native-turn', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await provider.bindRun(run, provider.prepare({ selectedSources: [source], clientThreadId: run.clientThreadId, effectiveExecutionPolicy: 'browserBounded', browserTransportId: transportId }))
+  for (const [word, lease, want] of [['missing-authorizer', null, 'missing-authorizer'], ['ui-denied', 'selection-run-mismatch', 'selection-run-mismatch'], ['private-text', 'private-text', undefined]]) {
+    refusal = { error: 'Browser action authority was revoked before input [' + word + ']', inputDeniedBy: lease }
+    const obs = await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'obs-' + word, arguments: { cardId: 'card-1' } })
+    const { observationId } = JSON.parse(obs.contentItems[0].text)
+    const result = await provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'act-' + events.length, arguments: { cardId: 'card-1', observationId,
+      expectedRevision: 1, url: url + 'next', postcondition: { kind: 'url', value: url + 'next' } } })
+    const { error } = JSON.parse(result.contentItems[0].text)
+    assert.deepEqual([error.code, error.staleBy, error.inputDeniedBy], ['BROWSER_OBSERVATION_STALE', 'input-authority', want])
+    const { detail } = events.filter(e => e.event === 'browser.tool.failed').at(-1)
+    assert.deepEqual([detail.originalProviderId, detail.staleBy, detail.inputDeniedBy], ['egdesk-browser', 'input-authority', want])
+    assert.ok(!JSON.stringify(detail).includes('private-text'))
+  }
+  await provider.cancelRun(run)
+})
+
 test('actual provider, B service and transport permit only an attested local fixture button effect', async () => {
   const owner = 'codex:chatgpt:fixture-owner'
   const fixtureQa = { url: 'http://127.0.0.1:43210/egdesk-qa/fixture_7f41ad982b6903ab', marker: 'EGDESK_FIXTURE_MARKER_94ab7d28' }

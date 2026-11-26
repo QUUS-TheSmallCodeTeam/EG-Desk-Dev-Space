@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { BROWSER_INPUT_DENIED_REASONS, BROWSER_STALE_REASONS, BROWSER_TARGET_REASONS, staleReasonOf, targetReasonOf } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INPUT_DENIED_REASONS, BROWSER_STALE_REASONS, BROWSER_TARGET_REASONS, inputDeniedReasonOf, staleReasonOf, targetReasonOf } from './egdesk-browser-tool-runtime.mjs'
 import { callTool, world } from './egdesk-claude-browser-world.fixture.mjs'
 
 const actorSource = fs.readFileSync(new URL('../overlay/resources/EGDeskBrowserAgentRuntimeChild.sys.mjs', import.meta.url), 'utf8')
@@ -55,7 +55,11 @@ test('staleBy: every bracket word the page actor and the Card can write is a kno
   // the Card's last-moment input authorization: every deny word it can write is the helper's list, and the list has no word the Card never writes
   const authorizer = surfaceSource.slice(surfaceSource.indexOf('function browserToolAuthorizePhysicalAction('), surfaceSource.indexOf('function browserToolUserHoldRefusal('))
   const denied = [...new Set([...authorizer.matchAll(/deny\('([a-z-]+)'\)/g)].map(match => match[1]))].sort()
-  assert.deepEqual(denied, [...BROWSER_INPUT_DENIED_REASONS].sort())
+  const parentWords = ['missing-browsing-context', 'missing-embedder', 'missing-authorizer', 'ui-denied', 'parent-callback-error', 'deadline-expired-after-approval', 'unknown']
+  assert.deepEqual([...denied, ...parentWords].sort(), [...BROWSER_INPUT_DENIED_REASONS].sort())
+  for (const word of [...parentWords, 'arbitrary']) {
+    assert.equal(inputDeniedReasonOf({ error: 'Browser action authority was revoked before input [' + word + ']' }), parentWords.includes(word) ? word : null)
+  }
   assert.match(authorizer, /const deny = reason => \{ lease\.deniedBy = reason;/)
   assert.match(surfaceSource, /if \(typeof activityLease\?\.deniedBy === 'string'\) rejected\.inputDeniedBy = activityLease\.deniedBy;/)
 })
