@@ -20,8 +20,9 @@ async function firstTurn(t, env) {
   await w.settings.turnMemory.save('on')
   await w.send(SAYS.quote)
   // the late answer (budget + 300 ms) is in before the answer is written; the turn was sent at the budget. Polled, not a fixed wait (a loaded gate failed it once).
+  // a1: the poll ends as soon as the entries are there; its bound only decides how long a loaded gate may take before the test gives up (8 s -> 30 s)
   const want = env.EGDESK_TURN_MEMORY_KEEP_LATE === 'on' ? 2 : 1
-  for (const end = Date.now() + 8000; Date.now() < end && w.calibrationLog.entries().filter(e => e.feature === 'turn_context').length < want;) await sleep(25)
+  for (const end = Date.now() + 30_000; Date.now() < end && w.calibrationLog.entries().filter(e => e.feature === 'turn_context').length < want;) await sleep(25)
   await w.idle?.()
   const start = w.turnStarts().at(-1)
   const entry = [...w.chat.runs.values()].map(run => w.chat.draftCheckTurns.get(run)).filter(Boolean).at(-1)

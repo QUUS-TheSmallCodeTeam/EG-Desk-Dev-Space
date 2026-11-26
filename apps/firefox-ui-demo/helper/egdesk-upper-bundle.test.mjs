@@ -30,7 +30,10 @@ test('bundle on: every flag of the bundle is filled with its value; the input of
   assert.equal(out.flags.UNRELATED, 'x')
   const env = { EGDESK_UPPER: 'on' }, applied = applyUpperBundle(env)
   assert.equal(applied.applied.length, NAMES.length); for (const row of UPPER_BUNDLE) assert.equal(env[row.flag], row.value)
-  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 15)
+  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`)
+  // a1: the count comes from the list (a lane that adds or removes a row does not edit a number here); every row is counted once, by its role
+  const byRole = UPPER_BUNDLE.reduce((counts, row) => ({ ...counts, [row.role]: (counts[row.role] ?? 0) + 1 }), {})
+  assert.equal(Object.values(byRole).reduce((sum, n) => sum + n, 0), UPPER_BUNDLE.length); assert.equal(NAMES.length, UPPER_BUNDLE.length); assert.ok(UPPER_BUNDLE.length > 0)
 })
 
 test('any single flag stays overridable: an explicit value (including off, none, advisory, empty is NOT explicit) wins over the bundle, the rest are filled', () => {
