@@ -1,5 +1,7 @@
 // u4 (U19): the send plan for Browser Cards on a Claude conversation lives in its own lane module; re-exported here because the surface reaches the chat modules through ChatState
 export { claudeBrowserCapable, claudeBrowserSendPlan, claudeKeptInputs } from './EGDeskClaudeBrowserSend.sys.mjs'
+// a1 (L1): a run keeps the steps of its Browser tasks (who did what); the surface draws them (EGDeskBrowserStepsView.sys.mjs)
+import { addBrowserStep, BROWSER_STEP_CHAT_EVENT } from './EGDeskBrowserStepsView.sys.mjs'
 // Pure reducer for the additive Codex chat protocol v2.
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 // Provider commentary is a public work note, not a statement to the people in a chat.
@@ -1248,6 +1250,9 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     const activity = details.activity || details;
     const id = activity.id || event.itemId;
     if (id) upsert(run.activities, { ...activity, id });
+  } else if (event.event === BROWSER_STEP_CHAT_EVENT) {
+    // a1 (L1): one step of a Browser task on this run, placed by the event's time; display only
+    run.browserSteps = addBrowserStep(run.browserSteps, details, { ts: event.ts, clientThreadId: event.clientThreadId });
   } else if (event.event === 'plan.updated') {
     run.plan = copy(details.plan || details);
   } else if (event.event === 'summary.delta') {

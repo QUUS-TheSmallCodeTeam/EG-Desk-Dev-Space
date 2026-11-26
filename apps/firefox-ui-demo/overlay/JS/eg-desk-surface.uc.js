@@ -1466,6 +1466,8 @@
 
   // Chat status view model: quiet status line, waiting asks, result scope, check time.
   const ChatStatusView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatStatusView.sys.mjs');
+  // a1 (L1): who did what in a Browser task: the step lines in Chat and the frame on the Card (display only).
+  const BrowserStepsView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserStepsView.sys.mjs');
 
   function codexRunLabel(run) {
     if (!run) return '대화 준비';
@@ -12795,6 +12797,12 @@
     };
   }
 
+  // a1 (L1): the Browser step lines and the Card frame show only while the bridge sends them
+  // (capabilities.browserSteps, developer flag EGDESK_BROWSER_STEPS_UI=on); an older bridge never does.
+  function bridgeBrowserStepsField(bridgeState) {
+    return { browserStepsUi: bridgeState?.capabilities?.browserSteps === true };
+  }
+
   // RT-05: the helper build this overlay was installed with. The launcher
   // writes the marker; an overlay installed without it sends nothing, and the
   // bridge then never reports a mismatch.
@@ -14661,6 +14669,33 @@
               onclick: (ev) => { ev.stopPropagation(); codexBridge.openActivity(activeThread.id, { conversationId: run.conversationId, runId: run.runId, activityId: view.activityId }); },
             }, deskIcon('computer', 'egd-codex-computer-use-mark'), el('span', { class: 'egd-codex-computer-use-text' }, view.text));
           };
+          // a1 (L1): this room's Browser task steps where they happened (by time, with the control notices), one block per
+          // task between two messages, folded past four lines; drawn only while the bridge sends them (capabilities.browserSteps).
+          const browserStepBlocks = codex.browserStepsUi === true
+            ? BrowserStepsView.browserStepPlacement(BrowserStepsView.browserStepsFor(codex.browserSteps, ChatState.clientThreadBinding(activeThread), roomRuns))
+            : null;
+          const appendBrowserSteps = (until = Infinity) => {
+            for (const block of browserStepBlocks?.take(until) || []) {
+              const view = BrowserStepsView.browserStepsBlockView(block, { engineId: activeEngine?.engineId || activeThread.engineId || null,
+                open: !!codex.expandedBrowserSteps?.[`${activeThread.id}/${block.key}`] });
+              messages.appendChild(el('div', {
+                class: 'egd-codex-browser-steps', role: 'group', 'aria-label': view.summary,
+                data: { testid: 'chat-browser-steps', taskId: block.taskId, collapsed: String(view.collapsed) },
+              }, el('div', { class: 'egd-codex-browser-steps-head' },
+                deskIcon('pointer', 'egd-codex-browser-steps-mark'),
+                el('span', { class: 'egd-codex-browser-steps-summary' }, view.summary),
+                view.foldable ? el('button', {
+                  type: 'button', class: 'egd-codex-browser-steps-toggle', 'aria-expanded': String(!view.collapsed),
+                  data: { testid: 'chat-browser-steps-toggle', focusKey: `browser-steps-${block.key}` },
+                  onclick: (ev) => { ev.stopPropagation(); codexBridge.toggleBrowserSteps(activeThread.id, block.key); },
+                }, view.toggleLabel) : null),
+              el('ol', { class: 'egd-codex-browser-steps-list' }, ...view.lines.map(line => el('li', {
+                class: 'egd-codex-browser-step', data: { testid: 'chat-browser-step', by: line.kind === 'handoff' ? 'handoff' : line.by, ok: String(line.ok !== false) },
+              }, line.kind === 'step' ? el('span', { class: 'egd-codex-browser-step-who' }, line.who) : null,
+              el('span', { class: 'egd-codex-browser-step-text' }, line.text),
+              line.time ? el('span', { class: 'egd-codex-browser-step-time' }, line.time) : null)))));
+            }
+          };
           const appendControlNotices = (until = Infinity) => {
             while (controlNoticeIndex < controlNotices.length && controlNotices[controlNoticeIndex].at <= until) {
               const notice = controlNotices[controlNoticeIndex++];
@@ -14672,6 +14707,7 @@
               el('span', { class: 'egd-codex-browser-control-detail' }, view.detail),
               el('span', { class: 'egd-codex-message-time' }, formatMessageTime(notice.at))));
             }
+            appendBrowserSteps(until);
           };
           // CHAT-03: copied blocks from a DM sit where the store saved them; while
           // choosing, every finished bubble gets a box.
@@ -16806,6 +16842,13 @@
         case 'task.native':
           readTaskGraphs({ openOnly: true });
           return;
+        // a1 (L1): one step of a Browser task for this screen (the bridge sends it only with capabilities.browserSteps).
+        case 'browser.task.step': {
+          const before = state.codex.browserSteps;
+          state.codex.browserSteps = BrowserStepsView.addBrowserStep(before, event);
+          if (state.codex.browserSteps !== before && state.codex.browserStepsUi === true) emit();
+          return;
+        }
         // A plan names its steps; the list uses those titles.
         case 'task.plan':
           taskPlanFrame(event.plan);
@@ -16938,6 +16981,7 @@
           ...bridgeConnectionFields(bridgeState),
           ...bridgeEngineFields(bridgeState),
           ...bridgeSessionFields(bridgeState),
+          ...bridgeBrowserStepsField(bridgeState),
         });
         portableBridgeObserved(bridgeState);
         void deskStoreBridgeObserved(bridgeState);
@@ -17916,6 +17960,14 @@
         const computerControl = ChatState.normalizeComputerControl(result);
         if (computerControl) update({ computerControl });
         return computerControl;
+      },
+      // a1 (L1): a folded Browser task's step lines opened in place, or folded again (this screen only).
+      toggleBrowserSteps(threadId, blockKey) {
+        if (!threadId || !blockKey) return;
+        const key = `${threadId}/${blockKey}`;
+        const { [key]: open, ...rest } = state.codex.expandedBrowserSteps || {};
+        state.codex.expandedBrowserSteps = open ? rest : { ...rest, [key]: true };
+        emit();
       },
       // CHAT-08: a folded long answer opened in place, or folded again.
       toggleAnswerFold(threadId, messageId) {
@@ -19272,6 +19324,7 @@
             bridgeBuild: bridgeConnectionFields(bridgeState).bridgeBuild,
             ...bridgeEngineFields(bridgeState),
             ...bridgeSessionFields(bridgeState),
+            ...bridgeBrowserStepsField(bridgeState),
           });
           portableBridgeObserved(bridgeState);
         } catch (error) {
@@ -28545,13 +28598,70 @@
       toolAskSite: browserToolAskSite,
       toolSetNavigationGuard: setAgentNavigationGuard,
       toolPrepareAgentProjection: agentProjection.prepare,
-      toolActivity: startAgentToolActivity,
+      toolActivity: request => browserStepDisplay.track(request, startAgentToolActivity(request)),
       toolUserHold: agentUserHold,
       agentControlState: () => ({ mode: card.dataset.egdAgentControl || 'hidden', held: !!agentControl.hold,
         inFlight: agentControl.inFlight, count: agentControl.count }),
       agentPause: pauseAgentControl,
       agentHandBack: handBackAgentControl,
     };
+    // a1 (L1): who did what on this Card. Each Agent request the Card carried out (the Decision model's reflex steps and
+    // the conversation model's own tool calls alike) gets a short caption at the Card's lower edge and, while the page is
+    // the one it was read on, a frame around its target: the request's observed bounds, else the last reading's bounds of
+    // the same element. Driven by the Card's own record (egdesk:browser-agent-action); display only, never a decision or
+    // evidence, and nothing while the bridge does not send step lines (capabilities.browserSteps).
+    const browserStepDisplay = (() => {
+      let reading = null, pending = null, boxTimer = 0, captionTimer = 0;
+      const box = el('span', { class: 'egd-browser-step-box', 'aria-hidden': 'true', hidden: true, data: { testid: 'browser-step-box' } });
+      const caption = el('div', { class: 'egd-browser-step-caption', 'aria-hidden': 'true', hidden: true, data: { testid: 'browser-step-caption' } });
+      // The frame moves with the page (inside the scaled wrap); the caption keeps the Card's own size at the body's lower edge.
+      wrap.appendChild(box);
+      (wrap.parentElement || wrap).appendChild(caption);
+      const shown = () => state.codex?.browserStepsUi === true;
+      const engineOf = (clientThreadId) => state.codex?.threads?.find(thread => ChatState.clientThreadBinding(thread) === clientThreadId)?.engineId || null;
+      const hide = () => {
+        if (boxTimer) window.clearTimeout(boxTimer);
+        if (captionTimer) window.clearTimeout(captionTimer);
+        boxTimer = captionTimer = 0;
+        box.hidden = caption.hidden = true;
+      };
+      const show = (view) => {
+        caption.textContent = view.caption;
+        caption.dataset.by = view.by;
+        caption.hidden = false;
+        if (captionTimer) window.clearTimeout(captionTimer);
+        captionTimer = window.setTimeout(() => { captionTimer = 0; caption.hidden = true; }, BrowserStepsView.BROWSER_STEP_CAPTION_MS);
+        if (boxTimer) window.clearTimeout(boxTimer);
+        boxTimer = 0;
+        box.hidden = !view.box;
+        if (!view.box) return;
+        box.dataset.by = view.by;
+        Object.assign(box.style, { left: `${view.box.left}%`, top: `${view.box.top}%`, width: `${view.box.width}%`, height: `${view.box.height}%` });
+        boxTimer = window.setTimeout(() => { boxTimer = 0; box.hidden = true; }, BrowserStepsView.BROWSER_STEP_BOX_MS);
+      };
+      card.addEventListener('egdesk:browser-agent-action', (ev) => {
+        const entry = ev.detail, info = pending;
+        if (!info || entry?.source !== 'model-tool' || !shown()) return;
+        try {
+          const view = BrowserStepsView.browserStepCardView({ request: info.request, response: info.response, reading: info.reading,
+            engineId: engineOf(info.request?.clientThreadId), outcome: entry.outcome });
+          if (view) show(view);
+        } catch {}
+      });
+      return {
+        // The Card's activity handle, unchanged, with the request kept for its record's frame.
+        track(request, activity) {
+          if (!activity || typeof activity.end !== 'function') return activity;
+          return { end(response, inputAuthorized) {
+            const before = reading;
+            if (response?.status === 'observed' && response.snapshot) reading = BrowserStepsView.browserStepReading(response.snapshot);
+            pending = { request, response, reading: before };
+            try { return activity.end(response, inputAuthorized); } finally { pending = null; }
+          } };
+        },
+        dispose() { hide(); reading = null; },
+      };
+    })();
     const presentation = createBrowserPresentationCache({ card, browser: xulBrowser,
       query: () => browserAgentActorRequest('presentationMetrics'),
       changed: () => state.refreshSemanticProjections?.(),
@@ -28749,6 +28859,7 @@
       disposeToolWindowGlobalWaits();
       toolDialogs.dispose();
       agentProjection.dispose();
+      browserStepDisplay.dispose();
       disposeAgentControl();
       unregisterBrowserAuthorizer = null;
       presentation.dispose();
