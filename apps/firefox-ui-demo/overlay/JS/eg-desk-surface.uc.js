@@ -28286,19 +28286,20 @@
       const gone = !card.isConnected || !xulBrowser?.isConnected;
       const now = Date.now();
       for (const waiter of [...toolWindowGlobalWaiters]) {
-        if (!ready && !gone && now < waiter.untilMs) continue;
+        if (!gone && now < waiter.untilMs && (!ready ||
+            (waiter.skipId && ready.innerWindowId === waiter.skipId && now < waiter.skipUntilMs))) continue;
         toolWindowGlobalWaiters.delete(waiter);
-        if (ready) waiter.resolve(ready);
+        if (ready && !gone) waiter.resolve(ready);
         else waiter.reject(new Error(gone ? 'Selected Browser Card is unavailable'
           : 'Browser document was not ready before the request deadline'));
       }
       if (toolWindowGlobalWaiters.size) toolWindowGlobalTimer = window.setTimeout(pollToolWindowGlobal, 20);
     };
-    const whenToolWindowGlobalReady = (deadlineMs) => {
+    const whenToolWindowGlobalReady = (deadlineMs, skipId = null, skipUntilMs = 0) => {
       const ready = readyToolWindowGlobal();
-      if (ready || !Number.isFinite(deadlineMs)) return Promise.resolve(ready);
+      if (!Number.isFinite(deadlineMs) || (ready && (!skipId || ready.innerWindowId !== skipId))) return Promise.resolve(ready);
       return new Promise((resolve, reject) => {
-        toolWindowGlobalWaiters.add({ untilMs: deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS, resolve, reject });
+        toolWindowGlobalWaiters.add({ untilMs: deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS, skipId, skipUntilMs, resolve, reject });
         if (!toolWindowGlobalTimer) toolWindowGlobalTimer = window.setTimeout(pollToolWindowGlobal, 20);
       });
     };
@@ -28312,10 +28313,13 @@
     // fixture diagnostic; never part of a reply or an authorization.
     let lastToolObserve = null;
     const browserToolObserve = async (expected, options = {}, { deadlineMs } = {}) => {
-      if (Number.isFinite(deadlineMs)) await whenToolWindowGlobalReady(deadlineMs);
+      const startedAt = Date.now();
+      const wait = options.wait;
+      const skipId = wait?.for === 'load' && wait.notDocumentId && Number.isSafeInteger(wait.notInnerWindowId)
+        ? wait.notInnerWindowId : null;
+      if (Number.isFinite(deadlineMs)) await whenToolWindowGlobalReady(deadlineMs, skipId, startedAt + (wait?.timeoutMs || 0));
       assertBrowserToolBinding(expected);
       showAgentActivity('Agent가 이 Browser를 관찰 중');
-      const startedAt = Date.now();
       const attempt = { attempts: 0, abortRetried: false, innerWindowIds: [], waitOffsetMs: 0, sampledAtMs: null };
       lastToolObserve = attempt;
       let snapshot, context, windowGlobal, attemptOptions = options;
@@ -28324,6 +28328,13 @@
         context = xulBrowser.browsingContext;
         windowGlobal = context.currentWindowGlobal;
         attempt.innerWindowIds.push(Number.isSafeInteger(windowGlobal?.innerWindowId) ? windowGlobal.innerWindowId : null);
+        // A child actor only sees its own document. Spend the transition time in
+        // chrome, then give the current actor only the rest of the original wait.
+        if ((skipId || attempt.abortRetried) && Number.isFinite(deadlineMs) && Number.isSafeInteger(wait?.timeoutMs)) {
+          attempt.waitOffsetMs = Date.now() - startedAt;
+          const left = Math.min(wait.timeoutMs - attempt.waitOffsetMs, deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS - Date.now());
+          attemptOptions = { ...options, wait: { ...wait, timeoutMs: Math.max(0, Math.floor(left)) } };
+        }
         try { snapshot = await browserAgentActorRequest('snapshot', { options: attemptOptions }); break; }
         catch (error) {
           // remote RootTransport.sys.mjs:180-200: only an actor destroyed
@@ -28334,16 +28345,9 @@
           if (!retry) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw error; }
           attempt.abortRetried = true;
           try {
-            await whenToolWindowGlobalReady(deadlineMs);
+            await whenToolWindowGlobalReady(deadlineMs, skipId, startedAt + (wait?.timeoutMs || 0));
             assertBrowserToolBinding(expected);
           } catch (waitError) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw waitError; }
-          if (options.wait && Number.isSafeInteger(options.wait.timeoutMs)) {
-            // The retried wait gets only what is left of its own timeout.
-            attempt.waitOffsetMs = Date.now() - startedAt;
-            const left = Math.min(options.wait.timeoutMs - attempt.waitOffsetMs,
-              deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS - Date.now());
-            attemptOptions = { ...options, wait: { ...options.wait, timeoutMs: Math.max(0, Math.floor(left)) } };
-          }
         }
       }
       assertBrowserToolBinding(expected);

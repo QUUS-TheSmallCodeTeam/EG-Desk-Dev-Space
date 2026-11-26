@@ -76,7 +76,8 @@ test('a1 step event contract: closed words and short names only, a wait is no ev
 })
 
 // ---- the real objective loop on a page double: a wiki search page (a Google-style text combobox and a read-only GET search button) and its results ----
-function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양이' } = {}) {
+function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양이', delayedNavigation = false } = {}) {
+  let destination
   let cur = { url: `${O}/`, revision: 1, value: '' }
   const calls = [], requests = []
   const submitUrl = () => `${O}/w/index.php?search=${encodeURIComponent(cur.value)}`
@@ -90,9 +91,14 @@ function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양�
     url: cur.url, documentId: `d${cur.revision}`, revision: cur.revision, readyState: 'complete', title: '장화 신은 고양이 - 위키', text: ['장화 신은 고양이', '줄거리: 방앗간 셋째 아들이 고양이를 물려받는다.'],
     interactiveElements: [{ ref: 'r1', role: 'link', tag: 'a', label: '장화 신은 고양이 (동화)', href: `${O}/wiki/puss`, value: '' }] })
   const callTool = async (name, args) => {
-    calls.push({ name, ...(args?.text ? { typed: true } : {}), ...(args?.url ? { url: args.url } : {}) })
+    calls.push({ name, ...(name === 'egdesk_browser_wait' ? { for: args.for, timeoutMs: args.timeoutMs } : {}), ...(args?.text ? { typed: true } : {}), ...(args?.url ? { url: args.url } : {}) })
     if (name === 'egdesk_browser_observe') return { observationId: `o${calls.length}`, snapshot: snapshot() }
     if (name === 'egdesk_browser_fill') { cur = { ...cur, value: args.text, revision: cur.revision + 1 }; return { status: 'postcondition-observed' } }
+    if (name === 'egdesk_browser_navigate' && delayedNavigation) {
+      destination = args.url
+      throw new Error('postcondition-unverified') // provider's callTool rejects an unverified result
+    }
+    if (name === 'egdesk_browser_wait' && destination) { cur = { url: destination, revision: cur.revision + 1, value: '' }; destination = null }
     if (name === 'egdesk_browser_navigate') { cur = { url: args.url, revision: cur.revision + 1, value: '' }; return { status: 'postcondition-observed' } }
     return { status: 'wait-condition-met' }
   }
@@ -143,6 +149,15 @@ test('a1 values named by the model: the loop types the value where it belongs, s
   assert.ok(events.every(event => event.by === 'decision' && event.taskId === out.taskId && event.cardId === 'card'))
   assert.doesNotMatch(JSON.stringify(events) + JSON.stringify(out.steps), /장화 신은 고양이(?! - 위키)/, 'no typed text in the steps')
   assert.ok(Number.isFinite(out.elapsedMs))
+})
+
+test('an unverified GET search reaches done via the recovery load wait on subcall five', async () => {
+  const world = wikiWorld({ delayedNavigation: true })
+  const tool = createBrowserTaskTool({ browser: world.browser })
+  const out = parse(await tool.handle(RUN(), { callId: 'search', arguments: { goal: '위키에서 슈렉 검색', values: { 검색어: '슈렉' } } }))
+  assert.equal(out.status, 'done')
+  assert.deepEqual(world.calls.map(c => c.name.replace('egdesk_browser_', '')), ['observe', 'fill', 'observe', 'navigate', 'wait', 'observe', 'wait', 'observe'])
+  assert.deepEqual(world.calls[4], { name: 'egdesk_browser_wait', for: 'load', timeoutMs: 5000 })
 })
 
 test('a1 no value given: the decision model chooses the field text among the spans of the goal (it writes nothing), then the task goes on in the same call', async () => {
