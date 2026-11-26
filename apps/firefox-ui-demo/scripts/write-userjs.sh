@@ -49,6 +49,11 @@ const managed = new Map([
   ['devtools.debugger.remote-host', '127.0.0.1'],
   ['marionette.enabled', automation],
   ['marionette.port', marionettePort],
+  // EG-Desk is an app built on Firefox, not the person's web browser: never ask to become the default browser. Set on every
+  // start (user.js wins over prefs.js), so the answer cannot come back after an automation session or an unsaved quit (owner, 2026-11-26).
+  ['browser.shell.checkDefaultBrowser', false],
+  ['browser.shell.skipDefaultBrowserCheckOnFirstRun', true],
+  ['browser.startup.upgradeDialog.enabled', false],
 ]);
 const marker = '// EG-Desk remote automation (managed by write-userjs.sh).';
 const original = exists ? fs.readFileSync(target, 'utf8') : '';
