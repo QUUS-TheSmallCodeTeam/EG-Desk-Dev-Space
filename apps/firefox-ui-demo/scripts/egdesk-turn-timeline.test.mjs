@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { collectFromBridge, displayWidth, parseWhen, reduceHistory, reduceLiveCalls, renderTable, renderTurn, selectTurns, timelinesOf, turnTimelines } from './egdesk-turn-timeline.mjs'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { CALLS_FORMAT, collectFromBridge, displayWidth, mergeLiveTurns, parseWhen, reduceHistory, reduceLiveCalls, renderTable, renderTurn, selectTurns, timelinesOf, turnTimelines, watchCalls } from './egdesk-turn-timeline.mjs'
 
 // Synthetic history pages shaped like GET /chat/history (only the fields the bridge really writes). Every text below must never reach the output.
 const SECRET = ['검색창에 우산 입력해줘', '우산 3,900원 비밀 본문', 'npm test --token=abc', 'https://shop.example.test/q?u=1', '장화 신은 고양이']
@@ -123,6 +126,23 @@ test('selection, time parsing and the table', () => {
   const idlePages = pagesOne(); idlePages[0].events.push({ seq: 99, ts: T + 50_000, event: 'message.accepted', requestId: 'req-2', details: { message: { role: 'user', text: SECRET[0] } } })
   const both = turnTimelines(reduceHistory(idlePages))
   assert.equal(both.length, 2); assert.equal(both[1].started, false); assert.equal(selectTurns(both).length, 1); assert.equal(selectTurns(both, { idle: true }).length, 2)
+})
+
+test('the call-log watcher keeps the rows across a bridge restart (the ring starts empty again) and the analysis merges them', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'egd-timeline-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'calls.json')
+  const rows = [{ kind: 'browser', startMs: 3120, endMs: 3370, inputTokens: 5, cachedTokens: 0, outcome: 'ok' }]
+  const answers = [{ turns: [{ requestId: 'req-1', startedAt: T - 20, calls: rows.slice(0, 0) }] }, { turns: [{ requestId: 'req-1', startedAt: T - 20, calls: rows }] }, { turns: [] }] // grows, then the bridge restarted
+  let clock = 0, i = 0
+  const fetchImpl = async url => { assert.match(url, /\/chat\/decision-calls\?limit=64$/); return { ok: true, status: 200, json: async () => answers[Math.min(i++, answers.length - 1)] } }
+  const printed = []
+  const kept = await watchCalls({ file, everyS: 5, forMinutes: 0.2, fetchImpl, print: line => printed.push(line), sleep: async ms => { clock += ms }, now: () => clock })
+  assert.equal(kept.length, 1); assert.equal(kept[0].calls.length, 1, 'the restart (an empty ring) does not erase what was kept')
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8')); assert.equal(saved.format, CALLS_FORMAT); assert.equal((fs.statSync(file).mode & 0o777).toString(8), '600')
+  assert.ok(printed.every(line => /^결정 호출 기록/.test(line)))
+  assert.deepEqual(mergeLiveTurns([{ requestId: 'a', startedAt: 2, calls: [1, 2] }], [{ requestId: 'a', startedAt: 2, calls: [1] }, { requestId: 'b', startedAt: 1, calls: [] }]).map(x => [x.requestId, x.calls.length]), [['b', 0], ['a', 2]])
+  const [turn] = turnTimelines(reduceHistory(pagesOne()), { liveTurns: saved.turns })
+  assert.equal(turn.summary.decision.exact, true)
 })
 
 test('collecting from the bridge uses GET only, pages the history and reads the call log; a missing log route is a note', async () => {

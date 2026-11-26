@@ -18,6 +18,8 @@
 //   --save writes the CLOSED data (no text) so the same report can be made later with --from (the call log does not survive a restart).
 //   --rows: the per-step rows of every turn (default: rows for at most 6 turns, then the summary table). --idle: also requests that
 //   never started a turn (only the message was recorded).
+//   Before a scenario, keep the call log across bridge restarts (a browserBounded turn never persists its call rows):
+//   node scripts/egdesk-turn-timeline.mjs --watch-calls calls.json [--every 5] [--for 240]   then analyze with --calls calls.json
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -440,10 +442,45 @@ export function timelinesOf(collected) {
   return (collected?.conversations ?? []).flatMap(c => turnTimelines(c, { liveTurns: collected.liveTurns ?? [] }))
 }
 
+/** Live call-log turns from several sources, one per request: the one with more rows wins (the ring keeps adding a turn's calls). */
+export function mergeLiveTurns(...lists) {
+  const out = new Map()
+  for (const list of lists) for (const turn of list ?? []) {
+    if (!turn?.requestId) continue
+    const known = out.get(turn.requestId)
+    if (!known || (turn.calls?.length ?? 0) > (known.calls?.length ?? 0)) out.set(turn.requestId, turn)
+  }
+  return [...out.values()].sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
+}
+
+export const CALLS_FORMAT = 'egdesk-decision-calls-v1'
+const readCallsFile = file => { try { const j = JSON.parse(fs.readFileSync(file, 'utf8')); return j?.format === CALLS_FORMAT ? j.turns ?? [] : [] } catch { return [] } }
+
+/**
+ * The call log lives in the bridge's memory and is gone after a restart, and a turn without a decision-context row (a browserBounded
+ * turn) never persists its rows. Started before a scenario, this keeps them: every `everyS` seconds it reads GET /chat/decision-calls
+ * and merges the closed rows into `file` (0600), for `forMinutes`. Prints counts only.
+ */
+export async function watchCalls({ bridge = DEFAULT_BRIDGE, file, everyS = 5, forMinutes = 240, fetchImpl = globalThis.fetch, print = line => console.log(line), sleep = ms => new Promise(r => setTimeout(r, ms)), now = Date.now } = {}) {
+  const end = now() + forMinutes * 60_000
+  let kept = readCallsFile(file), lastCount = -1
+  for (;;) {
+    try {
+      const live = reduceLiveCalls(await getJson(fetchImpl, `${bridge.replace(/\/+$/, '')}/chat/decision-calls?limit=64`))
+      kept = mergeLiveTurns(kept, live)
+      fs.writeFileSync(file, JSON.stringify({ format: CALLS_FORMAT, savedAt: now(), turns: kept }), { mode: 0o600 })
+      const count = kept.reduce((n, t) => n + t.calls.length, 0)
+      if (count !== lastCount) { print(`결정 호출 기록 보관: 턴 ${kept.length}개, 호출 ${count}개`); lastCount = count }
+    } catch (error) { print(`결정 호출 기록을 읽지 못함(${error.status ?? 'network'}), 다시 시도`) }
+    if (now() >= end) return kept
+    await sleep(everyS * 1000)
+  }
+}
+
 // ---------------------------------------------------------------- CLI
 
 function parseArgs(argv) {
-  const out = { threads: [], bridge: DEFAULT_BRIDGE, since: null, until: null, browser: false, engine: null, last: null, json: null, save: null, from: null, rows: false, idle: false }
+  const out = { threads: [], bridge: DEFAULT_BRIDGE, since: null, until: null, browser: false, engine: null, last: null, json: null, save: null, from: null, rows: false, idle: false, calls: [], watch: null, every: 5, forMinutes: 240 }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i], next = () => { const v = argv[++i]; if (v === undefined) throw new Error(`${a} needs a value`); return v }
     if (a === '--thread') out.threads.push(next())
@@ -458,6 +495,10 @@ function parseArgs(argv) {
     else if (a === '--from') out.from = next()
     else if (a === '--rows') out.rows = true
     else if (a === '--idle') out.idle = true
+    else if (a === '--calls') out.calls.push(next())
+    else if (a === '--watch-calls') out.watch = next()
+    else if (a === '--every') out.every = Number(next())
+    else if (a === '--for') out.forMinutes = Number(next())
     else if (a === '--help' || a === '-h') out.help = true
     else throw new Error(`unknown argument ${a}`)
   }
@@ -466,10 +507,12 @@ function parseArgs(argv) {
 
 async function main(argv) {
   const opts = parseArgs(argv)
-  if (opts.help) { console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').filter(l => l.startsWith('//')).slice(0, 22).join('\n')); return 0 }
+  if (opts.help) { const lines = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1); console.log(lines.slice(0, lines.findIndex(l => !l.startsWith('//'))).join('\n')); return 0 }
+  if (opts.watch) { await watchCalls({ bridge: opts.bridge, file: opts.watch, everyS: opts.every, forMinutes: opts.forMinutes }); return 0 }
   const since = parseWhen(opts.since), until = parseWhen(opts.until)
   const collected = opts.from ? JSON.parse(fs.readFileSync(opts.from, 'utf8')) : await collectFromBridge({ bridge: opts.bridge, threads: opts.threads, since })
   if (collected?.format !== TIMELINE_FORMAT) throw new Error('not a timeline file (saved with --save)')
+  if (opts.calls.length) { collected.liveTurns = mergeLiveTurns(collected.liveTurns, ...opts.calls.map(readCallsFile)); if (collected.liveTurns.length) collected.liveNote = null }
   if (opts.save) fs.writeFileSync(opts.save, JSON.stringify(collected), { mode: 0o600 })
   const all = timelinesOf(collected).filter(t => !opts.threads.length || opts.threads.includes(t.clientThreadId))
   const turns = selectTurns(all, { since, until, browser: opts.browser, engine: opts.engine, last: opts.last, idle: opts.idle })
