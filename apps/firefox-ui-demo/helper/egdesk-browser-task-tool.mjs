@@ -2,8 +2,8 @@ import { isBrowserUserHold } from './egdesk-browser-tool-runtime.mjs'
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { NO_FIELD_TEXT, candidateSpans, pickFieldText, undecidedField } from './egdesk-browser-field-text.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
-import { PAGE_TEXT_FLAG, askedFieldTarget, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
-import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-browser-task.mjs'
+import { PAGE_TEXT_FLAG, askedFieldTarget, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, optionStepDisplay, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent, withBrowserTaskActivity } from './egdesk-browser-task.mjs'
 
 // L8 a1 ('교대' round, owner 2026-11-26: "decision model 이랑 대화형 모델이 같은 세션에서 같은 맥락으로 번갈아가면서 사용자 요청을 빠르게 수행"): the browser task as ONE tool
 // the conversation model (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read the page tools provider's specs(), which carries this
@@ -155,7 +155,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const event = taskStepEvent(task, info, { seq: (task.eventSeq ?? 0) + 1, by, status })
       if (!event) return
       task.eventSeq = event.seq
-      if (event.op !== 'end') sink.push(event)
+      if (event.op !== 'end') { const { displayValue, ...closed } = event; sink.push(closed) }
       if (typeof onStep === 'function') { try { onStep(run, event) } catch { /* an observer never affects the task */ } }
     }
   }
@@ -200,7 +200,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     const planned = reflexActionArgs(match, { cardId: task.cardId, observationId: observed.observationId, snapshot })
     if (planned.needsText) return { outcome: 'needs_free_text', field: match.value, label: compactText(match.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, match) }
     if (planned.escalate) return { outcome: 'escalated', reason: planned.escalate, suggestion: { option: match.value } }
-    const meta = { op: optionOp(match), target: optionTarget(match) }
+    const meta = { op: optionOp(match), target: optionTarget(match), ...optionStepDisplay(match, planned.args.text) }
     try {
       await scope.callTool(planned.tool, planned.args)
       emit({ action: planned.tool, ok: true, stepMs: clock() - t0, ...meta }, 'model')
@@ -329,7 +329,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     }
     if (busy.has(task.taskId)) return reply({ status: 'cannot', code: 'TASK_BUSY' })
     busy.add(task.taskId)
-    try { return reply(await work(run, event, task, args, started, store)) }
+    try { return reply(await withBrowserTaskActivity(run, task, onStep, () => work(run, event, task, args, started, store))) }
     catch { task.status = 'paused'; task.pause = { kind: 'cannot_proceed', code: 'tool_failed' }; return reply({ status: 'cannot', code: 'tool_failed', taskId: task.taskId }) }
     finally { busy.delete(task.taskId) }
   }

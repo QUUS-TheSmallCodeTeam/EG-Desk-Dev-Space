@@ -244,7 +244,7 @@ test('a Claude room, "on": the Decision model goes first (one bind, the entry de
   assert.equal(note.rule, undefined, '"on": the note as it always was')
   assert.equal(w.transports[0].sent[0].at(-1).text, MSG, 'the person\'s own words are the turn\'s message')
   assert.equal(w.runOf(sent).adoptedFrom, 'pre-req-1', 'Claude\'s run holds the same Card binding')
-  assert.deepEqual(w.published.map(step => [step.clientThreadId, step.taskId, step.op, step.status, step.by]), [['ui-claude', note.egdesk_browser_task.id, 'handoff', 'needs_user', 'decision']])
+  assert.deepEqual(w.published.filter(step => step.op !== 'activity').map(step => [step.clientThreadId, step.taskId, step.op, step.status, step.by]), [['ui-claude', note.egdesk_browser_task.id, 'handoff', 'needs_user', 'decision']])
 })
 
 test('a Claude room, alternating: the rule rides beside the note; the person\'s answer resumes the same task, its steps go to L1\'s channel before Claude\'s turn (no value, no address), and Claude answers once per message', { timeout: 30000 }, async t => {
@@ -258,7 +258,8 @@ test('a Claude room, alternating: the rule rides beside the note; the person\'s 
   const note2 = noteOf(w.transports.at(-1).sent.at(-1))
   assert.deepEqual([note2.egdesk_browser_task.status, note2.egdesk_browser_task.id, note2.egdesk_browser_task.next], ['done', note1.egdesk_browser_task.id, 'report_to_user'])
   assert.equal(w.transports.reduce((sum, tr) => sum + tr.sent.length, 0), 2, 'one Claude turn per message: the loop did the steps, Claude only spoke')
-  const steps = w.published.filter(step => step.taskId === note1.egdesk_browser_task.id)
+  assert.deepEqual(w.published.filter(s => s.phase).map(s => s.phase), ['start','stop','start','stop'])
+  const steps = w.published.filter(step => !step.phase && step.taskId === note1.egdesk_browser_task.id)
   assert.deepEqual(steps.map(step => [step.op, step.status ?? null]), [['handoff', 'needs_user'], ['navigate', null], ['navigate', null], ['done', 'done']])
   assert.deepEqual(steps.map(step => step.seq), [...steps.map(step => step.seq)].sort((a, b) => a - b), 'in order')
   assert.ok(steps.every(step => step.clientThreadId === 'ui-claude')); assert.doesNotMatch(JSON.stringify(steps), /https?:|example\.test|\/biz|\.pdf/, 'no address (the control\'s own label is the line\'s target)')
@@ -281,7 +282,7 @@ test('DuckDuckGo (16:14 real window), "on": the entry runs, its first step needs
   assert.deepEqual(w.acts, [], 'nothing typed, nothing searched'); assert.equal(w.cur.url, `${D}/`)
   const note = noteOf(w.transports[0].sent[0])
   assert.deepEqual([note.egdesk_browser_task.status, note.egdesk_browser_task.code], ['need_context', 'detail_needed'])
-  assert.deepEqual(w.published.map(step => [step.op, step.status]), [['handoff', 'needs_value']])
+  assert.deepEqual(w.published.filter(step => step.op !== 'activity').map(step => [step.op, step.status]), [['handoff', 'needs_value']])
 })
 
 test('DuckDuckGo, alternating: the Decision model fills the search box with the span of the person\'s message it chose and runs the GET search before Claude\'s turn; Claude gets "done" and speaks once', { timeout: 20000 }, async t => {
@@ -292,7 +293,7 @@ test('DuckDuckGo, alternating: the Decision model fills the search box with the 
   assert.ok(w.timeline.indexOf('claude:turn') > w.timeline.lastIndexOf('ui:act'), 'the Card moved before Claude\'s turn')
   const note = noteOf(w.transports[0].sent[0])
   assert.equal(note.egdesk_browser_task.status, 'done'); assert.ok(note.rule)
-  assert.deepEqual(w.published.map(step => [step.op, step.target ?? null, step.status ?? null]), [['fill', '검색어', null], ['submit', '검색', null], ['done', null, 'done']])
+  assert.deepEqual(w.published.filter(step => step.op !== 'activity').map(step => [step.op, step.target ?? null, step.status ?? null]), [['fill', '검색어', null], ['submit', '검색', null], ['done', null, 'done']])
   assert.doesNotMatch(JSON.stringify(w.published), /장화|https?:/, 'the typed text and the address never reach the channel')
   assert.equal(w.transports[0].sent.length, 1, 'one Claude turn')
 })

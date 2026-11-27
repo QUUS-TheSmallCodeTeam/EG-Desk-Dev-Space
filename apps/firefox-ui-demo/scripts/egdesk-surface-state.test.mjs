@@ -26411,3 +26411,21 @@ test('Board member sync distinguishes legacy empty replies from a confirmed save
     assert.equal(thread.participants.includes('솔빛'), !restored);
   }
 });
+
+test('browser task badge lasts across calls, clears per task and gives pause priority', () => {
+  const h = browserAgentControlHarness();
+  const frame = (taskId, phase) => h.card._browserTaskActivity({ clientThreadId: 't', taskId, phase });
+  frame('a', 'start'); frame('b', 'start');
+  assert.equal(h.agentBadge.textContent, 'Agent 작업 중');
+  assert.equal(h.agentHandButton.textContent, '일시중지');
+  frame('a', 'stop');
+  assert.equal(h.card.dataset.egdTaskWorking, 'true');
+  frame('b', 'stop');
+  assert.equal(h.card.dataset.egdTaskWorking, undefined);
+  assert.notEqual(h.agentBadge.textContent, 'Agent 작업 중');
+  frame('c', 'start'); h.block.pauseAgentControl();
+  assert.equal(h.agentBadge.textContent, '대표님이 직접 조작 중');
+  assert.equal(h.card.dataset.egdTaskWorking, undefined);
+  frame('c', 'stop'); h.block.endAgentHold();
+  assert.notEqual(h.agentBadge.textContent, 'Agent 작업 중');
+});

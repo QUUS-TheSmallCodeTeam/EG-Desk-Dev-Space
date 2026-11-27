@@ -747,6 +747,17 @@ const OP_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'open', egdesk_brows
 export const STEP_TARGET_CHARS = 40
 export const optionTarget = option => compactText(String((option?.item?.kind === 'choice' && option.item.element.tag === 'select' ? option.item.element.options.find(o => o.value === option.item.desired)?.label : null) ?? option?.item?.element?.label ?? option?.value ?? '').replace(/^\[[A-Z]\d+\]\s*/, ''), STEP_TARGET_CHARS) || null
 export const optionOp = option => (option?.item?.kind === 'fill' ? 'fill' : option?.item?.kind === 'navigate' ? 'open' : option?.item?.readOnly?.kind === 'get_form' ? 'submit' : 'press')
+// The actor positively identifies displayable fields. Old snapshots and redacted controls fail closed.
+export function optionStepDisplay(option, text) {
+  const { kind, element, desired } = option?.item ?? {}
+  if (kind !== 'fill' && kind !== 'choice') return {}
+  const choice = kind === 'choice'
+  const value = choice ? (element?.tag === 'select' ? element.options?.find(o => o.value === desired)?.label : desired) : text
+  const safe = element?.displayValueSafe === true && !SENSITIVE_LABEL.test(element.label) && !/(?:인증\s*코드|verification\s*code|security\s*code)/i.test(element.label) && element.label !== 'Sensitive field'
+  const chars = [...String(value ?? '').replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim()]
+  return { ...(choice ? { op: 'select', target: compactText(element?.label, 40) } : {}),
+    displayValue: safe ? chars.length > 40 ? chars.slice(0, 39).join('') + '…' : chars.join('') : '●●●' }
+}
 const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch { return null } }
 
 /**
@@ -800,11 +811,11 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
   // Read-only observer for progress facts (step number and whether a tool call just succeeded); it cannot change the loop.
   const tell = info => { try { onStep?.(info) } catch { /* an observer never affects the loop */ } }
   const observe = (step, action) => tell({ step, ...(action ? { action } : {}) })
-  // a1: each page action also tells the observer what it was (op, the element's short name, the NAME of the value typed) and how long it took (ms: the call,
+  // Live step metadata includes the classified preview only; entry.actions never includes it. Timing (ms: the call,
   // stepMs: since the step began, its decision included). A refused call is told as `failed` (never `action`: the progress facts count only done actions).
   let stepStart = Date.now()
   // a wait carries no op: it is part of the step before it, never a line of its own (a reader that maps the tool name, like the runtime's step sink, drops it as before)
-  const described = (tool, meta) => ({ ...(tool === 'egdesk_browser_wait' && !meta.op ? {} : { op: meta.op ?? OP_OF_TOOL[tool] ?? 'act' }), target: typeof meta.target === 'string' && meta.target ? meta.target : null, ...(typeof meta.valueName === 'string' && meta.valueName ? { valueName: compactText(meta.valueName, 60) } : {}) })
+  const described = (tool, meta) => ({ ...(tool === 'egdesk_browser_wait' && !meta.op ? {} : { op: meta.op ?? OP_OF_TOOL[tool] ?? 'act' }), ...(typeof meta.displayValue === 'string' ? { displayValue: meta.displayValue } : {}), target: typeof meta.target === 'string' && meta.target ? meta.target : null, ...(typeof meta.valueName === 'string' && meta.valueName ? { valueName: compactText(meta.valueName, 60) } : {}) })
   async function act(entry, tool, args, meta = {}) {
     const t0 = Date.now()
     try {
@@ -910,7 +921,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
         const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
         if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) }) }
         attemptedRefs.add(action.args.ref)
-        const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready })
+        const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready, ...optionStepDisplay(option, action.args.text) })
         if (done.held) return { result: heldResult() }
         if (done.ok && option.item.element.role === 'time' && done.result?.status !== 'postcondition-observed') return { result: finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OUTCOME_UNKNOWN' }) }
         if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`); typedTexts.push(action.args.text) }
@@ -1154,7 +1165,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
           const seen = await callTool('egdesk_browser_observe', { cardId })
           return navigationLanded({ actual: seen?.snapshot?.url, expected: expectedUrl, from: snapshot.url, submitted })
         } : null
-        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
+        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...optionStepDisplay(option, action.args.text), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (done.held) return heldResult()
         if ((done.ok || done.code === 'POSTCONDITION_UNVERIFIED') && popupDone()) { entry.rule = 'popup_loaded'; return finish('done') }
         if (!done.ok) {

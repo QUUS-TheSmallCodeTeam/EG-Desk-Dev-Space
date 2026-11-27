@@ -958,6 +958,10 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       tag: String(node.tagName || "").toLowerCase(),
       href: node.href || node.getAttribute?.("href") || "",
       value: this.valueFor(node),
+      // Only the observed, visible, non-private control can release a short value to the local step UI.
+      ...(['input', 'select', 'textarea'].includes(String(node.tagName || '').toLowerCase()) &&
+        node.type !== 'hidden' && !node.hidden && !node.closest?.('[hidden],[aria-hidden="true"],[data-private],[data-sensitive]') &&
+        !this.screenshotSensitiveReason(node) ? { displayValueSafe: true } : {}),
       ...this.choiceFacts(node),
       disabled: this.isDisabled(node),
       bounds: this.roundedBounds(this.viewportRect(node)),

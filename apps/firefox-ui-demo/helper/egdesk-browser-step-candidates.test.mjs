@@ -175,7 +175,7 @@ for (const crowded of [false, true]) {
     const entry = createDirectBrowserEntry({ provider: w.provider, store: createBrowserTaskStore(), fieldText: () => true, onStepEvent: (_run, event) => steps.push(event) })
     const out = await entry.handle({ run: w.run, conversationKey: 'dm', message: MESSAGE, hosts: { card: 'duckduckgo.com' }, titles: { card: 'DuckDuckGo' } })
     assert.equal(out.status, 'done')
-    assert.deepEqual(steps.filter(event => event.op !== 'end').map(event => [event.op, event.target, event.ok]), [['fill', '개인 정보 노출 없이 검색', true], ['submit', '검색', true]])
+    assert.deepEqual(steps.filter(event => event.op !== 'end' && !event.phase).map(event => [event.op, event.target, event.ok]), [['fill', '개인 정보 노출 없이 검색', true], ['submit', '검색', true]])
     assert.equal(new URL(w.cur.url).searchParams.get('q'), QUERY)
     const stepRequests = w.requests.filter(request => request.questions.some(q => q.name === 'next_step'))
     assert.equal(stepRequests.length, 3)
