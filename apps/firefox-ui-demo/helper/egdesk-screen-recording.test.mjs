@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
-import { createScreenRecordingService, osCaptureRegion, verifyRecordingFiles } from './egdesk-screen-recording.mjs'
+import { createScreenRecordingService, verifyRecordingFiles, DEFAULT_SOURCE } from './egdesk-screen-recording.mjs'
 
 // Screen recording v1 bridge side (L37): flag gate, control line with a fake window, and the independent file check.
 const FFMPEG = '/opt/homebrew/bin/ffmpeg', FFPROBE = '/opt/homebrew/bin/ffprobe'
@@ -132,77 +132,99 @@ test('verifyRecordingFiles with ffprobe: a real WebM decodes; junk bytes do not'
   assert.notEqual(bad.playback, 'decodes'); assert.equal(bad.ok, false)
 })
 
-// ---- OS source (default): ffmpeg on the window's rectangle ----
-const GEOMETRY = { screenX: 139, screenY: 95, outerWidth: 1280, outerHeight: 720, dpr: 2, screen: { left: 0, top: 0, width: 1440, height: 900 } }
-function osFixture(t, { geometry = GEOMETRY, behavior = 'ok', verify = async () => ({ by: 'bridge', ok: true }) } = {}) {
-  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'egd-os-'))
+// ---- default source 'egdesk-windows' (L44): the ScreenCaptureKit tool on the windows of the Desk's own Firefox pid ----
+function winFixture(t, { pid = 4242, behavior = 'ok', verify = async () => ({ by: 'bridge', ok: true }), exists = async () => true } = {}) {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'egd-win-'))
   t.after(() => rmSync(dataDir, { recursive: true, force: true }))
   const commands = [], spawned = []
   let service
   const broadcast = event => {
     commands.push(event)
-    if (event.command === 'locate') queueMicrotask(() => service.report(geometry ? { id: event.id, state: 'located', geometry } : { id: event.id, state: 'failed', reason: 'no-desk' }))
+    if (event.command === 'locate') queueMicrotask(() => service.report(pid === 'none' ? { id: event.id, state: 'failed', reason: 'no-desk' } : { id: event.id, state: 'located', geometry: {}, ...(pid === null ? {} : { pid }) }))
   }
   const spawn = (bin, args) => {
     const child = new EventEmitter()
-    Object.assign(child, { exitCode: null, signalCode: null, stderr: new EventEmitter(), killed: [] })
-    child.stdin = { written: '', write(x) { this.written += x; if (behavior === 'ok') queueMicrotask(() => { child.exitCode = 0; child.emit('exit', 0, null) }) }, on() {} }
+    Object.assign(child, { exitCode: null, signalCode: null, stderr: new EventEmitter(), stdout: new EventEmitter(), killed: [] })
+    child.stdin = { written: '', write(x) { this.written += x; if (/^q/.test(x) && behavior === 'ok') queueMicrotask(() => { child.stdout.emit('data', '{"event":"stopped","frames":7,"maskedFrames":2}\n'); child.exitCode = 0; child.emit('exit', 0, null) }) }, on() {} }
     child.kill = sig => { child.killed.push(sig); child.signalCode = sig; queueMicrotask(() => child.emit('exit', null, sig)) }
-    if (behavior === 'denied') setTimeout(() => { child.stderr.emit('data', 'screen capture denied'); child.exitCode = 1; child.emit('exit', 1, null) }, 5)
+    setTimeout(() => {
+      if (behavior === 'denied') { child.stdout.emit('data', '{"event":"error","reason":"screen-recording-permission","detail":"denied"}\n'); child.exitCode = 1; child.emit('exit', 1, null) }
+      else child.stdout.emit('data', '{"event":"started","windows":2,"windowIds":[11,12],"video":{"width":1512,"height":982},"fps":5,"scale":1}\n{"event":"win')   // a line split across chunks
+    }, 5)
     spawned.push({ bin, args, child })
     return child
   }
-  service = createScreenRecordingService({ enabled: () => true, broadcast, dataDir, spawn, exists: async () => true, startAckMs: 200, stopAckMs: 200, startupMs: 60, quitMs: 100, intMs: 100, verify })
+  service = createScreenRecordingService({ enabled: () => true, broadcast, dataDir, spawn, exists, recorderPath: '/x/egdesk-screen-recorder', startAckMs: 200, stopAckMs: 200, startupMs: 80, quitMs: 100, intMs: 100, verify })
   return { service, commands, spawned, dataDir }
 }
+const sidecarOf = (f, id) => JSON.parse(readFileSync(path.join(f.dataDir, 'recordings', id + '.json'), 'utf8'))
 
-test('osCaptureRegion: points to even device pixels on the main display; untrusted geometry is refused', () => {
-  const r = osCaptureRegion(GEOMETRY)
-  assert.deepEqual(r.pixels, { x: 278, y: 190, width: 2560, height: 1440 }); assert.equal(r.outWidth, 1280)
-  assert.deepEqual(osCaptureRegion({ ...GEOMETRY, screenX: -40 }).points, { x: 0, y: 95, width: 1240, height: 720 }, 'clipped to the display')
-  assert.equal(osCaptureRegion({ ...GEOMETRY, screen: { ...GEOMETRY.screen, left: 1440 } }).error, 'not-main-display')
-  assert.equal(osCaptureRegion({ ...GEOMETRY, screenX: 5000 }).error, 'window-off-screen')
-  assert.equal(osCaptureRegion({ ...GEOMETRY, dpr: 'x' }).error, 'geometry-invalid')
-  assert.equal(osCaptureRegion(null).error, 'geometry-invalid')
-})
-
-test('OS source is the default: locate -> ffmpeg on the region -> dot on; stop sends q, dot off, sidecar says no mask', async t => {
-  const f = osFixture(t)
+test('default source: locate gives the Firefox pid -> recorder is started with that pid only; sidecar has filter pid, windows, intervals; stop sends q', async t => {
+  const f = winFixture(t)
   const start = await call(f.service, 'POST', '/v1/recording/start', { label: 'update dialog', fps: 12 })
-  assert.equal(start.status, 200); assert.equal(start.body.recording.source, 'os'); assert.match(start.body.recording.file, /\.mp4$/)
-  assert.deepEqual(f.commands.map(c => c.command), ['locate', 'indicator'])
-  assert.equal(f.commands[1].on, true)
-  const args = f.spawned[0].args
-  assert.equal(args[args.indexOf('-vf') + 1], 'crop=2560:1440:278:190,scale=1280:-2')
-  assert.equal(args[args.indexOf('-framerate') + 1], '12'); assert.ok(args.includes('avfoundation')); assert.ok(args.includes('h264_videotoolbox'))
-  const side = JSON.parse(readFileSync(path.join(f.dataDir, 'recordings', start.body.recording.id + '.json'), 'utf8'))
-  assert.equal(side.mask, 'none'); assert.match(side.maskNote, /no mask/); assert.match(side.regionNote, /not followed/); assert.equal(side.region.points.x, 139); assert.equal(side.owner.kind, 'bridge-http')
-  assert.equal(side.state, 'recording')
+  assert.equal(start.status, 200); assert.equal(start.body.recording.source, DEFAULT_SOURCE); assert.match(start.body.recording.file, /\.mp4$/)
+  assert.deepEqual(f.commands.map(c => c.command), ['locate', 'indicator']); assert.equal(f.commands[1].on, true)
+  const { bin, args } = f.spawned[0]
+  assert.equal(bin, '/x/egdesk-screen-recorder'); assert.equal(args[args.indexOf('--pid') + 1], '4242'); assert.equal(args[args.indexOf('--fps') + 1], '12')
+  assert.ok(!args.some(a => /crop|avfoundation|ffmpeg/.test(a)), 'no fixed screen rectangle any more')
+  f.spawned[0].child.stdout.emit('data', 'dows","count":3,"windowIds":[11,12,13]}\n')   // the split line completes: a dialog opened
+  const side = sidecarOf(f, start.body.recording.id)
+  assert.equal(side.source, 'egdesk-windows-screencapturekit'); assert.equal(side.filter.kind, 'include-windows-of-pid'); assert.equal(side.filter.pid, 4242); assert.equal(side.filter.windowCount, 2)
+  assert.equal(side.mask, 'none'); assert.match(side.maskNote, /not connected/); assert.equal(side.owner.kind, 'bridge-http'); assert.equal(side.state, 'recording')
   const stop = await call(f.service, 'POST', '/v1/recording/stop')
-  assert.equal(stop.status, 200); assert.equal(stop.body.status, 'finished'); assert.equal(f.spawned[0].child.stdin.written, 'q')
-  assert.deepEqual(f.commands.map(c => c.command).slice(-1), ['indicator']); assert.equal(f.commands.at(-1).on, false)
-  const done = JSON.parse(readFileSync(path.join(f.dataDir, 'recordings', start.body.recording.id + '.json'), 'utf8'))
-  assert.equal(done.state, 'finished'); assert.equal(done.stopReason, 'requested'); assert.ok(done.endedAt)
+  assert.equal(stop.status, 200); assert.equal(stop.body.status, 'finished'); assert.equal(f.spawned[0].child.stdin.written, 'q\n')
+  assert.equal(f.commands.at(-1).on, false)
+  const done = sidecarOf(f, start.body.recording.id)
+  assert.equal(done.state, 'finished'); assert.equal(done.stopReason, 'requested'); assert.ok(done.endedAt); assert.deepEqual(done.frames, { count: 7, masked: 2 })
+  assert.deepEqual(done.intervals.map(i => i.windows), [2, 3]); assert.equal(done.intervals[0].toMs, done.intervals[1].fromMs); assert.equal(done.intervals[1].toMs, null)
 })
 
-test('OS source refusals: capture denied at startup, window gone, bad geometry; nothing stays recording', async t => {
-  const denied = osFixture(t, { behavior: 'denied' })
+test("the old fixed-rectangle source 'os' is gone: refused as an unknown source, nothing is spawned", async t => {
+  const f = winFixture(t)
+  const r = await call(f.service, 'POST', '/v1/recording/start', { source: 'os' })
+  assert.equal(r.status, 400); assert.equal(r.body.reason, 'source'); assert.equal(f.spawned.length, 0); assert.equal(f.commands.length, 0)
+})
+
+test('the pid is never taken from the request: a pid field is an unknown field, and a window without a pid is refused', async t => {
+  const f = winFixture(t)
+  assert.equal((await call(f.service, 'POST', '/v1/recording/start', { pid: 1234 })).body.reason, 'unknown-field')
+  assert.equal(f.spawned.length, 0)
+  const noPid = winFixture(t, { pid: null })
+  const r = await call(noPid.service, 'POST', '/v1/recording/start', {})
+  assert.equal(r.status, 422); assert.equal(r.body.reason, 'no-firefox-pid'); assert.equal(noPid.spawned.length, 0)
+  assert.equal((await call(winFixture(t, { pid: 'none' }).service, 'POST', '/v1/recording/start', {})).body.reason, 'no-desk')
+})
+
+test('refusals: no Screen Recording permission is a clear refusal (reason + detail in the sidecar), recorder missing, nothing stays recording', async t => {
+  const denied = winFixture(t, { behavior: 'denied' })
   const r = await call(denied.service, 'POST', '/v1/recording/start', {})
-  assert.equal(r.status, 422); assert.equal(r.body.reason, 'capture-failed'); assert.equal((await call(denied.service, 'GET', '/v1/recording')).body.status, 'idle')
+  assert.equal(r.status, 422); assert.equal(r.body.reason, 'screen-recording-permission'); assert.equal((await call(denied.service, 'GET', '/v1/recording')).body.status, 'idle')
   assert.equal(denied.commands.at(-1).on, false)
-  assert.equal((await call(osFixture(t, { geometry: null }).service, 'POST', '/v1/recording/start', {})).body.reason, 'no-desk')
-  assert.equal((await call(osFixture(t, { geometry: { ...GEOMETRY, screenX: 9999 } }).service, 'POST', '/v1/recording/start', {})).body.reason, 'window-off-screen')
+  const side = sidecarOf(denied, r.body.recording.id); assert.equal(side.state, 'failed'); assert.match(side.error, /screen-recording-permission: denied/)
+  const missing = winFixture(t, { exists: async () => false })
+  assert.equal((await call(missing.service, 'POST', '/v1/recording/start', {})).body.reason, 'recorder-unavailable'); assert.equal(missing.spawned.length, 0)
 })
 
-test('OS source: an encoder that ignores q is interrupted then killed and the recording is marked failed; closing() stops it too', async t => {
-  const stuck = osFixture(t, { behavior: 'stuck' })
+test('a recorder that ignores q is interrupted then killed and the recording is marked failed; closing() stops it too', async t => {
+  const stuck = winFixture(t, { behavior: 'stuck' })
   await call(stuck.service, 'POST', '/v1/recording/start', {})
   const stop = await call(stuck.service, 'POST', '/v1/recording/stop')
-  assert.deepEqual(stuck.spawned[0].child.killed, ['SIGINT'], 'SIGINT was enough here')
-  assert.equal(stop.body.status, 'finished')
-  const g = osFixture(t)
+  assert.deepEqual(stuck.spawned[0].child.killed, ['SIGINT']); assert.equal(stop.body.status, 'failed')
+  const g = winFixture(t)
   await call(g.service, 'POST', '/v1/recording/start', {})
   g.service.closing()
   await new Promise(r => setTimeout(r, 30))
-  assert.equal(g.spawned[0].child.stdin.written, 'q')
+  assert.equal(g.spawned[0].child.stdin.written, 'q\n')
+})
+
+test('mask boxes from the window are forwarded to the recorder stdin as JSON lines with a rising revision and logged in the sidecar', async t => {
+  const f = winFixture(t)
+  assert.equal(f.service.setMask([{ x: 1, y: 2, width: 3, height: 4 }]), false, 'no recording: nothing to mask')
+  const start = await call(f.service, 'POST', '/v1/recording/start', {})
+  assert.equal(await f.service.report({ id: start.body.recording.id, state: 'mask', boxes: [{ x: 10, y: 20, width: 30, height: 40 }, { x: 'bad' }] }), true)
+  assert.equal(f.spawned[0].child.stdin.written, '{"mask":[{"x":10,"y":20,"w":30,"h":40}],"rev":1}\n')
+  const side = sidecarOf(f, start.body.recording.id)
+  await call(f.service, 'POST', '/v1/recording/stop')
+  const done = sidecarOf(f, start.body.recording.id)
+  assert.equal(done.mask, 'recorder-stdin'); assert.equal(done.maskRevision, 1); assert.equal(done.maskRevisions[0].boxes, 1); assert.equal(side.state, 'recording')
 })

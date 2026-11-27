@@ -1,5 +1,5 @@
-// Screen recording control (temporary name): node record.mjs start [--source os|window] [--fps N] [--scale S] [--max-sec N] [label...] | stop | status
-// --source os (default): what a person sees, separate windows and dialogs included (ffmpeg on the Desk window's rectangle, 10 fps, MP4). NO MASK: QA only.
+// Screen recording control (temporary name): node record.mjs start [--source egdesk-windows|window|window] [--fps N] [--scale S] [--max-sec N] [label...] | stop | status
+// --source egdesk-windows (default): the windows of the EG-Desk Firefox process only (main window + its own dialogs, e.g. the update window), other apps never recorded even when in front (ScreenCaptureKit tool, 5 fps, MP4). Needs Screen Recording permission and the tool built by scripts/build-screen-recorder.sh.
 // --source window: the Desk window's own masked capture (WebM, 4 fps at scale 0.5; --fps/--scale apply), but separate windows are not seen.
 // Bridge HTTP only (127.0.0.1:39218), no Marionette. The bridge needs EGDESK_SCREEN_RECORDING=on (default off).
 // start prints the recording id and file; stop waits for the window to finish and for the bridge to re-read the file, then prints the check.
