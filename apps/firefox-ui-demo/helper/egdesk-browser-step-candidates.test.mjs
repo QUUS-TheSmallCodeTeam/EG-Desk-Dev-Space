@@ -2,14 +2,15 @@
 // (browser_entry 1.0), its first step held (next_step top 0.52, second 0.21, 47 options) and the conversation model did the whole request (23.4 s). Found by replaying the Card's
 // controls (egdesk-ddg-live-controls.fixture.mjs) through the product code and the real model (report l8b-a2):
 //  1. DuckDuckGo's search box is an <input role="combobox">: the loop never offered it (a combobox was a text field only on a <textarea>), so no option could type the search;
-//  2. a long page asks one choice over 40+ options and the answer spreads; a crowded step is now fanned out by the kind of action in the same request;
-//  3. two links with one name ("Duck.ai") turned an undecided TYPING step into "which of these two?";
-//  4. after typing, the read-only search was the top choice at 0.74 (bar 0.75) on the short home page.
+//  2. with no option that types, the choice spread over the controls that look like search (the form wrapper 0.34-0.53, the 검색 button 0.33, needs_free_text);
+//  3. two links with one name ("Duck.ai") turned an undecided TYPING step (and the search after it) into "which of these two?";
+//  4. after typing, the read-only search was the top choice at 0.74 / 0.65 (bar 0.75).
+// A crowded step stays ONE choice: a fan-out by kind (tried, measured) dropped link steps under the bar ("이미지 탭 열어줘" 0.84 -> 0.66).
 // Synthetic: the observed controls, page doubles, fake decision answers (shaped like the measured ones), the real objective loop and entry; no Firefox, no engine.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
-import { CROWDED_STEP_OPTIONS, STEP_GROUPS, buildReflexCandidates, crowdedStep, decideReflexStep, runBrowserReflex, typedSearch, withoutPageText } from './egdesk-browser-reflex.mjs'
+import { buildReflexCandidates, decideReflexStep, runBrowserReflex, typedSearch, withoutPageText } from './egdesk-browser-reflex.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry } from './egdesk-browser-task.mjs'
 import { undecidedField } from './egdesk-browser-field-text.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
@@ -46,46 +47,15 @@ test('a2 the replayed Card: the search box is an <input> combobox; the loop offe
   assert.deepEqual([lists.options.length, lists.personOnly.map(control => control.label)], [0, ['지역', '정렬']])
 })
 
-test('a2 a crowded step is fanned out in one request: the decisive options and one option per other kind, each kind\'s targets its own question; a short page is asked as before', async () => {
+test('a2 a crowded step is still ONE choice over all its options (the request as before, now with the search box among them)', async () => {
   const snapshot = ddgResultsSnapshot()
   const { options } = buildReflexCandidates(snapshot, { textComboboxes: true })
-  const fan = crowdedStep(options)
-  assert.ok(options.length > CROWDED_STEP_OPTIONS && fan)
-  assert.deepEqual(fan.direct.map(option => option.value), [FIELD, '[B2] 검색'])
-  assert.deepEqual([fan.groups.open_link.length, fan.groups.press_other.length], [18, 20])
   const client = fakeClient(() => ({ next_step: ranked('next_step', [['goal_met', 0.6], [FIELD, 0.2]]), goal_met: { name: 'goal_met', type: 'predicate', probability: 0.97 } }))
   const out = await decideReflexStep({ goal: MESSAGE, snapshot: withoutPageText(snapshot), options, client, thresholds: T })
-  const [request] = client.requests
-  const questions = Object.fromEntries(request.questions.map(q => [q.name, q]))
-  assert.deepEqual(questions.next_step.choices.map(choice => choice.value), [FIELD, '[B2] 검색', 'open_link', 'press_other', 'scroll_more', 'goal_met', 'needs_free_text', 'needs_user_context', 'blocked'])
-  assert.deepEqual([questions.step_link.choices.length, questions.step_press.choices.length], [18, 20])
-  assert.equal(questions.step_link.instructions, STEP_GROUPS.open_link.ask)
+  const choices = client.requests[0].questions.filter(q => q.type === 'choice')
+  assert.deepEqual(choices.map(q => [q.name, q.choices.length]), [['next_step', 45]])
+  assert.equal(choices[0].choices[2].value, FIELD)
   assert.equal(out.kind, 'done')
-  // a page of at most CROWDED_STEP_OPTIONS element options: one choice over all of them, no target questions (the request as before)
-  const short = { url: `${D}/`, revision: 1, title: 'DuckDuckGo', text: [], interactiveElements: ddgResultsSnapshot({ value: '' }).interactiveElements.filter(element => ['el_1', 'el_2', 'el_3', 'el_4', 'el_12', 'el_14', 'el_78'].includes(element.ref)) }
-  const few = buildReflexCandidates(short, { textComboboxes: true }).options
-  assert.equal(crowdedStep(few), null)
-  const small = fakeClient(() => ({ next_step: ranked('next_step', [[FIELD, 0.9], ['needs_free_text', 0.05]]), goal_met: { name: 'goal_met', type: 'predicate', probability: 0.02 } }))
-  await decideReflexStep({ goal: MESSAGE, snapshot: withoutPageText(short), options: few, client: small, thresholds: T })
-  assert.deepEqual(small.requests[0].questions.filter(q => q.type === 'choice').map(q => [q.name, q.choices.length]), [['next_step', few.length + 5]])
-})
-
-test('a2 the fanned answer: a kind is taken only when next_step decided it and its own question decided one target; otherwise undecided with the targets ranked', async () => {
-  const snapshot = ddgResultsSnapshot()
-  const { options } = buildReflexCandidates(snapshot, { textComboboxes: true })
-  const no = { goal_met: { name: 'goal_met', type: 'predicate', probability: 0.02 } }
-  const ask = async answers => decideReflexStep({ goal: '이미지 탭 열어줘', snapshot: withoutPageText(snapshot), options, client: fakeClient(() => ({ ...no, ...answers })), thresholds: T })
-  const decided = await ask({ next_step: ranked('next_step', [['open_link', 0.9], [FIELD, 0.05]]), step_link: ranked('step_link', [['[L3] 이미지', 0.95], ['[L4] 동영상', 0.02]]), step_press: ranked('step_press', [['[B1] react-search-form', 0.5], ['[B4] 검색 설정', 0.3]]) })
-  assert.deepEqual([decided.kind, decided.option?.value, decided.next.fan.group], ['act', '[L3] 이미지', 'open_link'])
-  assert.ok(Math.abs(decided.next.confidence - 0.9 * 0.95) < 1e-9)
-  const unsure = await ask({ next_step: ranked('next_step', [['open_link', 0.9], [FIELD, 0.05]]), step_link: ranked('step_link', [['[L3] 이미지', 0.5], ['[L4] 동영상', 0.4]]), step_press: ranked('step_press', [['[B1] react-search-form', 0.5], ['[B4] 검색 설정', 0.3]]) })
-  // undecided; on this page the c16 rule then asks which of its alike elements (two "namu.wiki 도메인 검색" links), with the targets ranked by kind x target
-  assert.deepEqual([unsure.kind, unsure.candidates], ['user_context', ['[L8] namu.wiki 도메인 검색', '[L9] namu.wiki 도메인 검색']])
-  assert.deepEqual(unsure.ranked.map(row => row.value), ['[L3] 이미지', '[L4] 동영상', FIELD])
-  const weakKind = await ask({ next_step: ranked('next_step', [['open_link', 0.6], ['scroll_more', 0.3]]), step_link: ranked('step_link', [['[L3] 이미지', 0.99], ['[L4] 동영상', 0.01]]), step_press: ranked('step_press', [['[B1] react-search-form', 0.5], ['[B4] 검색 설정', 0.3]]) })
-  assert.notEqual(weakKind.kind, 'act', 'the kind itself was not decided')
-  const direct = await ask({ next_step: ranked('next_step', [['[B2] 검색', 0.93], [FIELD, 0.07]]), step_link: ranked('step_link', [['[L1] DuckDuckGo home', 0.4], ['[L2] 모두', 0.3]]), step_press: ranked('step_press', [['[B1] react-search-form', 0.9], ['[B4] 검색 설정', 0.05]]) })
-  assert.deepEqual([direct.kind, direct.option?.value], ['act', '[B2] 검색'], 'a decisive option is taken as itself; the other kinds\' answers do not matter')
 })
 
 test('a2 an undecided TYPING step is not a "which of these alike elements" question; an undecided step over alike elements still is', async () => {
@@ -99,6 +69,13 @@ test('a2 an undecided TYPING step is not a "which of these alike elements" quest
   assert.equal(typing.kind, 'uncertain')
   const alike = await decideReflexStep({ goal: 'Duck.ai 열어줘', snapshot: page, options, client: fakeClient(() => ({ ...no, next_step: ranked('next_step', [['[L1] Duck.ai', 0.5], ['[L2] Duck.ai', 0.45]]) })), thresholds: T })
   assert.deepEqual([alike.kind, alike.candidates], ['user_context', ['[L1] Duck.ai', '[L2] Duck.ai']])
+  // the search of the text this run typed is exempt as well (only with that text: the same answer without it asks which)
+  const typedPage = { ...page, interactiveElements: [...page.interactiveElements.map(element => (element.ref === 'q' ? { ...element, value: QUERY } : element)),
+    { ref: 's', role: 'button', tag: 'button', label: '검색', href: '', value: '', nav: { type: 'submit', sensitiveRegion: false, regionLabel: '', form: { method: 'get', fields: ['text'], sensitive: false, submitUrl: `${D}/?q=${encodeURIComponent(QUERY)}` }, controls: null } }] }
+  const typedOptions = buildReflexCandidates(typedPage, { textComboboxes: true }).options
+  const after = answers => fakeClient(() => ({ ...no, next_step: ranked('next_step', [['[B1] 검색', 0.65], ['[F1] 검색', 0.28]]) }))
+  assert.equal((await decideReflexStep({ goal: MESSAGE, snapshot: typedPage, options: typedOptions, typedTexts: [QUERY], client: after(), thresholds: T })).kind, 'uncertain')
+  assert.equal((await decideReflexStep({ goal: MESSAGE, snapshot: typedPage, options: typedOptions, client: after(), thresholds: T })).kind, 'user_context')
 })
 
 test('a2 undecidedField: a text field in the top two, else the page\'s only text field (soleField), else none', () => {
@@ -154,10 +131,9 @@ function duckCard({ crowded = false, searchTop = 0.74 } = {}) {
       else if (names.includes('next_step')) {
         const onResults = /URL: https:\/\/duckduckgo\.com\/\?q=/.test(evidence)
         const typed = /filled \[F1\]/.test(evidence)
-        // measured (real gpt-6-luna, l8b-a2): home 0.61 / 0.49 (crowded) for the field; after typing the search at 0.74 (short page) / 0.92 (crowded); the results page: goal met
-        const pick = onResults ? [['goal_met', 0.61], [FIELD, 0.16]] : typed ? [['[B2] 검색', crowded ? 0.92 : searchTop], [FIELD, 0.14]] : [[FIELD, crowded ? 0.49 : 0.61], ['[B1] react-search-form', 0.15]]
+        // measured (real gpt-6-luna, l8b-a2): the field at 0.61 (short page) / 0.55 (crowded); after typing the search at 0.74 / 0.65; the results page: goal met
+        const pick = onResults ? [['goal_met', 0.61], [FIELD, 0.16]] : typed ? [['[B2] 검색', crowded && searchTop === 0.74 ? 0.65 : searchTop], [FIELD, crowded ? 0.28 : 0.14]] : [[FIELD, crowded ? 0.55 : 0.61], ['[B1] react-search-form', 0.15]]
         answers.push(ranked('next_step', pick), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: onResults ? 0.97 : 0.01 })
-        for (const q of request.questions.filter(item => /^step_/.test(item.name))) answers.push(ranked(q.name, [[q.choices[0].value, 0.6], [q.choices[1].value, 0.2]]))
       } else for (const q of request.questions) answers.push(q.type === 'choice' ? ranked(q.name, [[q.choices[0].value, 0.9]]) : { name: q.name, type: 'predicate', probability: 0.02 })
       return { ok: true, text: async () => JSON.stringify({ answers }) }
     } })
@@ -177,7 +153,8 @@ for (const crowded of [false, true]) {
     assert.equal(new URL(w.cur.url).searchParams.get('q'), QUERY)
     const stepRequests = w.requests.filter(request => request.questions.some(q => q.name === 'next_step'))
     assert.equal(stepRequests.length, 3)
-    assert.equal(stepRequests[0].questions.some(q => q.name === 'step_link'), crowded, 'the crowded home is fanned out')
+    assert.deepEqual(stepRequests[0].questions.filter(q => q.type === 'choice').map(q => q.name), ['next_step'], 'one choice, crowded or not')
+    if (crowded) assert.ok(stepRequests[0].questions[0].choices.length > 40, 'the crowded home offers every element')
     assert.equal(stepRequests[0].questions.find(q => q.name === 'next_step').choices.some(choice => choice.value === FIELD), true, 'the search box is an option')
     for (const request of stepRequests) assert.match(request.input[1].content, /the page's own text is not sent/, 'page text off (the default)')
     assert.equal(w.requests.filter(request => request.questions.some(q => q.name === 'field_text')).length, 1)
