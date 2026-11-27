@@ -795,10 +795,12 @@ export function optionStepDisplay(option, text) {
   const { kind, element, desired } = option?.item ?? {}
   if (kind !== 'fill' && kind !== 'choice') return {}
   const choice = kind === 'choice'
-  const value = choice ? (element?.tag === 'select' ? element.options?.find(o => o.value === desired)?.label : desired) : text
-  const safe = element?.displayValueSafe === true && !SENSITIVE_LABEL.test(element.label) && !/(?:인증\s*코드|verification\s*code|security\s*code)/i.test(element.label) && element.label !== 'Sensitive field'
+  const list = choice && element?.tag === 'select'
+  // radio/checkbox: the shown value is the control's own name (not the internal checked/unchecked state); an unnamed field never previews
+  const value = choice ? (list ? element.options?.find(o => o.value === desired)?.label : element?.label) : text
+  const safe = element?.displayValueSafe === true && typeof element.label === 'string' && element.label.trim() !== '' && !SENSITIVE_LABEL.test(element.label) && !/(?:인증\s*코드|verification\s*code|security\s*code)/i.test(element.label) && element.label !== 'Sensitive field'
   const chars = [...String(value ?? '').replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim()]
-  return { ...(choice ? { op: 'select', target: compactText(element?.label, 40) } : {}),
+  return { ...(choice ? { op: 'select', target: list ? compactText(element?.label, 40) : null } : {}),
     displayValue: safe ? chars.length > 40 ? chars.slice(0, 39).join('') + '…' : chars.join('') : '●●●' }
 }
 const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch { return null } }
