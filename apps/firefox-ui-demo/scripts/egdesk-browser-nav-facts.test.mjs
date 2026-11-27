@@ -19,9 +19,25 @@ test('a GET form submitter: method, field kinds and the exact URL the submission
     form: { method: 'get', fields: ['select', 'hidden', 'checkbox', 'text', 'button'], sensitive: false, submitUrl: 'https://bank.example.test/card/result?period=2026-11&kind=card&go=1' } })
 })
 
-test('a POST form has no submit URL; a password or a sensitive field marks the form sensitive (no URL); a region and a controlled panel are reported', () => {
+test('POST reports only a verified native destination; missing ancestry, invalid URLs and private forms retain facts without a URL', () => {
   const post = node('BUTTON', { type: 'submit' }, { ownerDocument: doc }); post.form = formWith({ method: 'post', action: '/card/result' }, [post])
   assert.deepEqual([actor().navigationFacts(post).form.method, actor().navigationFacts(post).form.submitUrl], ['post', null])
+  const field = node('INPUT', { type: 'text', name: 'feedback' })
+  Object.defineProperty(field, 'value', { get() { throw Error('POST observation must not read this') } })
+  post.form.elements.unshift(field)
+  post.form.closest = () => null
+  assert.deepEqual(actor().navigationFacts(post).form, { method: 'post', fields: ['text', 'button'], sensitive: false, submitUrl: 'https://bank.example.test/card/result' })
+  for (const action of ['https://elsewhere.example.test/path', 'https://[']) {
+    post.form = { ...formWith({ method: 'post', action }, [field, post]), closest: () => null }
+    assert.deepEqual(actor().navigationFacts(post).form, { method: 'post', fields: ['text', 'button'], sensitive: false, submitUrl: null })
+  }
+  post.form = { ...formWith({ method: 'post', action: '/card/result' }, [post]), closest: () => ({}) }
+  assert.equal(actor().navigationFacts(post).form.submitUrl, null)
+  post.form = { ...post.form, closest: () => null, elements: [node('INPUT', { type: 'password' }), post] }
+  assert.deepEqual(actor().navigationFacts(post).form, { method: 'post', fields: ['password', 'button'], sensitive: true, submitUrl: null })
+})
+
+test('a password marks the form sensitive (no URL); outside forms a region and a controlled panel are reported', () => {
   const pw = node('BUTTON', {}, { ownerDocument: doc }); pw.form = formWith({ action: '/login' }, [node('INPUT', { type: 'password', name: 'pw' }, { value: '' }), pw])
   assert.deepEqual([actor().navigationFacts(pw).form.sensitive, actor().navigationFacts(pw).form.submitUrl], [true, null])
   const region = { getAttribute: name => (name === 'aria-label' ? '결제 정보' : null), querySelector: () => null }

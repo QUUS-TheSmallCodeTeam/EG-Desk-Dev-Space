@@ -990,7 +990,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   // L8 c20: facts the helper's read-only-navigation proof reads for a button (the helper presses one only when they prove a same-site GET
   // form submission or a client-side view change). Facts only, never a decision; null for anything that is not a button.
   //   type: the button's type; sensitiveRegion: inside [data-sensitive]/[data-private]; regionLabel: the nearest region's label;
-  //   form: { method, fields: field kinds, sensitive, submitUrl: the exact URL a GET submission loads } (a form submitter only);
+  //   form: { method, fields: field kinds, sensitive, submitUrl: the GET URL with parameters, or the same-origin native POST destination without field values } (a form submitter only);
   //   controls: { text } of the panel it controls (aria-controls), for a button outside any form.
   navigationFacts(node) {
     try {
@@ -1030,13 +1030,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
           if (ftype === "file" && (!field.getAttribute?.("name") || field.disabled)) continue;
           if (ftype === "password" || ftype === "file" || this.isSensitiveControl(field, { allowHidden: true }) || isSensitiveAutocomplete(field.getAttribute?.("autocomplete"))) sensitive = true;
           fields.push(ftype);
+          if (method !== "get") continue; // POST observation never reads or serializes field values.
           const name = field.getAttribute?.("name");
           if (!name || field.disabled || ["submit", "button", "image", "reset", "file"].includes(ftype)) continue;
           if ((ftype === "checkbox" || ftype === "radio") && !field.checked) continue;
           params.push([name, String(field.value ?? "")]);
         }
         const own = node.getAttribute?.("name");
-        if (own) params.push([own, String(node.value ?? "")]);
+        if (method === "get" && own) params.push([own, String(node.value ?? "")]);
         let submitUrl = null;
         if (method === "get" && !sensitive) {
           const doc = node.ownerDocument;
@@ -1047,11 +1048,15 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         }
         // Provisional: for a complete native POST form expose its destination, never field values.
         // Hidden and unknown controls are not evidence for an unattended write.
-        if (method === 'post' && !sensitive && form.elements.length <= 40 && !fields.includes('hidden') &&
-            !node.hasAttribute('formtarget') && !form.getAttribute('target') && !form.closest('[data-private],[data-sensitive]')) {
+        if (method === 'post' && !sensitive && !sensitiveRegion && form.elements?.length <= 40 && !fields.includes('hidden') &&
+            typeof node.getAttribute === 'function' && node.getAttribute('formtarget') === null &&
+            typeof form.getAttribute === 'function' && !form.getAttribute('target') &&
+            typeof form.closest === 'function' && !form.closest('[data-private],[data-sensitive]')) {
           const doc = node.ownerDocument;
-          const url = new URL(node.getAttribute('formaction') || form.getAttribute('action') || doc.URL, doc.baseURI);
-          if (url.origin === new URL(doc.URL).origin && !url.username && !url.password) submitUrl = url.href;
+          try {
+            const url = new URL(node.getAttribute('formaction') || form.getAttribute('action') || doc?.URL, doc?.baseURI || doc?.URL);
+            if (['http:', 'https:'].includes(url.protocol) && url.origin === new URL(doc.URL).origin && !url.username && !url.password) submitUrl = url.href;
+          } catch { /* No verified destination; retain the other form facts. */ }
         }
         facts.form = { method, fields, sensitive, submitUrl };
       } else if (!form) {
