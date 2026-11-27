@@ -26397,7 +26397,8 @@
   // L42 (egdesk.perf.sleepHiddenCards, default off): a Browser card off the screen or shown small is put to sleep (inactive <browser>),
   // woken when it is seen again or an Agent/Decision-model tool reaches it. See EGDeskCardSleep.sys.mjs. No UI, no text.
   let cardSleeper = null, cardSleepTimer = 0;
-  const CardSleep = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCardSleep.sys.mjs');
+  let cardSleepModule = null; // imported only when the flag is on
+  const CardSleep = new Proxy({}, { get: (_, key) => (cardSleepModule ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCardSleep.sys.mjs'))[key] });
   function perfSleepHiddenCardsEnabled() { try { return readSurfacePref('egdesk.perf.sleepHiddenCards') === 'on'; } catch { return false; } }
   function cardSleepEntry(card) {
     const browser = card._xulBrowser;
