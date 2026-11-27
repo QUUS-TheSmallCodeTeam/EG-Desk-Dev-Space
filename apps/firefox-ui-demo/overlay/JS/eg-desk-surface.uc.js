@@ -11485,8 +11485,9 @@
     let timer = null;
     let disposed = false;
     let refreshOnResume = false;
-    const pollMs = 1000;
-    const staleMs = 4000;
+    // L38: egdesk.perf.slowResourcePoll="on" polls every 3 s instead of 1 s (each poll makes the bridge run route/netstat/ioreg).
+    const pollMs = (() => { try { return readSurfacePref('egdesk.perf.slowResourcePoll') === 'on' ? 3000 : 1000; } catch { return 1000; } })();
+    const staleMs = pollMs + 3000;
     const requestTimeoutMs = 2500;
     const buttons = new Map();
     const overviewValues = new Map();
@@ -26316,7 +26317,31 @@
   }
 
 
+  // L38: staggered load of restored browser cards. Cards in view load at once; the rest one per ~1.2 s so content processes do not all start together.
+  function perfStaggerBrowserLoadEnabled() { try { return readSurfacePref('egdesk.perf.staggerBrowserLoad') === 'on'; } catch { return false; } }
+  const restoredBrowserLoadQueue = [];
+  let restoredBrowserLoadTimer = 0;
+  function queueRestoredBrowserLoad(xulBrowser, url, wrap) {
+    const load = () => { try { if (xulBrowser.isConnected && !xulBrowser.getAttribute('src')) xulBrowser.setAttribute('src', url); } catch {} };
+    let inView = false;
+    try {
+      const r = wrap.getBoundingClientRect();
+      inView = r.width > 0 && r.right > 0 && r.bottom > 0 && r.left < window.innerWidth && r.top < window.innerHeight;
+    } catch {}
+    if (inView) { load(); return; }
+    restoredBrowserLoadQueue.push(load);
+    if (restoredBrowserLoadTimer) return;
+    restoredBrowserLoadTimer = window.setInterval(() => {
+      const next = restoredBrowserLoadQueue.shift();
+      if (next) next();
+      if (!restoredBrowserLoadQueue.length) { window.clearInterval(restoredBrowserLoadTimer); restoredBrowserLoadTimer = 0; }
+    }, 1200);
+  }
+
   function spawnBrowserCard(initialUrl = 'https://duckduckgo.com', options = {}) {
+    // L38 (egdesk.perf.staggerBrowserLoad, default off): a card restored from the saved Desk defers its src and loads through the queue below.
+    const staggerLoad = !options.deferInitialLoad && state.agenda?.restoreInProgress === true && perfStaggerBrowserLoadEnabled();
+    if (staggerLoad) options = { ...options, deferInitialLoad: true };
     const normalizedUrl = normalizeBrowserNavigationUri(initialUrl);
     const identityRequired = Object.hasOwn(options, 'browserIdentity') || options.sourceRef?.browserIdentityRequired === true || !!options.sourceRef?.browserIdentityKey;
     // BRW-02: a user-opened site follows its remembered account context, if any.
@@ -26603,6 +26628,7 @@
     }
 
     const agentTargetMarker = el('span', { class: 'egd-browser-agent-target', 'aria-hidden': 'true', hidden: true });
+    if (staggerLoad && xulBrowser) queueRestoredBrowserLoad(xulBrowser, normalizedUrl, wrap);
     wrap.appendChild(agentTargetMarker);
     const agentProjection = createBrowserAgentProjection({ card, marker: agentTargetMarker,
       current: browserToolProjectionCurrent });
@@ -33281,6 +33307,7 @@
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);
       try { installDeskPresence(); } catch { /* optional: the Desk works the same without presence */ }
+      try { if (readSurfacePref('egdesk.perf.flatFrost') === 'on') document.documentElement.setAttribute('egd-perf-flat-frost', ''); } catch { /* L38 optional: default off */ }
       window.__egdesk = {
         state,
         semantic,

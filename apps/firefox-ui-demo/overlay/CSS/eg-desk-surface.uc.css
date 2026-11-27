@@ -11652,3 +11652,10 @@ button.egd-memo-ask-cancel:hover { text-decoration: underline; }
 .egd-joint-material { padding: 9px; border: 1px solid var(--egd-outline); border-radius: 6px; overflow-wrap: anywhere; }
 .egd-joint-material h4, .egd-joint-material-edge { margin: 0 0 6px; }
 .egd-joint-material-edge { color: var(--egd-on-surface); line-height: 1.45; }
+
+/* L38 (egdesk.perf.flatFrost, default off): the 98%-opaque frosted chrome skips its backdrop blur, which re-blurs behind live pages on every frame. */
+:root[egd-perf-flat-frost] .egd-frosted,
+:root[egd-perf-flat-frost] #egd-input-helper-status {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}

@@ -80,19 +80,32 @@ export function parseMacNetworkCounters(output, interfaceName) {
   return null
 }
 
+// L38: the default route changes rarely, so route(8) runs at most every ROUTE_CACHE_MS and netstat reads only that interface (-I) instead of
+// the whole table. A failed or empty -I read re-resolves the route once.
+const ROUTE_CACHE_MS = 15_000
+let macRouteCache = null
 async function readMacNetworkCounters({ signal } = {}) {
-  const [routeResult, countersResult] = await Promise.all([
-    execFileAsync('/sbin/route', ['-n', 'get', 'default'], {
+  const netstat = args => execFileAsync('/usr/sbin/netstat', args, {
+    encoding: 'utf8', timeout: COUNTER_TIMEOUT_MS, maxBuffer: 256 * 1024, signal, windowsHide: true,
+  })
+  const resolveRoute = async () => {
+    const routeResult = await execFileAsync('/sbin/route', ['-n', 'get', 'default'], {
       encoding: 'utf8', timeout: COUNTER_TIMEOUT_MS, maxBuffer: 16 * 1024, signal, windowsHide: true,
-    }),
-    execFileAsync('/usr/sbin/netstat', ['-ibn'], {
-      encoding: 'utf8', timeout: COUNTER_TIMEOUT_MS, maxBuffer: 256 * 1024, signal, windowsHide: true,
-    }),
-  ])
-  const route = routeResult.stdout
-  const interfaceName = parseMacDefaultInterface(route)
+    })
+    const name = parseMacDefaultInterface(routeResult.stdout)
+    macRouteCache = name ? { name, at: Date.now() } : null
+    return name
+  }
+  if (macRouteCache && Date.now() - macRouteCache.at < ROUTE_CACHE_MS) {
+    try {
+      const counters = parseMacNetworkCounters((await netstat(['-ibn', '-I', macRouteCache.name])).stdout, macRouteCache.name)
+      if (counters) return counters
+    } catch (error) { if (signal?.aborted) throw error }
+    macRouteCache = null
+  }
+  const interfaceName = await resolveRoute()
   if (!interfaceName) return null
-  return parseMacNetworkCounters(countersResult.stdout, interfaceName)
+  return parseMacNetworkCounters((await netstat(['-ibn'])).stdout, interfaceName)
 }
 
 // IOKit reports cumulative byte counts per block-storage driver. Registry IDs
