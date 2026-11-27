@@ -3,9 +3,9 @@
 // order with WHO did it (the Decision model, the conversation model, EG-Desk), how long it took, and the final answer. It is the
 // measurement Main runs after a scenario in the real EG-Desk window, to show "how much faster than the conversation model alone".
 //
-// What it reads (nothing new is recorded for it; all of it already exists):
+// What it reads:
 //   - the bridge's local history   GET /chat/history/threads, GET /chat/history?clientThreadId=..   (events with ts: message.accepted,
-//     run.started, activity.started/updated/completed, browser.tool.*, message.started/delta/completed, run.completed)
+//     run.started, activity.started/updated/completed, browser.entry.step, browser.tool.*, message.started/delta/completed, run.completed)
 //   - the decision-call log        GET /chat/decision-calls?limit=64   (flag EGDESK_DECISION_CALL_LOG=on; in memory, lost on a bridge
 //     restart). The same rows are persisted in the turn's decision-context activity, but ONLY when the turn has one (see the report).
 // What it prints: closed fields only. Event kinds, tool names (egdesk_*), closed status words and codes, times, counts and token
@@ -14,7 +14,7 @@
 // Usage (the bridge on 127.0.0.1:39218 is read with GET only):
 //   node scripts/egdesk-turn-timeline.mjs --since 16:30 [--browser] [--thread thread-dm-...] [--engine claude|codex] [--last N]
 //        [--until 21:00] [--json out.json] [--save closed.json] [--from closed.json] [--bridge http://127.0.0.1:39218] [--rows]
-//   --since/--until: KST "HH:MM" today, or an ISO time (no zone = KST). --browser: only turns that touched a Browser card.
+//   --since/--until: KST "HH:MM" (overnight ranges supported; a lone start is its latest occurrence), or an ISO time (no zone = KST). --browser: only turns that touched a Browser card.
 //   --row: stdout is JSON Lines, one measurement per selected turn (seconds; null = unknown). Browser counts cover stored events only.
 //   --thread ID --last 1 selects the newest matching turn; --thread ID --turn N selects its exact 1-based turn (also with --from).
 //   --save writes the CLOSED data (no text) so the same report can be made later with --from (the call log does not survive a restart).
@@ -22,6 +22,7 @@
 //   never started a turn (only the message was recorded).
 //   Before a scenario, keep the call log across bridge restarts (a browserBounded turn never persists its call rows):
 //   node scripts/egdesk-turn-timeline.mjs --watch-calls calls.json [--every 5] [--for 240]   then analyze with --calls calls.json
+import { ENTRY_STEP_EVENT, closedEntryStep } from '../helper/egdesk-browser-entry-record.mjs'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -98,6 +99,7 @@ export function reduceEvent(event) {
     if (name === 'message.completed' && typeof m.text === 'string') out.chars = m.text.length // a count, never the text
   } else if (name === 'message.delta') out.messageId = id(d.messageId)
   else if (name.startsWith('activity.')) { const a = reduceActivity(d.activity ?? d); if (!a) return null; out.activity = a }
+  else if (name === ENTRY_STEP_EVENT) { out.entryStep = closedEntryStep(d, d); if (!out.entryStep) return null }
   else if (BROWSER_EVENT.test(name)) out.browser = reduceBrowser(e)
   else if (name === 'run.started' || name === 'run.completed' || name === 'run.dispatching') out.status = word(d.status)
   else if (name === 'run.executionPolicy') out.policy = word(obj(d.executionPolicy).mode)
@@ -271,6 +273,14 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
     steps.push({ owner: owner?.id, step: b.reflexStep, start, end: b.ts, ms: b.ts - start, callMs, actionMs: b.ts - start - callMs, label: browserLabel(b), timed: from !== null })
     previous.set(key, b)
   }
+  const entryRows = events.filter(e => e.entryStep).map(e => e.entryStep)
+  const entryActions = entryRows.filter(s => s.op !== 'end')
+  for (const s of entryActions.filter(s => s.by === 'decision')) {
+    const start = s.completedAt - (s.durationMs ?? 0), callMs = total(clip(browserCallTime, start, s.completedAt))
+    const unsplit = callMs === 0 // no overlapping call row: the recorded total is known but its breakdown is not
+    steps.push({ owner: s.callId, step: s.seq, start, end: s.completedAt, ms: s.durationMs ?? 0, callMs,
+      actionMs: unsplit ? 0 : s.durationMs - callMs, unsplitMs: unsplit ? s.durationMs : null, label: s.op + ' · ' + s.status, timed: s.durationMs !== null, entry: true })
+  }
   if (missingStart) notes.push('일부 단계의 호출 시작 불명: 시각만 표시하고 단계 시간 합계에서 제외')
 
   // the person: an approval or question card from required to resolved, and a site-permission request that waited on the card
@@ -298,10 +308,11 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
   const decisionUnion = union(callsBefore.map(c => [c.start, Math.min(c.end, end)]))
   const whoDecided = t => t.decidedBy?.path === 'action' ? '결정 모델' : t.browser.some(b => b.reflexStep !== null) ? '결정 모델(맡김)' : t.decidedBy?.path === 'engine' ? '대화 모델' : '대화 모델'
   const browserCount = browserEvents.filter(b => b.event.startsWith('browser.tool.'))
-  const firstPageAction = browserEvents.filter(b => b.event.startsWith('browser.tool.') && b.action && b.action !== 'wait' && b.action !== 'request_site' && b.event !== 'browser.tool.failed').map(b => b.ts)[0] ?? null
-  const touchedBrowser = browserEvents.length > 0 || tools.some(t => browserTool(t.tool)) || events.some(e => e.event === 'browser.bound')
+  const pageTimes = browserEvents.filter(b => b.event.startsWith('browser.tool.') && b.action && b.action !== 'wait' && b.action !== 'request_site' && b.event !== 'browser.tool.failed').map(b => b.ts).concat(entryActions.filter(s => s.ok || s.code === 'POSTCONDITION_UNVERIFIED').map(s => s.completedAt))
+  const firstPageAction = pageTimes.length ? Math.min(...pageTimes) : null
+  const touchedBrowser = entryRows.length > 0 || browserEvents.length > 0 || tools.some(t => browserTool(t.tool)) || events.some(e => e.event === 'browser.bound')
 
-  if (touchedBrowser) notes.push('브라우저 수치는 저장된 사건 기준. 턴 전 진입의 화면 전용 단계는 포함되지 않음')
+  if (touchedBrowser && !entryRows.length) notes.push('브라우저 수치는 저장된 사건 기준. 턴 전 진입의 화면 전용 단계는 포함되지 않음')
 
   const rows = []
   const rel = ts => Math.round(ts - T0)
@@ -315,7 +326,7 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
     rows.push({ start: rel(t.start), end: rel(t.end), who: 'EG-Desk', decidedBy: who, what: `${t.tool} 실행 · ${by}${t.outcome ? ` · ${t.outcome}` : ''}${t.exitCode !== undefined && t.exitCode !== null ? ` · exit ${t.exitCode}` : ''}`, depth: 0 })
     for (const b of t.browser.filter(x => x.reflexStep === null)) rows.push({ start: rel(b.ts), end: null, who: 'EG-Desk', what: browserLabel(b), depth: 1 })
   }
-  for (const s of steps) rows.push({ start: rel(s.start), end: rel(s.end), who: '결정 모델', what: `단계 ${s.step}: ${s.label} · ${s.timed ? `결정 호출 ${Math.round(s.callMs)}ms + 동작 ${Math.round(s.actionMs)}ms` : '시작 불명'}`, toolCallId: s.owner ?? null, depth: s.owner ? 1 : 0 })
+  for (const s of steps) rows.push({ start: rel(s.start), end: rel(s.end), who: '결정 모델', what: `단계 ${s.step}: ${s.label} · ${s.entry && s.unsplitMs != null ? (s.timed ? `단계 합계 ${s.ms}ms` : '시작 불명') : s.timed ? `결정 호출 ${Math.round(s.callMs)}ms + 동작 ${Math.round(s.actionMs)}ms` : '시작 불명'}`, toolCallId: s.owner ?? null, depth: s.owner ? 1 : 0 })
   for (const b of loose.filter(x => x.reflexStep === null)) rows.push({ start: rel(b.ts), end: null, who: 'EG-Desk', what: browserLabel(b), depth: 0 })
   for (const w of waits) rows.push({ start: rel(w.start), end: rel(Math.min(w.end, end)), who: '사용자', what: `${w.what}(기다림)`, depth: 1 })
   rows.push({ start: rel(end), end: null, who: '최종 답', what: finalAnswer ? `답 올라옴${finalAnswer.chars !== undefined ? ` · ${finalAnswer.chars}자` : ''}` : '답 없음', depth: 0 })
@@ -342,13 +353,13 @@ function buildTurn({ requestId, events, run, live, index, thread }) {
       preTurnMs: Math.round(preTurn[1] - preTurn[0]),
       engine: { segments: engine.length, ms: Math.round(engineMs) },
       decision: { calls: callsBefore.length, serialMs: Math.round(total(decisionUnion)), inputTokens: callsBefore.reduce((n, c) => n + (c.inputTokens ?? 0), 0), afterAnswer: callsAfter.length, exact: callsExact },
-      decisionSteps: { steps: steps.length, untimed: steps.filter(s => !s.timed).length, ms: Math.round(steps.reduce((n, s) => n + s.ms, 0)), callMs: Math.round(steps.reduce((n, s) => n + s.callMs, 0)), actionMs: Math.round(steps.reduce((n, s) => n + s.actionMs, 0)) },
+      decisionSteps: { steps: steps.length, untimed: steps.filter(s => !s.timed).length, ms: Math.round(steps.reduce((n, s) => n + s.ms, 0)), callMs: Math.round(steps.reduce((n, s) => n + s.callMs, 0)), actionMs: Math.round(steps.reduce((n, s) => n + s.actionMs, 0)), unsplitMs: Math.round(steps.reduce((n, s) => n + (s.unsplitMs ?? 0), 0)) },
       tools: { count: tools.length, ms: Math.round(toolMs), delegated: tools.filter(t => whoDecided(t) === '결정 모델(맡김)').length, byDecision: tools.filter(t => whoDecided(t) !== '대화 모델').length },
       browserStep: {
         byEngine: { steps: engineSteps.length, avgMs: engineSteps.length ? Math.round(engineSteps.reduce((n, x) => n + x, 0) / engineSteps.length) : null },
         byDecision: { steps: steps.length, avgMs: steps.length ? Math.round(steps.reduce((n, x) => n + x.ms, 0) / steps.length) : null },
       },
-      browserEvents: { count: browserCount.length, failed: browserCount.filter(b => b.event === 'browser.tool.failed').length, unverified: browserCount.filter(b => b.event === 'browser.tool.unverified').length },
+      browserEvents: { count: browserCount.length + entryActions.length, failed: entryActions.filter(s => !s.ok && s.code !== 'POSTCONDITION_UNVERIFIED').length + browserCount.filter(b => b.event === 'browser.tool.failed').length, unverified: entryActions.filter(s => s.code === 'POSTCONDITION_UNVERIFIED').length + browserCount.filter(b => b.event === 'browser.tool.unverified').length },
     },
     rows, notes,
   }
@@ -372,7 +383,7 @@ export function renderTurn(turn) {
   lines.push(`  ${padStartWide('시작ms', 7)} ${padStartWide('끝ms', 7)} ${padStartWide('걸림ms', 7)}  ${padEndWide('누가', 13)}무엇`)
   for (const r of turn.rows) lines.push(`  ${pad(r.start, 7)} ${pad(r.end ?? '', 7)} ${pad(r.ms ?? '', 7)}  ${padEndWide((r.depth ? '  ' : '') + r.who, 13)}${r.depth ? '· ' : ''}${r.what}${r.overlap ? ' (진행 중 겹침)' : ''}`)
   lines.push(`  요약: 전체 ${sec(s.totalMs)}초${s.waitMs ? `(사람 기다림 ${sec(s.waitMs)}초 빼면 ${sec(s.workMs)}초)` : ''} | 첫 글자 ${sec(s.firstTextMs)}초 | 첫 화면 동작 ${sec(s.firstPageActionMs)}초 | 턴 시작 전 ${sec(s.preTurnMs)}초`)
-  lines.push(`        대화 모델 ${s.engine.segments}구간 ${sec(s.engine.ms)}초 | 결정 모델 호출 ${s.decision.calls}회 ${sec(s.decision.serialMs)}초(${s.decision.inputTokens}토큰${s.decision.afterAnswer ? `, 답 이후 ${s.decision.afterAnswer}회 별도` : ''}) | 결정 모델 단계 ${s.decisionSteps.steps}개 ${sec(s.decisionSteps.ms)}초(호출 ${sec(s.decisionSteps.callMs)} + 동작 ${sec(s.decisionSteps.actionMs)})`)
+  lines.push(`        대화 모델 ${s.engine.segments}구간 ${sec(s.engine.ms)}초 | 결정 모델 호출 ${s.decision.calls}회 ${sec(s.decision.serialMs)}초(${s.decision.inputTokens}토큰${s.decision.afterAnswer ? `, 답 이후 ${s.decision.afterAnswer}회 별도` : ''}) | 결정 모델 단계 ${s.decisionSteps.steps}개 ${sec(s.decisionSteps.ms)}초(호출 ${sec(s.decisionSteps.callMs)} + 동작 ${sec(s.decisionSteps.actionMs)}${s.decisionSteps.unsplitMs ? ` + 미분리 ${sec(s.decisionSteps.unsplitMs)}` : ''})`)
   lines.push(`        EG-Desk 도구 ${s.tools.count}회 ${sec(s.tools.ms)}초(결정 모델이 고른 것 ${s.tools.byDecision}) | 브라우저 기록 ${s.browserEvents.count}개(실패 ${s.browserEvents.failed}, 미확인 ${s.browserEvents.unverified})`)
   lines.push(`        브라우저 한 단계: 대화 모델이 고른 단계 ${s.browserStep.byEngine.steps}개 평균 ${sec(s.browserStep.byEngine.avgMs)}초 | 결정 모델 단계 ${s.browserStep.byDecision.steps}개 평균 ${sec(s.browserStep.byDecision.avgMs)}초`)
   for (const n of turn.notes) lines.push(`  참고: ${n}`)
@@ -416,6 +427,24 @@ export function parseWhen(value, now = Date.now()) {
   const parsed = Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(value) ? value : `${value}+09:00`)
   if (!Number.isFinite(parsed)) throw new Error(`cannot read the time ${JSON.stringify(value)} (HH:MM KST or ISO)`)
   return parsed
+}
+
+/** Anchor undated bounds to the same KST day. A lone start means its latest occurrence;
+ * for an overnight pair, the end is anchored first (a dated start instead anchors the end). */
+export function parseRange(sinceValue, untilValue, now = Date.now()) {
+  const clock = v => /^\d{1,2}:\d{2}$/.test(v), day = 86400000
+  let since = parseWhen(sinceValue, now), until = parseWhen(untilValue, now)
+  if (clock(sinceValue) && clock(untilValue) && since > until && now >= since) {
+    until += day // currently in the late-night half of this overnight window
+  } else if (clock(sinceValue)) {
+    const anchor = until ?? now
+    since = parseWhen(sinceValue, anchor)
+    if (since > anchor) since -= day
+  } else if (since !== null && clock(untilValue)) {
+    until = parseWhen(untilValue, since)
+    if (until < since) until += day
+  }
+  return { since, until }
 }
 
 /** idle: also the requests that never started a turn (a refused or abandoned send: only the message was recorded). */
@@ -537,7 +566,7 @@ export async function main(argv, { print = console.log, warn = console.error } =
   if (opts.help) { const lines = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1); print(lines.slice(0, lines.findIndex(l => !l.startsWith('//'))).join('\n')); return 0 }
   if (opts.watch) { await watchCalls({ bridge: opts.bridge, file: opts.watch, everyS: opts.every, forMinutes: opts.forMinutes }); return 0 }
   if (opts.turn && opts.threads.length !== 1) throw new Error('--turn needs exactly one --thread')
-  const since = parseWhen(opts.since), until = parseWhen(opts.until)
+  const { since, until } = parseRange(opts.since, opts.until)
   const collected = opts.from ? JSON.parse(fs.readFileSync(opts.from, 'utf8')) : await collectFromBridge({ bridge: opts.bridge, threads: opts.threads, since })
   if (collected?.format !== TIMELINE_FORMAT) throw new Error('not a timeline file (saved with --save)')
   if (opts.calls.length) { collected.liveTurns = mergeLiveTurns(collected.liveTurns, ...opts.calls.map(readCallsFile)); if (collected.liveTurns.length) collected.liveNote = null }

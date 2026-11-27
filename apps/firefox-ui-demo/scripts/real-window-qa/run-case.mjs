@@ -5,14 +5,14 @@ const [, , id, engine = "Codex", rep = "1"] = process.argv
 const { CASES } = await import(`${Q}/cases.mjs`); const c = CASES[id]; if (!c) throw new Error('no case ' + id)
 const sh = (cmd, args, opts = {}) => { try { return execFileSync(cmd, args, { cwd: (cmd === N && args[0] === "scripts/egdesk-turn-timeline.mjs") ? D : Q, encoding: 'utf8', timeout: opts.timeout ?? 200000 }).trim() } catch (e) { return String(e.stdout || '') + ' ERR ' + String(e.message).slice(0, 120) } }
 const evalIn = (card, expr) => { const out = sh(N, ['page-eval.mjs', card, expr]); try { return JSON.parse(out) } catch { return { error: out.slice(0, 160) } } }
-const hhmm = () => new Date().toTimeString().slice(0, 5)
+const kstIso = () => new Date(Date.now() + 9 * 3600000).toISOString().replace('Z', '+09:00')
 const go = (card, url, title = '') => { const r = sh(N, ['go-card.mjs', card, url, title]); return /"ok":true/.test(r) }
 const rec = { case: Number(id), name: c.name, engine, rep: String(rep), at: new Date().toTimeString().slice(0, 8), setup: true }
 rec.setup = go(c.card, c.url, c.title || '') && (!c.then || go(c.card, c.then, c.title || '')) && (!c.also || go(c.also.card, c.also.url, ''))
 const EXPECT = {}; for (const [k, expr] of Object.entries(c.expect || {})) EXPECT[k] = evalIn(c.card, expr).value
 sh('bash', ['-c', `sleep 1.5; ./new-dm-grant.sh ${c.card} ${engine} >/dev/null`]); if (c.also) sh('bash', ['./grant-card.sh', c.also.card])
 if (c.person === 'touch-card') sh(N, ['mn.mjs', 'exec', 'const b=[...document.querySelectorAll("button")].find(b=>(b.getAttribute("aria-label")||b.getAttribute("title")||b.textContent||"").trim()==="열린 창 전체 보기" && b.getBoundingClientRect().width>0); b?.click(); return !!b', '100'])
-sh('sleep', ['5']); const T0 = hhmm()
+sh('sleep', ['5']); const T0 = kstIso()
 let helper = null
 if (c.person === 'allow-site') helper = spawn('bash', ['./allow-site.sh', c.card, '110'], { cwd: Q, stdio: ['ignore', fs.openSync('/tmp/egd-case-helper.log', 'w'), 'ignore'] })
 if (c.person === 'touch-card') helper = spawn('bash', ['-c', `sleep 3.5; P=$(${N} mn.mjs exec 'const b=document.getElementById("${c.card}")._browserControls.toolBrowser(); const r=b.getBoundingClientRect(); return Math.round(r.right-Math.max(8,r.width*0.08))+" "+Math.round(r.top+r.height*0.55)' 100 | tr -d '"'); echo "touch at $P"; ${N} click.mjs $P`], { cwd: Q, stdio: ['ignore', fs.openSync('/tmp/egd-case-helper.log', 'w'), 'ignore'] })

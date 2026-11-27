@@ -160,6 +160,7 @@ import { withoutAuthOpaqueSources } from './egdesk-auth-opaque.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
+import { ENTRY_STEP_EVENT, closedEntryStep } from './egdesk-browser-entry-record.mjs'
 import { BROWSER_TASK_TOOL_NAME, browserStepFor, noteWords, withBrowserTaskRule } from './egdesk-browser-task-turn.mjs' // a1 (교대)
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
@@ -5639,6 +5640,10 @@ export class CodexChatRuntime {
    */
   browserTaskStep(run, event) {
     try {
+      if (run?.entrySteps) {
+        const step = closedEntryStep(event, { callId: run.entrySteps.callId, seq: run.entrySteps.rows.length + 1, completedAt: this.now(), durationMs: event.ms })
+        if (step) run.entrySteps.rows.push(step)
+      }
       const channel = this.decisionContext?.browserSteps
       if (typeof channel?.publish !== 'function' || !run?.clientThreadId || this.deletedConversations.has(run.clientThreadId)) return false
       const step = browserStepFor(event, { clientThreadId: run.clientThreadId })
@@ -5896,6 +5901,7 @@ export class CodexChatRuntime {
     if (!cfg || !provider || !prepared || typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled()) return null
     const id = `pre-${context.requestId}`
     const preRun = { runId: id, answerId: id, clientThreadId: context.clientThreadId, status: 'inProgress', executionPolicy: { mode: BROWSER_BOUNDED }, quiet: true }
+    if (this.store) preRun.entrySteps = { callId: 'entry-' + randomUUID(), rows: [] }
     await this.callProvider(provider, 'bindRun', preRun, prepared) // a refusal here is a refusal before the native turn starts
     let note = null, handedOff = false
     try {
@@ -5942,6 +5948,15 @@ export class CodexChatRuntime {
         if (verdictRow.verdict.status !== 'settled') { verdictRow.verdict = { status: 'settled', item: browserItem, p: null, calls: verdictRow.verdict.calls, answers: verdictRow.verdict.answers ?? {}, via: 'options' }; verdictRow.record.status = 'settled'; verdictRow.record.reason = null; verdictRow.record.kind = browserItem.kind; verdictRow.record.id = browserItem.id }
       }
     } catch { note = null; handedOff = false }
+    // Durable only: never broadcast these rows or revive a conversation deleted during entry.
+    if (preRun.entrySteps && !this.deletedConversations.has(context.clientThreadId)) {
+      try {
+        for (const step of preRun.entrySteps.rows) this.store.appendEvent({ eventKey: step.callId + ':' + step.seq,
+          clientThreadId: context.clientThreadId, requestId: context.requestId, localRunId: context.localRunId,
+          event: ENTRY_STEP_EVENT, ts: step.completedAt, details: step })
+      } catch { this.storeHealthy = false }
+    }
+    delete preRun.entrySteps
     return { preRun, provider, note, handedOff, adopted: false }
   }
 

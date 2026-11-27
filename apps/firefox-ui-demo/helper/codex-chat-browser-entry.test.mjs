@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
-import { mkdtempSync, readFileSync, statSync, chmodSync } from 'node:fs'
+import { openChatStore } from './egdesk-chat-store.mjs'
+import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
+import { rmSync, mkdtempSync, readFileSync, statSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
@@ -386,4 +388,28 @@ test('C14 turn memory on + onePacket + at-page: the browser hook still gets last
   assert.deepEqual(Object.keys(turn.additionalContext).filter(k => /memory|decision|context/i.test(k)), [])
   // c16: on /invoices the recorded choice is taken by code; that request asks the page-state predicates and goal_met, never "which" (4 requests, as before)
   assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, ps_sign_in: 1, next_step: 2 })
+})
+
+test('quiet entry flushes request-scoped closed steps before adoption, without a UI channel', async t => {
+  const { h, provider } = build({ entryMode: 'on' }), chat = h.chat
+  const dataDir = createPrivateQaTempDirectory('egdesk-entry-test-'), options = { dataDir, ownerScope: 'fixture' }
+  const store = openChatStore(options); chat.store = store
+  t.after(() => { store.close(); rmSync(dataDir, { recursive: true, force: true }) })
+  store.createConversation({ clientThreadId: 'thread', localConversationId: 'local-thread', createdAt: 1 })
+  store.acceptRequest({ clientThreadId: 'thread', requestId: 'req', fingerprint: 'f', ts: 2, localMessageId: 'msg', message: { id: 'msg', text: 'fixture', role: 'user' } })
+  chat.callProvider = async () => {}
+  chat.directBrowserEntry = () => ({ async handle({ run }) {
+    for (const phase of ['start', 'stop']) chat.browserTaskStep(run, { op: 'activity', phase, by: 'decision', ok: true, ms: 12, displayValue: 'PRIVATE' })
+    for (const ok of [true, false]) chat.browserTaskStep(run, { op: 'fill', by: 'decision', ok, ms: 31, target: 'PRIVATE', valueName: 'PRIVATE', displayValue: 'PRIVATE', value: 'PRIVATE', url: 'https://PRIVATE', code: 'PRIVATE', status: 'PRIVATE' })
+    assert.ok(!store.listEvents('thread').events.some(r => r.event === 'browser.entry.step'), 'buffer until return'); throw Error('simulated entry interruption')
+  } })
+  const out = await chat.runBrowserEntryOn({ message: MSG }, { requestId: 'req', clientThreadId: 'thread', localRunId: 'run' }, new Map([[provider, {}]]))
+  store.close()
+  const reopened = openChatStore(options)
+  let rows
+  try { rows = reopened.listEvents('thread').events.filter(r => r.event === 'browser.entry.step') } finally { reopened.close() }
+  assert.equal(out.preRun.entrySteps, undefined); assert.equal(rows.length, 2)
+  assert.deepEqual(rows.map(r => r.details.seq), [1, 2]); assert.equal(rows[0].details.callId, rows[1].details.callId)
+  assert.deepEqual(rows.map(r => r.details.status), ['ok', 'failed']); assert.equal(rows[1].details.code, 'other')
+  assert.ok(rows.every(r => r.event === 'browser.entry.step' && r.requestId === 'req' && r.details.completedAt === r.ts && r.details.durationMs === 31)); assert.ok(!JSON.stringify(rows).includes('PRIVATE'))
 })
