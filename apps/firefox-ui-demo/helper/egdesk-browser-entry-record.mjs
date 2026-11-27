@@ -1,6 +1,6 @@
 // Durable entry telemetry is deliberately NOT the UI frame. Unknown strings never pass this boundary.
 export const ENTRY_STEP_EVENT = 'browser.entry.step'
-const ops = new Set(['open', 'submit', 'press', 'fill', 'scroll', 'end'])
+const ops = new Set(['open', 'submit', 'press', 'fill', 'select', 'scroll', 'end'])
 const statuses = new Set(['done', 'paused', 'cancelled', 'need_context', 'needs_guidance', 'needs_value', 'cannot_proceed', 'cannot', 'human_step', 'ok', 'failed', 'handoff'])
 const codes = new Set(['POSTCONDITION_UNVERIFIED', 'BROWSER_OBSERVATION_STALE', 'BROWSER_ACTION_REJECTED', 'BROWSER_TOOL_TIMEOUT', 'tool_failed', 'observe_failed', 'step_limit', 'step_rejected', 'site_not_allowed', 'site_pending', 'blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'needs_value', 'detail_needed', 'choice_needed', 'confirm_needed', 'page_unclear', 'card_choice_needed', 'login_required', 'two_factor_required', 'bot_check'])
 export function closedEntryStep(event, { callId, seq, completedAt, durationMs } = {}) {
