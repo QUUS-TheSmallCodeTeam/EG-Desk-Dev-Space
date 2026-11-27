@@ -651,7 +651,31 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   if (option?.item.kind === 'choice' && (lists.includes(option) ? option !== resolved : readPredicate(result.answers, 'choice_requested', thresholds.done).state !== 'yes')) return { kind: 'user_context', ...out }
   // History conflicts with this page (the earlier choice is gone): the person decides, whatever the model picked.
   if (option && historyConflict) return { kind: 'user_context', ...out }
+  // R2-d (R4): on a crowded step (the fan-out above) a chosen LINK is opened only when the request itself names or describes it. The step's choice among many alike links is a ranking (measured: Context Menu picked for
+  // "open Checkboxes" at .67-.80 on a 73-link page, above the .75 bar); a ranking is not the person's words. One more request quotes the chosen link's own name and asks that alone;
+  // anything but a confident yes leaves the step undecided (the conversation model takes over), the same as an unclear step.
+  if (fan && option?.item.kind === 'navigate' && !arrived) {
+    const named = await linkNamedInRequest({ goal, option, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch })
+    if (!named.yes) return { kind: 'uncertain', linkNamed: named.probability, ...out, usage: sumUsage(out.usage, named.usage), latencyMs: (out.latencyMs ?? 0) + (named.latencyMs ?? 0) }
+    out.usage = sumUsage(out.usage, named.usage); out.latencyMs = (out.latencyMs ?? 0) + (named.latencyMs ?? 0)
+  }
   return option ? { kind: 'act', option, ...(popupProof && readPredicate(result.answers, 'open_only', thresholds.done).state === 'yes' ? { openOnly: true } : {}), ...out } : { kind: 'uncertain', ...out }
+}
+
+const sumUsage = (a, b) => (a && b ? Object.fromEntries(Object.keys(a).map(key => [key, (Number(a[key]) || 0) + (Number(b[key]) || 0)])) : a ?? b)
+/** linkNamedInRequest -> { yes, probability, usage, latencyMs }: does the request name (or clearly describe, in any language) the quoted link as what to open? Quotes only the link, never page text. */
+async function linkNamedInRequest({ goal, option, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+  const element = option.item.element
+  let host = '', path = ''
+  try { const url = new URL(element.href); host = url.hostname; path = url.pathname } catch { /* no address: the label alone is quoted */ }
+  const result = await client.decide({
+    input: [{ role: 'developer', content: 'You check one link of a web page against what the person asked. Judge only the quoted link.' },
+      { role: 'user', content: [`Person said: ${JSON.stringify(compactText(goal, 600))}`, `Link on the page: ${JSON.stringify(compactText(element.label, 100))}${host ? ` (${host}${compactText(path, 80)})` : ''}`].join('\n') }],
+    questions: [predicateQuestion('link_named', 'Does the person name this exact link, or clearly describe this very destination (the same meaning in another language or other words counts), as the page to open or go to? No if it is merely related, similar, alphabetically or visually near, or a different item.')],
+    timeoutMs, signal, authorizeDispatch,
+  })
+  const read = readPredicate(result.answers, 'link_named', thresholds.done)
+  return { yes: read.state === 'yes', probability: read.probability, usage: result.usage, latencyMs: result.latencyMs }
 }
 
 const RECORDED_RULES = [

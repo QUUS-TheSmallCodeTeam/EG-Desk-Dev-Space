@@ -74,7 +74,7 @@ test('a2 the fanned answer: a kind is taken only when next_step decided it and i
   const snapshot = ddgResultsSnapshot()
   const { options } = buildReflexCandidates(snapshot, { textComboboxes: true })
   const no = { goal_met: { name: 'goal_met', type: 'predicate', probability: 0.02 } }
-  const ask = async answers => decideReflexStep({ goal: '이미지 탭 열어줘', snapshot: withoutPageText(snapshot), options, client: fakeClient(() => ({ ...no, ...answers })), thresholds: T })
+  const ask = async answers => decideReflexStep({ goal: '이미지 탭 열어줘', snapshot: withoutPageText(snapshot), options, client: fakeClient(request => request.questions[0].name === 'link_named' ? { link_named: { name: 'link_named', type: 'predicate', probability: 0.95 } } : ({ ...no, ...answers })), thresholds: T })
   const decided = await ask({ next_step: ranked('next_step', [['open_link', 0.9], [FIELD, 0.05]]), step_link: ranked('step_link', [['[L3] 이미지', 0.95], ['[L4] 동영상', 0.02]]), step_press: ranked('step_press', [['[B1] react-search-form', 0.5], ['[B4] 검색 설정', 0.3]]) })
   assert.deepEqual([decided.kind, decided.option?.value, decided.next.fan.group], ['act', '[L3] 이미지', 'open_link'])
   assert.ok(Math.abs(decided.next.confidence - 0.9 * 0.95) < 1e-9)
@@ -308,4 +308,28 @@ test('entry select: quote each label with the actual request; never resolve miss
     })
     const out = await decideReflexStep({ goal, directEntry:true, snapshot, options, thresholds:T, client }); assert.equal(out.kind,want); if(want==='act') assert.equal(out.option.item.desired,'2')
   }
+})
+
+test('R2-d a crowded step opens a chosen link only when the request names it: the quoted-link check asks that link alone, and a no (or a missing answer) leaves the step undecided', async () => {
+  const snapshot = ddgResultsSnapshot()
+  const { options } = buildReflexCandidates(snapshot, { textComboboxes: true })
+  const answers = { goal_met: { name: 'goal_met', type: 'predicate', probability: 0.02 }, next_step: ranked('next_step', [['open_link', 0.95], [FIELD, 0.03]]), step_link: ranked('step_link', [['[L3] 이미지', 0.97], ['[L4] 동영상', 0.02]]) }
+  for (const [probability, kind] of [[0.95, 'act'], [0.2, 'uncertain'], [undefined, 'uncertain']]) {
+    const client = fakeClient(request => request.questions[0].name === 'link_named' ? { link_named: probability === undefined ? { type: 'missing' } : { name: 'link_named', type: 'predicate', probability } } : answers)
+    const out = await decideReflexStep({ goal: '동영상 탭 열어줘', snapshot: withoutPageText(snapshot), options, client, thresholds: T })
+    assert.equal(out.kind, kind)
+    assert.equal(client.requests.length, 2)
+    const check = client.requests[1]
+    assert.deepEqual(check.questions.map(q => q.name), ['link_named'])
+    const text = JSON.stringify(check.input)
+    assert.match(text, /동영상 탭 열어줘/); assert.match(text, /이미지/)
+    assert.doesNotMatch(text, /Visible text/) // the link and the request only, no page text
+  }
+  // a page that is not crowded keeps one request (the check is for the crowded ranking)
+  const short = { url: `${D}/`, revision: 1, title: 'DuckDuckGo', text: [], interactiveElements: ddgResultsSnapshot({ value: '' }).interactiveElements.filter(element => ['el_1', 'el_2', 'el_3', 'el_4', 'el_12', 'el_14', 'el_78'].includes(element.ref)) }
+  const few = buildReflexCandidates(short, { textComboboxes: true }).options
+  const link = few.find(option => option.item.kind === 'navigate')
+  const client = fakeClient(() => ({ goal_met: { name: 'goal_met', type: 'predicate', probability: 0.02 }, next_step: ranked('next_step', [[link.value, 0.95], ['goal_met', 0.02]]) }))
+  const out = await decideReflexStep({ goal: '열어줘', snapshot: withoutPageText(short), options: few, client, thresholds: T })
+  assert.deepEqual([out.kind, client.requests.length], ['act', 1])
 })
