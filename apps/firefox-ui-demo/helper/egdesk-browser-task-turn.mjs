@@ -7,7 +7,7 @@
 //      (decisionContext.browserSteps.publish, egdesk-browser-steps-channel.mjs; it sends nothing while EGDESK_BROWSER_STEPS_UI is off), whatever the entry value
 //      ('on' or 'alternate'): browserStepFor below. Closed words, counts, ids and the control's own label only: never a typed value, an address or page text.
 // Pure: no I/O.
-import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
+import { BROWSER_DONE_RULE, BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
 
 export { BROWSER_TASK_TOOL_NAME } // L8's name, the one constant
 export const ALTERNATE_VALUE = 'alternate'
@@ -29,7 +29,12 @@ export function browserTaskRule({ toolOffered = false } = {}) {
  */
 export function withBrowserTaskRule(note, { toolOffered = false } = {}) {
   const parsed = noteObject(note)
-  return parsed ? JSON.stringify({ ...parsed, rule: browserTaskRule({ toolOffered }) }) : note
+  if (!parsed) return note
+  const { status, next, ask } = parsed.egdesk_browser_task
+  const rule = status === 'done' ? BROWSER_DONE_RULE : toolOffered === true && status === 'needs_value' && next === 'continue_with_egdesk_browser_task' && ask?.kind === 'text' && ask.field
+    ? `The task is paused at the named field. If the value follows from the conversation, call ${BROWSER_TASK_TOOL_NAME} now with values keyed by ask.field and no goal; no Card read is needed to locate the field. Otherwise ask one short question.`
+    : browserTaskRule({ toolOffered })
+  return JSON.stringify({ ...parsed, rule })
 }
 
 const noteObject = note => {

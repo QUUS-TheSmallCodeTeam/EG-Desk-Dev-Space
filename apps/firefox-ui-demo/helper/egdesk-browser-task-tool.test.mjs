@@ -141,6 +141,7 @@ test('a1 values named by the model: the loop types the value where it belongs, s
   assert.equal(out.status, 'done')
   assert.deepEqual(out.steps.map(step => [step.op, step.target, step.valueName ?? null, step.ok]), [['fill', '위키 검색', '검색어', true], ['submit', '검색', null, true]])
   assert.deepEqual(out.page, { title: '장화 신은 고양이 - 위키', host: 'wiki.example.test' })
+  assert.equal(out.searchedFor, undefined, 'no search words with page text off'); assert.match(out.forYouOnly, /Do not call a tool to confirm/)
   assert.ok(world.cur.url.startsWith(`${O}/w/index.php?search=`), 'the GET search ran as its own navigation')
   assert.ok(world.calls.some(call => call.name === 'egdesk_browser_navigate' && call.url.includes('search=')))
   assert.deepEqual(events.filter(event => !event.phase).map(event => event.op), ['fill', 'submit', 'end'])
@@ -350,7 +351,8 @@ test('a1 page text: by default the loop sends the title and the controls the can
   assert.match(sent, /search field|list or field: 위키 검색/)
   const withText = wikiWorld()
   const textTool = createBrowserTaskTool({ browser: withText.browser, pageText: true })
-  assert.equal(parse(await textTool.handle(RUN(), { callId: 'pt2', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } })).status, 'done')
+  const receipt = parse(await textTool.handle(RUN(), { callId: 'pt2', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } }))
+  assert.deepEqual([receipt.status, receipt.searchedFor], ['done', '장화 신은 고양이'])
   assert.match(withText.requests.map(request => JSON.stringify(request.input)).join('\n'), /방앗간/, 'pageText: true sends the page text as the direct entry does')
 })
 
