@@ -43,7 +43,7 @@ const credentialName = name => new RegExp(`^${name.replace(/[.]/g, '\\.')}`, 'i'
 const SECRET_NAMES = [
   /^\.env(?:\..*)?$/i, /^\.?netrc$/i, /^\.npmrc$/i, /^\.pypirc$/i, /^\.git-credentials$/i,
   /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/i, /\.(?:pem|key|p12|pfx|jks|keystore|keychain(?:-db)?|kdbx|ppk|asc|gpg)$/i,
-  /^bridge-settings\.json/i, credentialName(DECISION_CREDENTIAL_FILE), credentialName(BOARD_AGENT_DRAFT_CONFIG_FILE),
+  /^bridge-settings\.json/i, /^egdesk-decision-calibration/i, credentialName(DECISION_CREDENTIAL_FILE), credentialName(BOARD_AGENT_DRAFT_CONFIG_FILE),
   /^auth\.json$/i, /^credentials(?:\.[a-z]+)?$/i, /^(?:client[_-]?)?secrets?(?:\.[a-z]+)?$/i,
   /^(?:access[_-]?|refresh[_-]?|api[_-]?)?tokens?(?:\.(?:json|txt|ya?ml|env))?$/i, /^cookies(?:\.sqlite)?$/i, /^logins\.json$/i, /^key[34]\.db$/i,
 ]

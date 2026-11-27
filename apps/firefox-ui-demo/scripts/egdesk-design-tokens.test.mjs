@@ -820,10 +820,13 @@ function chatComposerFixture({ reply, inputSources = [], captureInputs = null } 
   assert.ok(composerStart >= 0 && composerEnd > composerStart, 'production composer event handlers');
   const destinationMount = surfaceScript.match(/^  function mountBoardComposerDestination\([^]*?^  \}/m);
   assert.ok(destinationMount, 'production Board destination mount; not active in this ordinary room');
+  // The production choice composer has its own tests; here it contributes no nodes and records its calls.
+  const choiceCalls = [];
+  const choice = { panel: null, trigger: null, questionHint: null, attach() { choiceCalls.push('attach'); }, sync() { choiceCalls.push('sync'); }, reset() { choiceCalls.push('reset'); } };
   const composer = compileFunction(`${destinationMount[0]}\nlet compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner, blockedSend };`,
-    ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body', 'activeIdentity'])(
-    activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {}, { composerLabel: '메시지 입력: 합성 방' });
-  return { ...composer, state, protocol, reservations, requests, owners, notices, pending: () => pending };
+    ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body', 'activeIdentity', 'choice'])(
+    activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {}, { composerLabel: '메시지 입력: 합성 방' }, choice);
+  return { ...composer, choiceCalls, state, protocol, reservations, requests, owners, notices, pending: () => pending };
 }
 
 test('approved Chat refinement keeps accessible composer and real HUD actions', () => {
@@ -866,6 +869,8 @@ test('the actual composer button and keyboard handlers dispatch once with their 
     const result = await h.pending();
     assert.equal(result.accepted, true);
     assert.equal(h.owners.length, 1);
+    assert.deepEqual(h.choiceCalls.filter(call => call === 'reset'), ['reset'],
+      'an ordinary send resets the choice composer exactly once, so a sent question never leaves an old [보기 추천] panel behind');
     const { threadId, binding, roomGeneration, current, release } = h.owners[0];
     assert.deepEqual({ threadId, binding, roomGeneration }, { threadId: 'room-a', binding: 'wire-a', roomGeneration: 7 });
     assert.equal(typeof current, 'function');
@@ -1205,20 +1210,14 @@ test('resource strip shows approved 22px rings only, with a neutral disk glyph',
   assert.match(surfaceCss, /\.egd-rail-right \{ flex: 0 1 auto; min-width: 0; overflow-x: auto;/);
 });
 
-test('top bar centres search on the window and paints the approved account circle', () => {
+test('top bar centres search on the window without a decorative account circle', () => {
   const wide = rule => rule.media.includes('(min-width: 1200px)');
   const center = new Map(rulesFor('.egd-rail-center').find(wide).declarations);
   assert.deepEqual([center.get('position'), center.get('left'), center.get('width'), center.get('transform')],
     ['absolute', '50%', 'min(420px, 42%)', 'translateX(-50%)']);
   assert.equal(new Map(rulesFor('.egd-rail-left').find(wide).declarations).get('max-width'), 'calc(50% - 224px)');
   assert.equal(new Map(rulesFor('.egd-rail-right').find(wide).declarations).get('margin-left'), 'auto');
-  const avatar = declarationsFor('.egd-rail-avatar', { scheme: 'light' });
-  assert.deepEqual([avatar.width, avatar.height, avatar.background, avatar.color],
-    ['28px', '28px', 'var(--egd-account)', 'var(--egd-surface-elevated)']);
-  assert.equal(readRootProperties(surfaceCss, { scheme: 'light' })['--egd-account'].toLowerCase(), '#496780');
-  assert.equal(readRootProperties(surfaceCss, { scheme: 'dark' })['--egd-account'].toLowerCase(), '#6c879b');
-  assert.equal(readRootProperties(surfaceCss, { forcedColors: true })['--egd-account'], 'CanvasText');
-  assert.ok(CONTRAST_REQUIREMENTS.some(([kind, fg, bg]) => kind === 'border' && fg === '--egd-surface-elevated' && bg === '--egd-account'));
+  assert.equal(rulesFor('.egd-rail-avatar').length, 0);
 });
 
 test('Focus resource layout reserves unscaled space and keeps its details inside the viewport', () => {

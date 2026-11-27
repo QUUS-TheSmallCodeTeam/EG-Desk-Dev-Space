@@ -1,0 +1,172 @@
+// Lane L4 cycle 19/20: the briefing coverage re-measure plan (declarative format of scripts/egdesk-decision-real-measure.mjs). Builds the exact bytes the PRODUCT
+// sends (runSkeletonFlow through the production Board/Decisions handler, with a local provider). Sends nothing, reads no key. The subjective model's fills are
+// scripted; the Decision answers that steer the flow are scripted too (they only decide which request comes next, never what a body says).
+// The product bars come from the code (SKELETON_BARS) in the runner's productBars schema, so the runner refuses any hard check looser than the product.
+import { createHash } from 'node:crypto'
+import { runSkeletonFlow, SKELETON_BARS } from './egdesk-briefing-skeleton.mjs'
+import { memoryMaterials } from './egdesk-turn-memory.mjs'
+import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
+import { SYNTHETIC_PAGES } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { DECISION_MODEL } from './egdesk-decision-client.mjs'
+import { rig } from '../scripts/egdesk-briefing-rig.support.mjs'
+import { CHECK11_ANSWER, CHECK11_FILL } from './egdesk-briefing-real-run.fixture.mjs'
+import { folderMaterials } from './egdesk-real-engine-briefing-hook.mjs'
+import { BOARD_SAY, buildBoardScript } from './egdesk-briefing-real-engine-script.mjs'
+
+export const BRIEFING_COVERAGE_SET = 'l4-briefing-coverage'
+export const BRIEFING_COVERAGE_DIR = 'proofs/decision-real-measure/briefing-coverage'
+export const BRIEFING_COVERAGE_CEILING = 4000
+export const S3_REQUEST = '방금 그 내용 정리해줘'
+export const S3_ANSWER = 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.'
+const sha = bytes => createHash('sha256').update(bytes).digest('hex')
+// lane L6's typed estimate + 15 %
+const est = wire => { const body = JSON.parse(wire); return Math.ceil(1.15 * (134.8 * body.questions.length + 0.1983 * Buffer.byteLength(wire))) }
+const SOURCE = 'egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided'
+/** The runner's schema: { family: { yes, no, source } } with the code's values. Every family this plan checks is named. */
+export const productBars = () => Object.fromEntries(['combines', 'covers', 'about_M#', 'same_M#_M#'].map(f => [f, { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: SOURCE }]))
+
+const wiki = buildWiki(SYNTHETIC_PAGES)
+const rowsFor = ids => memoryMaterials({ memory: { status: 'ready', delivered: Object.fromEntries(ids.map(id => [id, true])), picks: [] }, held: [] }, wiki, { scope: { allowedScopes: ['dm:this-room'] } })
+const bare = rows => rows.map(m => ({ title: m.title, excerpt: m.excerpt, status: 'unknown', time: { at: null }, links: [] }))
+
+async function flow({ request, answer, materials, script = () => undefined, fill = null, coverageCheck = 'board' }) {
+  const captured = [], cleanups = []
+  const provider = async (_url, init) => { const body = JSON.parse(init.body); captured.push({ wire: init.body, names: body.questions.map(q => q.name), stage: body.prompt_cache_key })
+    return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: script(q) ?? (q.name.startsWith('same_') ? .03 : .95) })), usage: { input_tokens: 1 } }) }
+  const R = rig({ after: fn => cleanups.push(fn) }, { mode: 'on', handlerOptions: { fetchImpl: provider } })
+  const root = '/decision/briefing-skeleton'
+  const judge = { prepare: async dto => (await R.http('POST', `${root}/prepare`, dto)).body, run: async ticket => (await R.http('POST', `${root}/run`, { ticket, confirm: true })).body, cancel: async ticket => (await R.http('POST', `${root}/cancel`, { ticket })).body }
+  try {
+    const out = await runSkeletonFlow({ request, answer, materials, candidates: [], currentAnswerId: 'ans-now', viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, coverageCheck })
+    return { out, captured, all: stage => captured.filter(c => c.stage === `briefing-skeleton-${stage}`) }
+  } finally { for (const fn of cleanups) fn() }
+}
+// c20's plan was built with the one whole-board question; since cycle 21 that is the 'board' mode, so it still rebuilds byte for byte (it is what Main sent).
+export const boardOf = wire => JSON.parse(JSON.parse(wire).questions[0].instructions.split('The board, its parts quoted in order as JSON: ')[1].split('. Does this board')[0])
+
+/** -> { plan, planBytes, files: [{ file, bytes }], requests, flows, totals } — deterministic; sends nothing. */
+export async function buildBriefingCoveragePlan() {
+  // s3 exactly as the all-on run attached it (three A사 pages, no date, status or links); the place body no longer asks "several" (cycle 19)
+  const S3_MATS = bare(rowsFor(['quote/a-v1', 'quote/a-v2-plan', 'quote/a-decision']))
+  const place = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: S3_MATS })
+  // the s3 follow-up with the A사 request page attached too: every fact of the answer is in a material. M1 request, M2 v1, M3 v2 plan, M4 decision
+  const FULL = bare(rowsFor(['quote/a-request', 'quote/a-v1', 'quote/a-v2-plan', 'quote/a-decision']))
+  const PARTS = {
+    M1: { text: '11월 3일 A사가 스피커 모듈 200개 견적을 요청했습니다.', fallback: '요청 카드를 열어 보세요.', slots: { title: 'A사 견적 요청', body: 'A사 구매팀이 11월 3일 스피커 모듈 200개 견적을 요청했다.' } },
+    compare: { text: '11월 6일 보낸 v1과 아직 보내지 않은 v2의 단가를 나란히 봅니다.', fallback: '비교 카드를 열어 보세요.', slots: { title: 'A사 견적서 v1과 v2', left: 'M2', right: 'M3', rows: [{ aspect: '단가', left: '12,800원', right: '12,200원' }] } },
+    M4: { text: 'v2는 팀장 승인 후 발송합니다. 승인 기한은 11월 25일입니다.', fallback: '결정 카드를 열어 보세요.', slots: { title: 'A사 건 결정', body: '11월 18일 회의에서 v2는 팀장 승인 후 발송하기로 결정했다. 승인 기한은 11월 25일이다.' } },
+  }
+  const fillFor = asked => ({ title: 'A사 견적 정리', items: Object.fromEntries(asked.guide.items.map(i => [i.id, i.component === 'result_compare' ? PARTS.compare : PARTS[i.materials[0]]])) })
+  // versions as measured (c18 same_M1_M2 .96 for this pair); the order as it happened: the request (P2, 11/3) before the v1/v2 compare (P1), the decision (P3) last
+  const ORDER = { before_P1_P2: .03, before_P1_P3: .95, before_P2_P3: .95 }
+  const versions = q => (q.name.startsWith('same_') ? (q.name === 'same_M2_M3' ? .96 : .03) : ORDER[q.name])
+  const complete = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: FULL, script: versions, fill: fillFor })
+  const without = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: FULL, script: q => (q.name === 'fact_M4' ? .03 : q.name === 'covers' ? .05 : versions(q)), fill: fillFor })
+  const asAttached = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: S3_MATS, script: q => (q.name.startsWith('same_') ? (q.name === 'same_M1_M2' ? .96 : .03) : undefined),
+    fill: asked => ({ title: 'A사 견적 정리', items: Object.fromEntries(asked.guide.items.map(i => [i.id, i.component === 'result_compare' ? { ...PARTS.compare, slots: { ...PARTS.compare.slots, left: 'M1', right: 'M2' } } : PARTS.M4])) }) })
+  const pick = (f, stage, names) => { const c = f.all(stage)[0]; if (!c || (names && c.names.join() !== names)) throw new Error(`coverage plan: ${stage} is ${c?.names.join() ?? 'missing'}`); return c }
+  const s3Place = pick(place, 'place', 'combines,about_M1,about_M2,about_M3,same_M1_M2'), cov1 = pick(complete, 'coverage', 'covers'), cov2 = pick(without, 'coverage', 'covers'), cov3 = pick(asAttached, 'coverage', 'covers')
+  if (complete.out.status !== 'presented' || boardOf(cov1.wire).length !== 3) throw new Error(`coverage plan: complete is ${complete.out.status}`)
+  if (without.out.status !== 'fallback-chat' || without.out.reason !== 'not-covered' || boardOf(cov2.wire).length !== 2 || JSON.stringify(boardOf(cov2.wire)).includes('팀장 승인')) throw new Error(`coverage plan: incomplete is ${without.out.status}`)
+  if (asAttached.out.status !== 'presented' || boardOf(cov3.wire).length !== 2) throw new Error(`coverage plan: as-attached is ${asAttached.out.status}`)
+
+  const YES = { min: SKELETON_BARS.yes }, NO = { max: SKELETON_BARS.no }
+  const hard = (name, rest, note) => ({ name, kind: 'predicate', ...rest, severity: 'hard', note }), soft = (name, rest, note) => ({ name, kind: 'predicate', ...rest, severity: 'soft', note })
+  const specs = [
+    ['q-s3-place-new', s3Place, [hard('combines', YES, 'product bar: yes >= .7. The body the product now sends for s3 (no "several"); c18 measured .98 with "several" next to it'),
+      soft('about_M1', YES, 'c18 .99'), soft('about_M2', YES, 'c18 .98'), soft('about_M3', YES, 'c18 .97'), soft('same_M1_M2', YES, 'c18 .96')]],
+    ['q-cov-complete', cov1, [hard('covers', YES, 'product bar: yes >= .7 proposes the board. Every fact of the answer is on the board: 11/3 request (part 1), 11/6 v1 vs v2 not sent yet (part 2), v2 after the team lead approval, by 11/25 (part 3)')]],
+    ['q-cov-incomplete', cov2, [hard('covers', NO, 'product bar: a decided no (<= .3) starts the one re-design. FLAGGED: the remaining-work part is removed; the compare text still says v2 is not sent, but not that it waits for the team lead approval or the 11/25 deadline. A reading of "not sent yet" as enough would answer yes')]],
+    ['q-cov-as-attached', cov3, [soft('covers', NO, 'product bar: decided no <= .3. Recorded, not a pass condition: the s3 board as the all-on run attached it (no request page). The 11/3 request date of the answer is on no material, so the board cannot show it; a no here would send s3 back to chat for a memory gap (lane L7)')]],
+  ]
+  const files = [], requests = []
+  for (const [id, c, expect] of specs) {
+    const bytes = Buffer.from(c.wire, 'utf8'), body = JSON.parse(c.wire)
+    if (body.model !== DECISION_MODEL || Object.keys(body).some(k => !['model', 'input', 'questions', 'prompt_cache_key'].includes(k)) || body.questions.some(q => q.type !== 'predicate')) throw new Error(`${id}: not a plain predicate body`)
+    files.push({ file: `requests/${id}.json`, bytes })
+    requests.push({ id, file: `requests/${id}.json`, sha256: sha(bytes), estInputTokens: est(c.wire), expect })
+  }
+  const plan = { set: BRIEFING_COVERAGE_SET, tokenCeiling: BRIEFING_COVERAGE_CEILING, productBars: productBars(),
+    passRule: 'PASS when every hard check passes at the product bar: the s3 answer is still judged to combine several facts without the "several" question next to it (yes >= .7), the complete s3 board is judged to cover the request (yes >= .7) and the board without its remaining-work part is judged not to (decided no <= .3). q-cov-as-attached is recorded only.',
+    requests }
+  const totals = { requests: requests.length, questions: specs.reduce((s, [, c]) => s + c.names.length, 0), bytes: files.reduce((s, f) => s + f.bytes.length, 0), estInputTokens: requests.reduce((s, r) => s + r.estInputTokens, 0) }
+  if (totals.estInputTokens > BRIEFING_COVERAGE_CEILING) throw new Error(`coverage plan over the ceiling: ${totals.estInputTokens}`)
+  return { plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, requests, totals,
+    flows: { complete: complete.out.coverage, incomplete: { status: without.out.status, reason: without.out.reason }, asAttached: asAttached.out.coverage } }
+}
+
+// ---------------- cycle 21: the same boards under the per-fact coverage (the default) ----------------
+export const BRIEFING_COVERAGE_FACTS_SET = 'l4-briefing-coverage-facts'
+export const BRIEFING_COVERAGE_FACTS_DIR = 'proofs/decision-real-measure/briefing-coverage-facts'
+// cycle 37: the facts plan has a fourth request (the real check-11 board and answer), so its ceiling is its own
+export const BRIEFING_COVERAGE_FACTS_CEILING = 6000
+export const factsProductBars = () => ({
+  'onboard_F#': { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: `${SOURCE}; per-fact coverage (cycle 21): a fact decided not shown (<= .3) that a material holds is missing -> the one re-design` },
+  'stated_F#': { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: `${SOURCE}; cycle 36: a fact with no code anchor is excused from the board only when the judge decides it does NOT restate something the materials say (<= .3); yes or undecided keeps it enforced` } })
+export const factsOf = wire => JSON.parse(wire).questions.map(q => JSON.parse(q.instructions.split('The fact, quoted exactly as a JSON string: ')[1].split('. Is this fact shown')[0]))
+export const boardIn = wire => JSON.parse(JSON.parse(wire).input[1].content.split('The board, its parts quoted in order as JSON: ')[1].split('\n\nThe materials, each quoted as JSON:')[0])
+/** -> { plan, planBytes, files, requests, totals, flows } — deterministic; sends nothing. */
+export async function buildBriefingCoverageFactsPlan() {
+  const S3_MATS = bare(rowsFor(['quote/a-v1', 'quote/a-v2-plan', 'quote/a-decision']))
+  const FULL = bare(rowsFor(['quote/a-request', 'quote/a-v1', 'quote/a-v2-plan', 'quote/a-decision'])) // M1 request, M2 v1, M3 v2 plan, M4 decision
+  const PARTS = {
+    M1: { text: '11월 3일 A사가 스피커 모듈 200개 견적을 요청했습니다.', fallback: '요청 카드를 열어 보세요.', slots: { title: 'A사 견적 요청', body: 'A사 구매팀이 11월 3일 스피커 모듈 200개 견적을 요청했다.' } },
+    compare: { text: '11월 6일 보낸 v1과 아직 보내지 않은 v2의 단가를 나란히 봅니다.', fallback: '비교 카드를 열어 보세요.', slots: { title: 'A사 견적서 v1과 v2', left: 'M2', right: 'M3', rows: [{ aspect: '단가', left: '12,800원', right: '12,200원' }] } },
+    M4: { text: 'v2는 팀장 승인 후 발송합니다. 승인 기한은 11월 25일입니다.', fallback: '결정 카드를 열어 보세요.', slots: { title: 'A사 건 결정', body: '11월 18일 회의에서 v2는 팀장 승인 후 발송하기로 결정했다. 승인 기한은 11월 25일이다.' } },
+  }
+  const fillFor = asked => ({ title: 'A사 견적 정리', items: Object.fromEntries(asked.guide.items.map(i => [i.id, i.component === 'result_compare' ? PARTS.compare : PARTS[i.materials[0]]])) })
+  const ORDER = { before_P1_P2: .03, before_P1_P3: .95, before_P2_P3: .95 }
+  const versions = q => (q.name.startsWith('same_') ? (q.name === 'same_M2_M3' ? .96 : .03) : ORDER[q.name])
+  const F = { coverageCheck: 'facts' }
+  const complete = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: FULL, script: versions, fill: fillFor, ...F })
+  // the remaining-work part (the decision memo, M4) left out: its fit undecided, so the per-fact check finds the missing fact and the one re-design adds that part back
+  let again = 0
+  const without = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: FULL, fill: fillFor, ...F,
+    script: q => (q.name === 'fact_M4' ? .5 : q.name === 'onboard_F3' ? (again++ ? .95 : .05) : versions(q)) })
+  const asAttached = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: S3_MATS, ...F, script: q => (q.name.startsWith('same_') ? (q.name === 'same_M1_M2' ? .96 : .03) : q.name === 'onboard_F1' ? .05 : undefined),
+    fill: asked => ({ title: 'A사 견적 정리', items: Object.fromEntries(asked.guide.items.map(i => [i.id, i.component === 'result_compare' ? { ...PARTS.compare, slots: { ...PARTS.compare.slots, left: 'M1', right: 'M2' } } : PARTS.M4])) }) })
+  // cycle 37: the REAL board and answer of Main's check-11 (engine-written fill, the notes of the v2 script): two sentences about the answer itself, three table rows, a derived sum.
+  // The first coverage request carries onboard_F1..F6 and, for the three facts with no code anchor, stated_F1, stated_F2, stated_F5 (the materials quoted once).
+  const NOTES = folderMaterials(buildBoardScript().conversations[0].folder)
+  const meta = await flow({ request: BOARD_SAY, answer: CHECK11_ANSWER, materials: NOTES, ...F, fill: () => structuredClone(CHECK11_FILL), script: q => (q.name.startsWith('same_') ? .03 : undefined) })
+  const FACTS = 'onboard_F1,onboard_F2,onboard_F3'
+  const first = f => { const c = f.all('coverage')[0]; if (!c || c.names.join() !== FACTS) throw new Error(`facts plan: coverage is ${c?.names.join() ?? 'missing'}`); return c }
+  const cov1 = first(complete), cov2 = first(without), cov3 = first(asAttached)
+  const cov4 = meta.all('coverage')[0]
+  if (!cov4 || cov4.names.join() !== 'onboard_F1,onboard_F2,onboard_F3,onboard_F4,onboard_F5,onboard_F6,stated_F1,stated_F2,stated_F5') throw new Error(`facts plan: the check-11 coverage is ${cov4?.names.join() ?? 'missing'}`)
+  if (meta.out.status !== 'presented' || JSON.stringify(meta.out.coverage.unshowable) !== '[]' || boardIn(cov4.wire).length !== 2) throw new Error(`facts plan: the check-11 flow is ${meta.out.status} ${JSON.stringify(meta.out.coverage)}`)
+  if (JSON.stringify(factsOf(cov1.wire)) !== JSON.stringify(['A사 견적은 11월 3일 요청', '11월 6일 v1 발송', 'v2는 팀장 승인 후 발송 예정입니다.'])) throw new Error(`facts plan: facts are ${JSON.stringify(factsOf(cov1.wire))}`)
+  if (complete.out.status !== 'presented' || boardIn(cov1.wire).length !== 3) throw new Error(`facts plan: complete is ${complete.out.status}`)
+  if (boardIn(cov2.wire).length !== 2 || JSON.stringify(boardIn(cov2.wire)).includes('팀장 승인')) throw new Error('facts plan: the incomplete board still shows the remaining work')
+  if (without.out.status !== 'presented' || without.out.coverage.redesign?.because !== 'fact-missing') throw new Error(`facts plan: incomplete flow is ${without.out.status} ${JSON.stringify(without.out.coverage)}`)
+  if (asAttached.out.status !== 'presented' || boardIn(cov3.wire).length !== 2 || asAttached.out.coverage.unshowable.join() !== 'F1') throw new Error(`facts plan: as-attached is ${asAttached.out.status} ${JSON.stringify(asAttached.out.coverage)}`)
+
+  const YES = { min: SKELETON_BARS.yes }, NO = { max: SKELETON_BARS.no }
+  const hard = (name, rest, note) => ({ name, kind: 'predicate', ...rest, severity: 'hard', note }), soft = (name, rest, note) => ({ name, kind: 'predicate', ...rest, severity: 'soft', note })
+  const specs = [
+    ['f-complete', cov1, [hard('onboard_F1', YES, '"A사 견적은 11월 3일 요청" is part 1 (the request card)'), hard('onboard_F2', YES, '"11월 6일 v1 발송" is in part 2\'s text'), hard('onboard_F3', YES, '"v2는 팀장 승인 후 발송 예정" is part 3 (the decision card)')]],
+    ['f-incomplete', cov2, [hard('onboard_F1', YES, 'part 1, unchanged'), hard('onboard_F2', YES, 'part 2, unchanged'),
+      hard('onboard_F3', NO, 'the remaining-work part is removed. FLAGGED: part 2 still says "아직 보내지 않은 v2", but nothing shows that v2 waits for the team lead\'s approval (c20: the whole-board question gave .46 here)')]],
+    ['f-as-attached', cov3, [soft('onboard_F1', NO, 'recorded: the 11/3 request is on no material of this board (no part could show it; code records it as unshowable, not blocking)'), hard('onboard_F2', YES, 'part 1\'s text'), hard('onboard_F3', YES, 'part 2 (the decision card)')]],
+    ['f-meta-sentences', cov4, [soft('onboard_F1', NO, 'a sentence about the answer itself ("devlog 기록을 날짜순으로 정리했습니다."): no board can show it'), soft('onboard_F2', NO, 'a sentence about what was not done ("파일은 변경하지 않았습니다."): no board can show it'),
+      hard('onboard_F3', YES, 'the 11-20 row is the first line of the sequence card, copied from its material'), hard('onboard_F4', YES, 'the 11-22 row is the second line'), hard('onboard_F5', YES, 'the 11-24 row ("11-24 · 검색 화면 착수") is the third line'),
+      soft('onboard_F6', NO, 'recorded: a derived sum (218) that no material states; anchored, so it is unshowable and never blocks'),
+      hard('stated_F1', NO, 'c36: a sentence about the answer itself restates nothing of the materials; a judge that cannot say so (undecided or yes) keeps the sentence enforced and the board falls back to chat (check-11)'),
+      hard('stated_F2', NO, 'c36: the same for "파일은 변경하지 않았습니다."'), hard('stated_F5', YES, 'c36: "11-24 · 검색 화면 착수" restates what the 11-24 note says')]]
+  ]
+  const files = [], requests = []
+  for (const [id, c, expect] of specs) {
+    const bytes = Buffer.from(c.wire, 'utf8'), body = JSON.parse(c.wire)
+    if (body.model !== DECISION_MODEL || Object.keys(body).some(k => !['model', 'input', 'questions', 'prompt_cache_key'].includes(k)) || body.questions.some(q => q.type !== 'predicate')) throw new Error(`${id}: not a plain predicate body`)
+    files.push({ file: `requests/${id}.json`, bytes }); requests.push({ id, file: `requests/${id}.json`, sha256: sha(bytes), estInputTokens: est(c.wire), expect })
+  }
+  const plan = { set: BRIEFING_COVERAGE_FACTS_SET, tokenCeiling: BRIEFING_COVERAGE_FACTS_CEILING, productBars: factsProductBars(),
+    passRule: 'PASS when every hard check passes at the product bar: every fact the board shows is judged shown (yes >= .7) on the complete, the incomplete and the as-attached board, and on the incomplete board the removed remaining-work fact is judged not shown (decided no <= .3). The as-attached 11/3 fact is recorded only. Cycle 37 adds the real check-11 board: its three content facts are judged shown (yes >= .7), the two sentences about the answer itself are judged NOT restating the materials (stated, decided no <= .3), and the content sentence is judged restating them (yes >= .7).',
+    requests }
+  const totals = { requests: requests.length, questions: specs.reduce((sum, [, c]) => sum + c.names.length, 0), bytes: files.reduce((sum, f) => sum + f.bytes.length, 0), estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0) }
+  if (totals.estInputTokens > BRIEFING_COVERAGE_FACTS_CEILING) throw new Error(`facts plan over the ceiling: ${totals.estInputTokens}`)
+  const stages = f => f.captured.map(c => c.stage.replace('briefing-skeleton-', ''))
+  return { plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, requests, totals,
+    flows: { complete: { status: complete.out.status, stages: stages(complete) }, incomplete: { status: without.out.status, stages: stages(without), redesign: without.out.coverage.redesign },
+      asAttached: { status: asAttached.out.status, unshowable: asAttached.out.coverage.unshowable }, metaSentences: { status: meta.out.status, stages: stages(meta), unshowable: meta.out.coverage.unshowable } } }
+}

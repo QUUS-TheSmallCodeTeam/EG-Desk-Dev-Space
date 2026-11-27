@@ -262,6 +262,7 @@ HUM-DESK-001, HUM-AGENT-001, HUM-BRIEF-002는 결정됐고 HUM-READ-001은 별�
 
 - **추천·대안**: [협업자의 접근·실행·비용 비교](../references/design-synthesis/egdesk-ux-realization-proposals.md#decision-collaboration), [동시 변경·되돌리기](../references/design-synthesis/egdesk-ux-realization-proposals.md#collaboration-changes), [Desk 소유·관리 이전·복구](../references/design-synthesis/egdesk-ux-realization-proposals.md#desk-ownership)
 - **질문**: 초대의 기본 권한을 관찰만으로 할지 대화 참여까지로 할지, 위임을 해당 업무까지로 할지 회수 전까지로 할지, 타인 변경의 수락·역변경을 누가 할지 각각 선택한다. 관찰·대화·Agent 실행·업무 계정 사용·PC 제어의 위임 가능 주체와 범위도 각각 선택한다. 단일/공동 소유, 소유권 이전 주체, 복구 위임 유무와 이전 후 기존 복구 위임의 존속도 독립된 선택이다. Engine 비용 기본값은 HUM-ENGINE-001과 공유한다.
+- **공용 Board 공동 개설(미결정)**: 기존 보드에 초대하지 않고 두 사람이 새 보드를 만들 때 개설 수락, 가입·제외·폐쇄, 의견 충돌과 마지막 관리자 이탈은 누가 처리하는가? 단기 업무나 상시 팀에서 원본 제공자가 떠난 뒤 공동 산출물은 어떤 조건에서 남는가? Desk 공동 소유 정책을 자동 적용하지 않는다. [목표 시나리오](../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-joint-board-start) · [발췌·파생물 보존](#hum-snapshot-001) · [원격 인프라](#hum-remote-001)
 - **외부 행동 위임**: 외부 서비스·원본 파일 등에 실제 영향을 주는 행동은 어디까지 매번 사전 승인하고, 어디까지 명시한 대상·행동·기간·한도 안에서 상시 위임할 것인가?
 - **직원 대화 공유·보관**: 직원 대화 원문·요약·첨부의 업무 참여자와 타 부서 공유 범위, 개인·업무 대화의 보관 범위는 무엇인가? 대화 공개 기본값과 보관·삭제 정책은 각각 HUM-CONV-001, HUM-SNAPSHOT-001·HUM-EXPORT-001과 중복 없이 함께 정한다.
 - **같은 범위에서 남은 선택**: 동시 변경이 충돌하면 누구의 변경을 어떻게 보존·수락·되돌릴 수 있게 할 것인가? Desk 소유·관리 권한의 이전·복구는 누가 할 수 있는가? 충돌 알고리즘과 컨트롤 배치는 이 선택을 만족하도록 설계한다.

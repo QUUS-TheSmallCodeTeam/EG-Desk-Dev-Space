@@ -28,24 +28,38 @@ export function attachmentFileName(label, mime, taken) {
 }
 
 /**
- * createContextAttachmentProvider({store, ownerKey}) — store: ImmutableContextStore,
+ * createContextAttachmentProvider({store, ownerKey, ownerKeys?}) — store: ImmutableContextStore,
  * ownerKey: () => current account key or null (signed out = unavailable).
+ * L1 c25 (U11, flag-gated by the caller): ownerKeys: () => [account keys] -- the default sign-in and the signed-in Agent profile accounts. Captures of a room on
+ * an Agent profile are stored under THAT account, so the export lists the captures of every such account (each read with its own key); without ownerKeys
+ * (or flag off) only the default sign-in's, as before. Import stays with the default sign-in.
  */
-export function createContextAttachmentProvider({ store, ownerKey }) {
+export function createContextAttachmentProvider({ store, ownerKey, ownerKeys = null }) {
   const owner = () => {
     const key = typeof ownerKey === 'function' ? ownerKey() : null
     if (!store || typeof key !== 'string' || !key) fail('PORTABLE_ATTACHMENT_STORE_UNAVAILABLE', 'Attachments need a signed-in account; nothing was exported')
     return key
   }
+  const exportKeys = () => {
+    if (typeof ownerKeys !== 'function') return [owner()]
+    let keys
+    try { keys = ownerKeys() } catch { keys = [] }
+    keys = [...new Set((Array.isArray(keys) ? keys : []).filter(key => typeof key === 'string' && key))]
+    if (!store || !keys.length) fail('PORTABLE_ATTACHMENT_STORE_UNAVAILABLE', 'Attachments need a signed-in account; nothing was exported')
+    return keys
+  }
   return {
     async exportList({ threadIds = null } = {}) {
-      const key = owner()
+      const keys = exportKeys()
       const wanted = threadIds === null ? null : new Set(threadIds)
-      const records = await store.listRecords(key, 'sources', record => typeof record?.hash === 'string'
-        && (wanted === null || wanted.has(record.clientThreadId)))
-      records.sort((a, b) => (a.storedAt ?? 0) - (b.storedAt ?? 0) || String(a.sourceId).localeCompare(String(b.sourceId)))
+      const records = []
+      for (const key of keys) {
+        for (const record of await store.listRecords(key, 'sources', record => typeof record?.hash === 'string'
+          && (wanted === null || wanted.has(record.clientThreadId)))) records.push({ record, key })
+      }
+      records.sort((a, b) => (a.record.storedAt ?? 0) - (b.record.storedAt ?? 0) || String(a.record.sourceId).localeCompare(String(b.record.sourceId)))
       const taken = new Set()
-      return records.map(record => {
+      return records.map(({ record, key }) => {
         const projection = record.shape?.readable && record.payloads?.projection?.hash ? record.payloads.projection : null
         const mime = typeof record.shape?.mime === 'string' ? record.shape.mime : 'application/octet-stream'
         const size = (projection ?? record.payloads?.source)?.byteLength

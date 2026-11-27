@@ -1,0 +1,187 @@
+import { compactText, decisionThresholds, predicateQuestion, readPredicate } from './egdesk-decision-questions.mjs'
+import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
+
+// L8 c37 (owner direction U13, corrected: the Decision model settles the DEFINED layers first, conversation sits on top).
+// The browser slice of the open-item registry (lane L1, helper/egdesk-open-items.mjs): a browser task that waits for the person (it asked, or handed a
+// step over, or got stuck) or is running is an OPEN ITEM of the conversation. Code registers it with the options it can apply; the Decision decides, at
+// turn start and before the engine turn, which option the person's message settles; code applies it; the engine then words the reply on a settled state.
+//
+// Flag EGDESK_BROWSER_OPEN_ITEMS (default off). Nothing here speaks to the person: no new copy, the engine reads a closed note.
+//
+// The contract with L1's registry (agreed by message, 2026-11-25):
+//   provider = { id: 'browser', items(conversationKey) SYNC, questions(conversationKey, message), read(answers), apply(ctx) }
+//   items   -> [{ provider: 'browser', id: taskId, kind: 'browser_task', state, summary (code-built, <= 300 chars), options: [{ id }] }]
+//   questions -> predicate questions named `open_browser_<option>`, each quoting the message (R4) and nothing else of it (R2: yes/no, no catch-all option)
+//   read    -> { itemId, optionId, kind: 'settled' } | { kind: 'none' } | { kind: 'uncertain' }; ONLY a settled one is applied (R5: fail closed)
+//   apply   -> { handled, note?, settled, reason }
+
+export const OPEN_ITEMS_FLAG = 'EGDESK_BROWSER_OPEN_ITEMS'
+export const OPEN_ITEM_KIND = 'browser_task'
+export const MAX_ITEM_SUMMARY = 300
+export const MAX_ITEM_GOAL = 90, MAX_ITEM_ASKED = 110 // c43: the goal and what the person was asked share the 300 characters of the summary
+
+// state of a live task (code: no judgment). waiting: it asked the person something; handed_over: the next step is the person's (a sign-in, a code, a
+// control only the person operates, a checkout); stuck: it cannot go on for another reason; running: the loop is working.
+const HANDOVER_CODES = new Set(['human_step', 'login_required', 'two_factor_required', 'bot_check', 'sensitive_flow'])
+export function openItemState(task) {
+  if (!task) return null
+  if (task.status === 'running') return 'running'
+  if (task.status !== 'paused') return null
+  if (task.pause?.kind === 'need_context') return 'waiting'
+  return HANDOVER_CODES.has(task.pause?.code) ? 'handed_over' : 'stuck'
+}
+
+// The options a state offers, each one a thing code can apply (egdesk-browser-task.mjs settle()).
+//   continue: the person did their step / gave what was asked -> the loop goes on from the next step
+//   retry:    try again from the page as it is now (a stuck or handed-over task; never for a question that still waits for the answer)
+//   abandon:  stop the task
+//   ask_page: the person asks what is on the page / what the task found: the task stays as it is, the engine answers on its state
+//   change:   (only with in-run messages on) the message replaces the request
+export function openItemOptions(task, { change = false } = {}) {
+  const state = openItemState(task)
+  if (state === 'running') return ['abandon', 'ask_page']
+  if (state === 'waiting') return ['continue', 'abandon', 'ask_page', ...(change ? ['change'] : [])]
+  if (state === 'handed_over' || state === 'stuck') return ['continue', 'retry', 'abandon', 'ask_page', ...(change ? ['change'] : [])]
+  return []
+}
+
+const word = value => (typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{2,63}$/.test(value) ? value : null)
+
+/** The item's summary: the person's own request (bounded), the closed state and code, the steps done. No page text, no label, no URL. */
+export function openItemSummary(task) {
+  const state = openItemState(task)
+  if (!state) return null
+  const code = state === 'running' ? null : word(task.pause?.code)
+  // c43 (real, c62, combined-v1): the resolver reads the message against THIS text only. Without what the person was asked, a bare "했어" had no referent (0.01) while "로그인했어" had one (0.96), and a vague "응 실행해"
+  // read 0.94 as going on with it. The line the person was asked (the engine's own message, already quoted in the option request) goes in, bounded; code-built, no page text.
+  const asked = typeof task.question === 'string' && task.question.trim() ? ` Asked of the person: "${compactText(task.question.replace(/"/g, "'"), MAX_ITEM_ASKED)}"` : ''
+  return compactText(`Browser task "${compactText(String(task.goal ?? '').replace(/"/g, "'"), MAX_ITEM_GOAL)}": ${state}${code ? ` (${code})` : ''}, ${task.steps + (state === 'running' ? task.liveStep : 0)} steps done.${asked}`, MAX_ITEM_SUMMARY)
+}
+
+export function openItemOf(task, options = {}) {
+  const state = openItemState(task)
+  if (!state) return null
+  return Object.freeze({ provider: 'browser', id: task.taskId, kind: OPEN_ITEM_KIND, state, summary: openItemSummary(task), options: Object.freeze(openItemOptions(task, options).map(id => Object.freeze({ id }))) })
+}
+
+export const optionQuestionName = id => `open_browser_${id}`
+const quoted = text => `"${String(text).replace(/"/g, "'")}"`
+const MAX_MESSAGE = 500
+const asked = question => (typeof question === 'string' && question.trim() ? `the question ${quoted(compactText(question, 200))}` : 'what was asked')
+const ASKS = {
+  continue: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, say that the person has done the step the paused browser task waits for, or give what it asked for (${asked(task?.question)})?`,
+  // c40 (real, c57, browser-open-item-v1 sent 19:08): the v1 predicates fired on what they were not about: retry 0.88 on "했어", 0.95 on "로그인햇어", 0.93 on a changed request, 0.36 on a page question. Each now names its near misses.
+  retry: message => `Is this message, ${quoted(compactText(message, 200))}, a request to run the browser task again (redo it, or try once more)? A message that only says the person did their own step, or that says or asks anything else, is not.`,
+  abandon: message => `Does this message, ${quoted(compactText(message, 200))}, say the person no longer wants the browser task, or ask to stop it?`,
+  // c39 (real, check-31bo, oi-unrelated): "고마워. 그런데 자바스크립트 배열 정렬은 어떻게 해?" read ask_page 1.0: any question matched a question about the page. The page is the anchor: a question about anything else is not it.
+  // v1 measured ask_page 0.99 on "그만해", 1.0 on "됐어 안 할래", 0.97 on "ㅇㅇ"; c39's anchor alone would have exposed the next error (below), so the near misses are named
+  ask_page: message => `Is this message, ${quoted(compactText(message, 200))}, a question about what the web page the browser task is on shows, or what the task found there? A request to go on, stop, redo or change the task, a request for something different from what the task was asked for, an acknowledgement, and a question about anything else are not.`,
+  // v1 measured change 1.0 on "오늘 날씨 어때?": a different request IS "a different target or request". It was not settled only because ask_page read 0.48; once ask_page is anchored it would have been, and the open
+  // task would have been replaced by a weather question (the unsafe error). Change is a change of what THIS task looks for.
+  change: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, change what the browser task is looking for on its page (a different item, period or detail of the same kind of request) instead of answering ${asked(task?.question)}? An unrelated question or request, an acknowledgement and a request to stop are not.`,
+}
+
+export function openItemQuestions(task, message, options = {}) {
+  return openItemOptions(task, options).map(id => predicateQuestion(optionQuestionName(id), ASKS[id](message, task)))
+}
+
+/**
+ * readOpenItem(answers, task, { thresholds, change }) -> { kind: 'settled', optionId, p } | { kind: 'none', p } | { kind: 'uncertain', p }
+ * R5: exactly one option decided yes (the product's done bar) and every other decided no -> settled. Everything no -> none (an ordinary turn, the task
+ * stays as it is). Anything else (two yes, an unknown, a middle probability) -> uncertain: nothing is applied and nothing is asked of the person here.
+ */
+export const OPEN_ITEM_NO = 0.25 // c41: a competing option at or below this reads as no (it was 1 - done = 0.15; see readOpenItem)
+export function readOpenItem(answers, task, { thresholds, change = false } = {}) {
+  const bar = decisionThresholds(thresholds).done
+  const ids = openItemOptions(task, { change })
+  const read = ids.map(id => ({ id, ...readPredicate(answers, optionQuestionName(id), bar) }))
+  const p = Object.fromEntries(read.map(row => [row.id, row.probability]))
+  // c41 (real, c59, browser-open-item-v2 on 6187635: 8 correct, 2 acceptable, 2 safe_miss, 0 wrong): "했어" read continue 0.95 with ask_page 0.20 and retry 0.70, and was not settled: the commonest reply
+  // of all. A rival at 0.20 is not a rival; the bound for "decided no" is 0.25 (it was 0.15). Replayed on the recorded answers of v1 (c57) and v2 (c59), 24 replies: no reply becomes WRONG, and the two
+  // runs gain one correct each (evidence/l8-c41/replay.txt).
+  const no = row => row.state === 'no' && row.probability <= OPEN_ITEM_NO
+  const yes = read.filter(row => row.state === 'yes')
+  // retry is continue that also forgets the step memory (c39) and change that also applies a new request (c40): when continue or change is the ONE other yes, retry's own reading cannot change what is applied,
+  // whether it reads yes (the person's step is done, "try again" is what they mean too) or in between (0.70 on "했어"). Every other option must still be decided no.
+  const non = yes.filter(row => row.id !== 'retry')
+  if (non.length === 1 && (non[0].id === 'continue' || non[0].id === 'change') && read.every(row => row === non[0] || row.id === 'retry' || no(row))) {
+    const retry = read.find(row => row.id === 'retry')
+    return { kind: 'settled', optionId: non[0].id, p, ...(retry?.state === 'yes' ? { overlap: non[0].id === 'continue' ? 'continue_retry' : 'retry_change' } : {}) }
+  }
+  if (yes.length === 1 && read.every(row => row === yes[0] || no(row))) return { kind: 'settled', optionId: yes[0].id, p }
+  if (!yes.length && read.length && read.every(no)) return { kind: 'none', p }
+  return { kind: 'uncertain', p }
+}
+
+const EVIDENCE_RULES = 'A browser task of this conversation is open (waiting for the person, or stuck, or running). Decide what the user message means for that task. A message about something else means nothing for the task: answer no to every question about it.'
+/** decideOpenItem({ message, task, ... }) -> readOpenItem result + usage + ms. One request, one predicate per option. Throws DecisionError. */
+export async function decideOpenItem({ message, task, change = false, client, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch }) {
+  const at = performance.now()
+  const result = await client.decide({
+    input: [{ role: 'developer', content: EVIDENCE_RULES },
+      { role: 'user', content: `${openItemSummary(task)}${typeof task.question === 'string' && task.question.trim() ? `\nAsked: ${compactText(task.question, 400)}` : ''}\nUser message: ${compactText(message, MAX_MESSAGE)}` }],
+    questions: openItemQuestions(task, message, { change }), timeoutMs, signal, authorizeDispatch,
+  })
+  return { ...readOpenItem(result.answers, task, { thresholds, change }), usage: result.usage, ms: Math.round(performance.now() - at) }
+}
+
+/** The closed note for a settled state that the engine words (no loop ran): status and code of the task as it stands, `settled` naming the option. */
+export function settledNote(task, optionId, { lines = [] } = {}) {
+  const state = openItemState(task)
+  const cancelled = task.status === 'cancelled'
+  const body = { id: task.taskId, status: cancelled ? 'cancelled' : state === 'waiting' ? 'need_context' : state === 'running' ? 'running' : 'cannot_proceed',
+    ...(!cancelled && state && state !== 'running' && word(task.pause?.code) ? { code: task.pause.code } : {}),
+    settled: optionId,
+    ...(Array.isArray(lines) && lines.length ? { page: lines.slice(0, 8) } : {}),
+    stepsDone: task.steps, actions: { ...task.actions },
+    next: optionId === 'ask_page' ? 'answer_user' : 'tell_user' }
+  return JSON.stringify({ egdesk_browser_task: body })
+}
+
+/**
+ * readFromResolver(verdict, provider, conversationKey, { sole }) -> a read for entry.handle({ openItemRead }) or null (decide on your own).
+ * c39 (the product with both flags on: EGDESK_OPEN_ITEMS and EGDESK_BROWSER_OPEN_ITEMS): the resolver (lane L1, egdesk-open-items.mjs) already asked, in the turn-start request, whether
+ * this message settles the browser task (oi_ref_n) AND the task's option predicates. The pre-turn entry must not ask again or decide differently:
+ *   settled to the browser task -> the provider's own read of the same answers (settled, none or uncertain: nothing is applied unless settled)
+ *   settled to another item, or no item referred, or several -> { kind: 'none' }: the message is not about this task (an ordinary turn, the task as it was)
+ *   the resolver did not decide (no verdict, unreachable, unanswered) -> null: the entry decides as it does with the resolver off
+ */
+export function readFromResolver(verdict, provider, conversationKey, { sole = false } = {}) {
+  if (!verdict || typeof verdict !== 'object') return null
+  if (verdict.status === 'settled') return verdict.item?.provider === 'browser' && typeof provider?.read === 'function' ? provider.read(verdict.answers ?? {}, conversationKey) : { kind: 'none', p: {} }
+  // c43 (real, c64, combined-v2): with the browser task as the ONLY open item the referent has nothing to arbitrate, and it is the strictest judge of short replies ("했어" 0.40, "다시 해줘" 0.30,
+  // "그만해" 0.84, a page question 0.00 against the 0.85 bar) while the task's own options, asked in the same request, read them well (c59, c41: 0 wrong over 24 replies). So a referent below the bar does not veto
+  // the options of a sole item: the provider reads them from the answers of the same request (same rules: one option decided yes, the rest decided no). With another open item the referent still arbitrates.
+  if (sole === true && verdict.reason === 'no_item_referred' && verdict.answers && typeof provider?.read === 'function') return provider.read(verdict.answers, conversationKey)
+  return ['no_item_referred', 'several_items'].includes(verdict.reason) ? { kind: 'none', p: {} } : null
+}
+
+/**
+ * createBrowserOpenItems({ store, entry, change? }) -> the provider the registry consults. `entry` is createDirectBrowserEntry()'s object (its settle()).
+ * items() is synchronous and read-only. A conversation has at most one live browser task, so one item.
+ */
+export function createBrowserOpenItems({ store, entry, change = () => false }) {
+  if (!store || typeof store.active !== 'function' || !entry || typeof entry.settle !== 'function') throw new TypeError('createBrowserOpenItems needs the task store and the entry')
+  return Object.freeze({
+    id: 'browser',
+    items(conversationKey) {
+      const item = openItemOf(store.active(conversationKey), { change: change() === true })
+      return item ? [item] : []
+    },
+    questions(conversationKey, message) {
+      const task = store.active(conversationKey)
+      return task ? openItemQuestions(task, message, { change: change() === true }) : []
+    },
+    read(answers, conversationKey, thresholds) {
+      const task = store.active(conversationKey)
+      if (!task) return { kind: 'none', p: {} }
+      const read = readOpenItem(answers, task, { thresholds, change: change() === true })
+      return read.kind === 'settled' ? { ...read, itemId: task.taskId } : read
+    },
+    async apply(ctx) {
+      const out = await entry.settle(ctx)
+      return { handled: out.handled === true, ...(typeof out.note === 'string' ? { note: out.note } : {}), settled: ctx.optionId, reason: out.reason ?? null, status: out.status ?? null, resumed: out.resumed === true }
+    },
+  })
+}
+

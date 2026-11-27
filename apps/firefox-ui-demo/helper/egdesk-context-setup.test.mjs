@@ -171,6 +171,20 @@ test('a finished plan becomes a proposal the person confirms; a changed plan nee
   assert.equal((await run('v2 배포안', 'completed', 0.6)).result.status, 'uncertain')
 })
 
+test('an exact top tie in transition kind does not produce a timeline proposal', async () => {
+  const { client } = fakeClient(question => question.name === 'plan'
+    ? { type: 'choice', choice: 'v2 배포안', confidence: 0.95,
+      probabilities: [{ value: 'v2 배포안', probability: 0.95 }, { value: 'no listed plan', probability: 0.05 }] }
+    : { type: 'choice', choice: 'completed', confidence: 0.95,
+      probabilities: [{ value: 'completed', probability: 0.5 }, { value: 'cancelled', probability: 0.5 }] })
+  const result = await planTimelineTransition({ message: 'v2 배포 상태가 바뀌었어.',
+    openItems: [{ id: 'v2', title: 'v2 배포안', timeSlice: 'planned' }], client })
+  assert.equal(result.status, 'uncertain')
+  assert.equal(result.receipt.plan.state, 'accepted')
+  assert.deepEqual(result.receipt.kind, { value: 'completed', confidence: 0.95, state: 'uncertain' })
+  assert.equal(result.proposal, undefined)
+})
+
 test('branch save offer and activity row', async () => {
   const { client } = fakeClient(() => predicate(0.8))
   assert.deepEqual(await judgeBranchSave({ message: 'm', answerText: 'a', client }), { status: 'ready', offer: true, probability: 0.8, usage: USAGE })
@@ -196,4 +210,81 @@ test('the bundled ontology graph maps to timeline and document candidates', asyn
   const { client } = fakeClient((question) => (question.type === 'choice' ? choice(question.choices[0].value) : predicate(0.1)))
   const result = await prepareTurnContext({ message: '온톨로지 구조', candidates, client })
   assert.ok(['ready', 'empty'].includes(result.status))
+})
+
+const speechStub = (message, allowed = () => true) => ({ allowed, modeActive: () => true,
+  segments: [{ start: 0, end: message.length }] })
+const lowSpeech = (name, request) => (/^speech_/.test(name) ? { type: 'choice', choice: 'plan', confidence: 0.16,
+  probabilities: [{ value: 'plan', probability: 0.16 }, { value: 'assertion', probability: 0.15 }] } : null)
+
+test('speech trace: an unconfirmed label is withheld; the internal receipt (not the user-visible row) keeps label count and recall verdict, with no text', async () => {
+  const message = '내일 살펴볼 예정이야.'
+  const { client } = fakeClient((q, r) => lowSpeech(q.name, r) || (q.name === 'rel_recall' ? predicate(0.16) : q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.9)))
+  const out = await prepareTurnContext({ message, candidates: [...CANDIDATES.slice(0, 1), { id: 'conversation:recent', kind: 'conversation', title: 'recent', timeSlice: 'unknown', mayRead: () => true, loadText: () => '{}' }],
+    client, askedAt: Date.UTC(2026, 10, 23, 3), speech: speechStub(message) })
+  assert.deepEqual(out.speechInterpretations, [])
+  assert.deepEqual(out.receipt.speech, { segments: 1, axes: 3, accepted: 0, anchor: '2026-11-23T03:00:00.000Z', recall: { state: 'no', probability: 0.16 } })
+  const row = decisionContextActivity({ answerId: 'a', selected: out.selected, dropped: out.receipt.dropped })
+  assert.doesNotMatch(JSON.stringify(row), /발언|speech/, 'speech labels are Agent-internal, never in the user-visible row')
+  assert.ok(!JSON.stringify(row).includes('살펴볼'))
+})
+
+test('items beyond the limit are reported as dropped by id, never silently', async () => {
+  const { client } = fakeClient((q, r) => q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.9))
+  const out = await prepareTurnContext({ message: '정리해 줘', candidates: CANDIDATES, client, maxItems: 2 })
+  assert.equal(out.selected.length, 2)
+  assert.ok(out.receipt.dropped.length >= 1 && out.receipt.dropped.every(d => d.reason === 'over_item_limit' && typeof d.id === 'string'))
+  assert.match(decisionContextActivity({ answerId: 'a', selected: out.selected, dropped: out.receipt.dropped }).title, /못 붙인 자료/)
+})
+
+test('a discarded topic batch keeps a typed-name item but none of the model-scored items', async () => {
+  const message = '보드 목표 기준으로 정리해 줘'
+  const topic = { plan: { questions: [{ type: 'predicate', name: 'topic_need_0', instructions: 'x' }], input: [], resolve: () => null },
+    allowed: () => true, authorizeDispatch: () => true }
+  const { client } = fakeClient(q => (q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.95)))
+  const out = await prepareTurnContext({ message, candidates: CANDIDATES.slice(0, 5), client, topic })
+  assert.equal(out.privateTopicBatch, true)
+  assert.deepEqual(out.selected.map(s => s.id).sort(), ['pinned'])
+})
+
+test('speech design flag: predicates replace the axis questions end to end; default stays the axes; calibration rows carry numbers only', async () => {
+  const message = '내일 내가 표지를 살펴볼 예정이야.'
+  const decisive = yes => (q) => (q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific')
+    : q.name.startsWith('speechp_') ? predicate(yes.includes(q.name.replace(/^speechp_|_0$/g, '')) ? 1 : 0) : predicate(0.02))
+  const run = async design => {
+    const f = fakeClient(decisive(['plan', 'after', 'anchor_stated']))
+    const out = await prepareTurnContext({ message, candidates: CANDIDATES.slice(0, 1), client: f.client, askedAt: Date.UTC(2026, 10, 23, 3),
+      speech: { ...speechStub(message), ...(design ? { design } : {}) } })
+    return { out, names: f.calls[0].questions.map(q => q.name) }
+  }
+  const flagged = await run('predicates')
+  assert.equal(flagged.names.filter(n => n.startsWith('speechp_')).length, 12)
+  assert.equal(flagged.names.filter(n => n.startsWith('speech_')).length, 0)
+  assert.deepEqual(flagged.out.speechInterpretations, [{ start: 0, end: message.length, source: 'unspecified', form: 'plan', time: 'future_anchored' }])
+  assert.match(flagged.out.extraContext.egdesk_decision_context, /"form":"plan","time":"future_anchored"/)
+  const rows = flagged.out.calibration.judgments.filter(j => j.q === 'speech_predicate')
+  assert.equal(rows.length, 12)
+  assert.deepEqual(rows.find(j => j.pred === 'plan'), { q: 'speech_predicate', would: 'accept', p: 1, threshold: 0.8, minMargin: 0.2, pred: 'plan', seg: 0 })
+  const current = await run(undefined)
+  assert.equal(current.names.filter(n => n.startsWith('speech_')).length, 3)
+  assert.equal(current.names.filter(n => n.startsWith('speechp_')).length, 0)
+})
+
+test('speech design flag: isolated predicate design quotes only its own sentence in every question and installs labels per span', async () => {
+  const message = '하린이 상자를 옮겼다고 들었어. 내일 내가 표지를 살펴볼 예정이야.'
+  const segments = [{ start: 0, end: 18 }, { start: 19, end: message.length }]
+  const f = fakeClient(q => {
+    const m = q.name.match(/^speechp_(\w+)_(\d)$/)
+    if (!m) return q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.02)
+    const yes = m[2] === '0' ? ['relay', 'before'] : ['plan', 'after', 'anchor_stated']
+    return predicate(yes.includes(m[1]) ? 1 : 0)
+  })
+  const out = await prepareTurnContext({ message, candidates: CANDIDATES.slice(0, 1), client: f.client, askedAt: Date.UTC(2026, 10, 23, 3),
+    speech: { allowed: () => true, modeActive: () => true, segments, design: 'predicates-isolated' } })
+  const qs = f.calls[0].questions.filter(q => q.name.startsWith('speechp_'))
+  assert.equal(qs.length, 24)
+  assert.ok(qs.filter(q => q.name.endsWith('_0')).every(q => q.instructions.includes(JSON.stringify(message.slice(0, 18))) && !q.instructions.includes('표지')))
+  assert.ok(qs.filter(q => q.name.endsWith('_1')).every(q => q.instructions.includes(JSON.stringify(message.slice(19))) && !q.instructions.includes('하린')))
+  assert.deepEqual(out.speechInterpretations.map(x => [x.source, x.form, x.time]), [['attributed_report', 'assertion', 'past_unspecified'], ['unspecified', 'plan', 'future_anchored']])
+  assert.equal(out.calibration.judgments.filter(j => j.q === 'speech_predicate').length, 24)
 })

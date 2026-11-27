@@ -80,7 +80,27 @@ export function resolveTerminalShell({ shellId, shell } = {}, options = {}) {
   return { id: 'default', label: path.posix.basename(executable), executable, args: [], available: true }
 }
 
+// u1 (item 4): the bridge runs under Aside's own runtime, and its environment carries that runtime's private settings (NPM_CONFIG_PREFIX, NODE_PATH, VIRTUAL_ENV, TMPDIR, ... all pointing
+// into ~/.aside). A shell started with them prints "nvm is not compatible with the NPM_CONFIG_PREFIX environment variable" on its first line and lets npm/pip/node of the person's own
+// tools write into Aside's folders. These variables are not the person's: a value that points into an Aside directory, or a name that starts with ASIDE_, is not handed to the shell.
+// PATH, PWD and OLDPWD are kept as they are (a missing tool is worse than an extra folder; the shell and the person's rc files own PATH). Every other variable, including a person's own
+// NPM_CONFIG_PREFIX, is passed unchanged, and the shell still reads the person's rc files itself.
+const ASIDE_DIR = /(^|[\\/])\.aside([\\/]|$)/
+const KEEP_AS_IS = new Set(['PATH', 'PWD', 'OLDPWD', 'HOME', 'USERPROFILE'])
+export function withoutAsideRuntimeEnv(env = process.env) {
+  const out = {}
+  for (const [name, value] of Object.entries(env ?? {})) {
+    if (!KEEP_AS_IS.has(name.toUpperCase())) {
+      if (/^ASIDE_/i.test(name)) continue
+      if (typeof value === 'string' && ASIDE_DIR.test(value)) continue
+    }
+    out[name] = value
+  }
+  return out
+}
+
 export function terminalEnvironment(env = process.env, platform = process.platform) {
+  env = withoutAsideRuntimeEnv(env)
   const result = { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' }
   if (platform !== 'win32') {
     const utf8 = value => typeof value === 'string' && /utf-?8/i.test(value)
@@ -96,7 +116,7 @@ export function createTerminalSessionFactory({ registry, platform = process.plat
   env = process.env, release = os.release(), cwd = os.homedir(), exists = isFile,
   loadPty = () => import('node-pty'), spawnPipe = spawnChild,
   startWindowsProcess = createWindowsPtyProcess, windowsPowerShellInitialization = null,
-  newId = () => 'term-' + randomBytes(6).toString('hex'), warn = console.warn } = {}) {
+  newId = () => 'term-' + randomBytes(6).toString('hex'), warn = console.warn, openUrl = null } = {}) {
   if (!registry || typeof registry.register !== 'function') throw new TypeError('A terminal registry is required')
   if (typeof cwd !== 'string' || !(platform === 'win32' ? path.win32 : path).isAbsolute(cwd)) {
     throw new TypeError('A trusted absolute terminal working directory is required')
@@ -112,7 +132,9 @@ export function createTerminalSessionFactory({ registry, platform = process.plat
         fail('WINDOWS_CONPTY_UNSUPPORTED', 'This Windows build is not supported by the installed ConPTY backend', 503,
           { transport: 'unavailable', usePty: false, degraded: false })
       }
-      const environment = terminalEnvironment(env, platform)
+      // c34 (flag EGDESK_TERMINAL_OPEN_URL, off = no openUrl): this session's opener variables, keyed by the id the session will have
+      const sessionId = newId()
+      const environment = { ...terminalEnvironment(env, platform), ...(openUrl && platform !== 'win32' ? openUrl.envFor(sessionId) : {}) }
       if (platform === 'win32') {
         let windowsProcess
         try {
@@ -125,7 +147,7 @@ export function createTerminalSessionFactory({ registry, platform = process.plat
               : 'Windows terminal creation could not be confirmed. Do not retry automatically.', 503,
             { transport: 'unavailable', usePty: false, degraded: false, nativeCreated: definite ? false : error?.nativeCreated === true ? true : null })
         }
-        return registry.register({ id: newId(), process: windowsProcess, usePty: true,
+        return registry.register({ id: sessionId, process: windowsProcess, usePty: true,
           shell: choice.executable, shellId: choice.id, shellLabel: choice.label,
           transport: 'conpty', windowsBuildNumber: windowsBuildNumber(release), ...size })
       }
@@ -146,7 +168,7 @@ export function createTerminalSessionFactory({ registry, platform = process.plat
             ZDOTDIR: '/tmp/egdesk-zsh', PS1: '\\n$ ', PROMPT: '\\n$ ' },
           stdio: ['pipe', 'pipe', 'pipe'] })
       }
-      return registry.register({ id: newId(), process: nativeProcess, usePty,
+      return registry.register({ id: sessionId, process: nativeProcess, usePty,
         shell: choice.executable, shellId: choice.id, shellLabel: choice.label,
         transport: usePty ? 'pty' : 'pipe',
         transportReason: reason, ...size })

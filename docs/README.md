@@ -5,6 +5,20 @@
 
 ## 지금 읽을 문서
 
+**실제 화면에서 따라 하려면** [현재 조작 빠른 안내](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-guide)로 갑니다. [계정 추가와 Agent 연결](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-accounts), [Board에서 둘에게 묻기](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-board), [DM 기억 허용·철회](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-memory), [같은 Codex DM에서 주제 이어가기](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-topic-tree), [검토 파일·질문권](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share), [중단 뒤 복구](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-recovery)를 바로 볼 수 있습니다. 이 경로는 로컬 기능판 기준이며, 설계안이나 정식 배포를 뜻하지 않습니다.
+
+**다른 사람과 같은 보드를 쓰거나 서로의 Agent에게 맡길 때**: [현재 가능한 설정·질문 파일 교환](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share)과 [기존 보드 초대와 공용 보드 함께 만들기(설계)](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-joint-board-start), [앞으로의 사용자 흐름: 배치·호스트 화면·동료 Agent](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-shared-card-agents)을 구분합니다. [비전](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-board-cross-agent) · [기술 계약](../ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-board-cross-agent) · [설계 제안과 미실행 인수 사례](../apps/firefox-ui-demo/docs/BOARD_COLLABORATION_AND_CROSS_AGENT_DESIGN.md#collab-checks)
+
+**통합판에서 확인한 경로:** [폴더 연결·트리에서 파일 열기](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-tool-02) · [작업사본과 새 파일 저장](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-tool-03) · [공용 Board 검수 카드의 공개·변경·회수](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-col-05) · [협업 서비스 재시작 후 재인증](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-col-06).
+
+**공용 보드 입구:** [왼쪽 Desk에서 보는 것과 사람 초대로 보게 될 것](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-board-entry-doors) · [진입·재진입 화면 모형](../sketches/board-collaboration-entry/README.md).
+
+**세 번째 참가자에게 배송 건만 넘기기:** [로컬에서 조작하는 가상 예](../sketches/board-collaboration-rehearsal/README.md). 실제 원격 협업·Agent 호출 기능과 구분합니다.
+
+**제품 방향은** [EG-Desk 제품 비전과 개발 목표](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-agent-channels)와 [MemBrain 원칙](../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-membrain)에서 확인합니다.
+
+**‘그때 쓴 실행 모드’를 묻는다면:** [예전 보고를 인용하는 사용자 예](../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-quoted-usage-time) · [시점에 따라 조회 기록을 고르는 설계와 현재 한계](../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#time-selects-evidence). 현재 작업자 목록에서 과거 모드를 알아내는 기능이 아닙니다.
+
 현재 진행 중인 제품 설계 검토는 **[연결된 사용 흐름과 UI 추천안](references/design-synthesis/egdesk-ux-realization-proposals.md#flow-first-use)**에서 시작합니다.
 9개 흐름에서 조작·입력·화면 반응·취소·복귀를 따라가고, 필요한 부분만 아래 문서로 이동하면 됩니다.
 

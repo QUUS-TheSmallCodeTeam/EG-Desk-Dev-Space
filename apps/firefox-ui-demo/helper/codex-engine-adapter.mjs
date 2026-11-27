@@ -30,6 +30,8 @@ export function describeCodexEngine({ ready = false, starting = false, blocked =
   const added = (Array.isArray(extraProfiles) ? extraProfiles : []).filter(row => row && row.id !== CODEX_ENGINE_PROFILE_ID).map(row => ({
     id: row.id, label: typeof row.label === 'string' ? row.label : null, credentialStore: 'egdesk-owned', active: false, owned: true,
     status: row.runnable === true ? 'available' : 'notYet', auth: profileAuth(row.auth), usage: null, models: row.models ?? null,
+    // L1 c25 (room-account flag): the last access failure of this profile's own server, status data only
+    ...(row.accessFailure && ['auth', 'quota', 'permission'].includes(row.accessFailure.kind) ? { accessFailure: { kind: row.accessFailure.kind, cause: row.accessFailure.cause ?? null, at: row.accessFailure.at } } : {}),
   }))
   return {
     id: CODEX_ENGINE_ID, label: 'Codex',
@@ -126,7 +128,7 @@ export function isStaleLoginFailure(params, currentLoginId) {
 }
 
 export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true,
-  describe = null, refresh = null, getModels = () => null, getBoardPeerContract = () => null, profiles = null } = {}) {
+  describe = null, refresh = null, getModels = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null } = {}) {
   const sinks = new Set()
   const deliver = (kind, value, profileId) => {
     for (const sink of [...sinks]) {
@@ -143,12 +145,20 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
     try { const list = shared(id) ? getModels() : profiles?.snapshot(id)?.models; return Array.isArray(list) ? list : null }
     catch { return null }
   }
+  // c23: the proof for a plain message into a working turn, by the schema capability of the slot's own binary (not a version pin)
+  const steerContract = id => {
+    try {
+      const proof = ready(id) && (shared(id) ? getSteerContract() : profiles?.steerContract?.(id))
+      return typeof proof === 'string' && /^[a-f0-9]{64}$/.test(proof) ? proof : null
+    } catch { return null }
+  }
   const boardPeerContract = id => {
     try {
       const proof = ready(id) && (shared(id) ? getBoardPeerContract() : profiles?.boardPeerContract?.(id))
       return typeof proof === 'string' && /^[a-f0-9]{64}$/.test(proof) ? proof : null
     } catch { return null }
   }
+  const deleteAllowed = id => (shared(id) ? getThreadDelete(id) === true : profiles?.capabilities?.(id)?.threadDelete === true)
   const summary = () => describe ? describe() : describeCodexEngine({ ready: ready(), models: models() })
   return {
     id: CODEX_ENGINE_ID,
@@ -167,11 +177,26 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
     releaseThread: (threadId, id) => call('thread/unsubscribe', { threadId }, id),
     startTurn: (params, id) => call('turn/start', params, id),
     boardPeerContract,
+    steerContract,
+    // The board peer contract allows additional context; the plain steer contract only { threadId, expectedTurnId, input, clientUserMessageId }.
     steerTurn(params, id, proof) {
-      if (!proof || proof !== boardPeerContract(id)) throw chatError('BOARD_PEER_UNSUPPORTED', 'No matching verified peer-input contract on this slot', 409)
+      const plain = !Object.hasOwn(params ?? {}, 'additionalContext')
+      if (!proof || !(proof === boardPeerContract(id) || (plain && proof === steerContract(id)))) throw chatError('BOARD_PEER_UNSUPPORTED', 'No matching verified peer-input contract on this slot', 409)
       return call('turn/steer', params, id)
     },
     interruptTurn: (threadId, turnId, id) => call('turn/interrupt', { threadId, turnId }, id),
+    // thread/delete only where the connected binary's generated schema has it (getThreadDelete, from the schema probe); else refused.
+    // L1 c22: the shared server answers from the shared binary's probe; a profile's server from ITS OWN binary's probe (profiles.capabilities), so the
+    // delete goes to the app-server that owns the thread and only when that binary has thread/delete.
+    threadDeleteSupported: id => { try { return ready(id) && deleteAllowed(id) } catch { return false } },
+    // What the app-server of this slot can do per its own binary: { version, dynamicTools, ephemeral, turnSteer, threadDelete }, or null (shared: the bridge's own probe)
+    slotCapabilities: id => { try { return shared(id) ? null : profiles?.capabilities?.(id) ?? null } catch { return null } },
+    deleteThread(threadId, id) {
+      let supported = false
+      try { supported = ready(id) && deleteAllowed(id) } catch { supported = false }
+      if (!supported) throw chatError('THREAD_DELETE_UNSUPPORTED', 'This Codex cannot delete a thread', 409)
+      return call('thread/delete', { threadId }, id)
+    },
     forkThread: (params, id) => call('thread/fork', params, id),
     // Preserve legacy shared-RPC response arity and reject old scoped ids even
     // if accidentally called without a profile.

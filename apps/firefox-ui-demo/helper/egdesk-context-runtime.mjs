@@ -30,6 +30,8 @@ export const OUTPUT_MARKDOWN_MAX = 20000
 export const OUTPUT_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 export const BRIEFING_COMMENT_MAX = 2000
 const MAX_OUTPUTS_PER_RUN = 8
+// Working-memory gate: how many tool results one run may spill into re-readable sources.
+export const MAX_SPILLS_PER_RUN = 8
 const MAX_COMMENTS_PER_BRIEFING = 200
 const OUTPUT_LIST_LIMIT = 50
 const TARGET_KEYS = ['sourceId', 'artifactId', 'viewId', 'range']
@@ -131,15 +133,23 @@ function argumentsFor(name, value) {
 }
 
 // No default-engine lookup: a missing Claude Reader must never select Codex.
-export function createEngineReaderFactory({ codex = null, claude = null } = {}) {
+export function createEngineReaderFactory({ codex = null, claude = null, forProfile = null } = {}) {
   const readers = new Map([['codex', codex], ['claude', claude]])
-  return engineId => readers.get(engineId) || null
+  // L1 c24: a Codex read for a room on an Agent profile goes to THAT profile's reader when the room-account flag provides one (forProfile returns a
+  // reader, or null when the profile has none: then the read is unavailable, never the shared account's). undefined: the shared reader, as before.
+  return (engineId, authority = null) => {
+    if (engineId === 'codex' && typeof forProfile === 'function' && authority?.engineProfileId) {
+      const own = forProfile(authority.engineProfileId)
+      if (own !== undefined) return own
+    }
+    return readers.get(engineId) || null
+  }
 }
 
 export class ContextRuntime {
-  constructor({ store, reader, readers = {}, getReadCapacity, getOwnerKey, getAuthority, schemaReady = () => true, now = Date.now }) {
+  constructor({ store, reader, readers = {}, profileReaders = null, getReadCapacity, getOwnerKey, getAuthority, schemaReady = () => true, now = Date.now }) {
     Object.assign(this, { store, reader, getReadCapacity, getOwnerKey, getAuthority, schemaReady, now })
-    this.readerForEngine = createEngineReaderFactory({ codex: reader, ...readers })
+    this.readerForEngine = createEngineReaderFactory({ codex: reader, ...readers, forProfile: profileReaders ? id => profileReaders.forProfile(id) : null })
     this.smartRead = new SmartReadEngine({ store, getReader: this.readerForEngine, now })
     this.runtime = null
     this.bindings = new Map()
@@ -233,7 +243,7 @@ export class ContextRuntime {
   }
 
   readerReadiness(authority, run, configuration) {
-    const reader = this.readerForEngine(authority.engineId)
+    const reader = this.readerForEngine(authority.engineId, authority)
     if (authority.engineId === 'codex') return { ready: Boolean(reader), engineId: 'codex', code: reader ? null : 'READER_UNAVAILABLE' }
     if (!reader) return { ready: false, engineId: authority.engineId, code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' }
     const environment = this.readEnvironment(authority, run, configuration)
@@ -589,7 +599,7 @@ export class ContextRuntime {
     const needsTools = ids.length || body.attachments?.length || caps.publishBriefing || caps.read || caps.reader
     if (!needsTools) {
       if (choice?.chosen.length) reject('RESOLVER_CHOICE_UNCAPTURED', 'Chosen suggestions must be attached through the normal capture path', 400)
-      return (selectedAuthority?.engineId || body.engineId) === 'claude' ? null : this.changesOnlyPrepared(body, this.runtime?.epoch)
+      return (selectedAuthority?.engineId || body.engineId) === 'claude' ? null : this.changesOnlyPrepared(body, this.runtime?.epoch, selectedAuthority)
     }
     const authority = this.scopedAuthority(body, selectedAuthority)
     this.assertExpectedContextScope(body.expectedContextScope, authority)
@@ -678,16 +688,20 @@ export class ContextRuntime {
   // still hears once that attached sources changed. Only for a conversation
   // that already had context tools in this bridge, so the note never makes an
   // older thread fail a tool check it would otherwise not meet; otherwise null.
-  async changesOnlyPrepared(body, epoch) {
+  async changesOnlyPrepared(body, epoch, selectedAuthority) {
     const conversationId = conversationOf(body.conversationId)
-    const ownerKey = this.getOwnerKey()
+    // L1 c23 (U11): the account is the ROOM's (the authority the runtime resolved for its route), not the window's default sign-in; a room on an
+    // Agent profile's account was tracked under that account's key, and must hear about changed sources while the default is signed out or another
+    let authority = null, ownerKey = null
+    try { authority = selectedAuthority || this.authority(body); ownerKey = this.owner(authority) } catch { return null }
     if (!conversationId || !ownerKey || !this.trackedSources.has(trackingKey(ownerKey, conversationId))) return null
     const changes = this.pendingChanges(ownerKey, conversationId)
-    if (!changes.length || !this.schemaReady()) return null
+    if (!changes.length || !this.schemaReady(authority)) return null
     if (this.runtime?.threadToolManifestStatus?.get?.(conversationId) !== 'verified') return null
     if (!await this.store.hasNativeTools(ownerKey, conversationId)) return null
-    if (this.getOwnerKey() !== ownerKey || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context preparation')
-    return { ownerKey, authority: this.authority(body), changesOnly: true, changes }
+    if (this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context preparation')
+    this.assertAuthority(authority) // the room's own account and connection are still the same
+    return { ownerKey, authority, changesOnly: true, changes }
   }
 
   async registerThread(conversationId, selectedAuthority) {
@@ -752,6 +766,16 @@ export class ContextRuntime {
     }
     if (authority.engineId === 'claude' && (!await this.store.hasNativeTools(ownerKey, run.conversationId, this.toolManifest(authority)) || records.some(record => !record.engine || !sameEngine(record.engine, authority)))) reject('CONTEXT_TOOLS_UNAVAILABLE', 'The original Claude context manifest is missing or different; no replacement or subset was loaded', 409)
     if (records.some(record => record.clientThreadId && run.clientThreadId && record.clientThreadId !== run.clientThreadId)) reject('CONTEXT_THREAD_MISMATCH', 'Stored context belongs to another conversation', 403)
+    // Spilled tool results are bound by their own marked records. They are not sources the person sent: they stay out of the
+    // capture list the screen shows, and one that has expired (bounded retention) is simply no longer readable.
+    const spillRecords = records.filter(record => record.toolOutput === true)
+    if (spillRecords.length) records.splice(0, records.length, ...records.filter(record => record.toolOutput !== true))
+    if (!records.length) return
+    const spills = [], expiredSpills = new Set()
+    for (const id of new Set(spillRecords.flatMap(record => record.sourceIds))) {
+      try { const spill = await this.store.getCapture(ownerKey, id); if (spill.kind === 'tool-output') spills.push(spill) }
+      catch (error) { if (error.code !== 'CONTEXT_NOT_FOUND') throw error; expiredSpills.add(id) }
+    }
     const sourceIds = [...new Set(records.flatMap(record => record.sourceIds))]
     const captures = []
     for (const id of sourceIds) captures.push(await this.store.getCapture(ownerKey, id))
@@ -769,7 +793,7 @@ export class ContextRuntime {
     // Metadata only: the markdown body stays in its blob until the screen opens it.
     const outputs = (await this.store.listOutputs(ownerKey, matchesRun)).sort((a, b) => a.createdAt - b.createdAt)
     this.assertAuthority(authority)
-    const binding = { ...records[0], authority, ownerKey, sourceIds, captures, bindingId: records[0].id, controllers: new Set() }
+    const binding = { ...records[0], authority, ownerKey, sourceIds: [...sourceIds, ...spills.map(spill => spill.sourceId)], captures, spills, expiredSpills, bindingId: records[0].id, controllers: new Set() }
     for (const controller of previous?.controllers || []) controller.abort()
     this.bindings.set(this.bindingKey(run), binding)
     const resolver = records.find(record => record.resolver)?.resolver
@@ -798,6 +822,84 @@ export class ContextRuntime {
       }
     }
     return candidates
+  }
+
+  /**
+   * Working-memory gate. Can this run re-read a spilled tool result? Only when the pointer would really work: the run has a live
+   * context binding with read enabled (so egdesk_read_source exists for it and is allowed), and it is below its spill bound.
+   * Synchronous and side-effect free, so the gate can enumerate the spill option before deciding anything.
+   */
+  canSpill(run) {
+    try {
+      const binding = this.assertBound(run, 'read')
+      return run.status === 'inProgress' && (binding.spills?.length || 0) < MAX_SPILLS_PER_RUN
+    } catch { return false }
+  }
+
+  /**
+   * Store the full text of one EG-Desk tool result as an immutable source of THIS run and make it readable through
+   * egdesk_read_source (same binding check, same admission, same delivery receipts as any other source).
+   * The capture is not added to the capture list the person sees. Returns { id, lines } or throws; the caller then injects the text.
+   */
+  async spillToolOutput(run, { text, tool } = {}) {
+    const binding = this.assertBound(run, 'read')
+    if ((binding.spills?.length || 0) >= MAX_SPILLS_PER_RUN) reject('SPILL_LIMIT', `At most ${MAX_SPILLS_PER_RUN} tool results can be spilled per answer`, 409)
+    const assertActive = () => { if (run.status !== 'inProgress' || this.bindings.get(this.bindingKey(run)) !== binding) reject('READ_CANCELLED', 'Run ended or context binding changed; nothing was spilled'); this.assertBound(run, 'read') }
+    const capture = await this.store.captureToolOutput(binding.ownerKey, run, { text, tool, engine: engineOf(binding.authority) }, { assertActive })
+    assertActive()
+    await this.store.bindToolOutput(binding.ownerKey, run, capture.sourceId, binding.capabilities, binding.readerConfiguration, engineOf(binding.authority))
+    assertActive()
+    binding.sourceIds.push(capture.sourceId)
+    ;(binding.spills ||= []).push(capture)
+    return { id: capture.sourceId, lines: capture.lines }
+  }
+
+  // Cycle 9: a result card the user kept from this conversation's published output becomes a bound, immutable source, exactly like a file artifact pinned by
+  // pinOutput: the bytes come from the bridge's own output store (never from the screen), the capture is bound to this run, and its sourceId is then valid for the
+  // same briefingTarget checks the model's tool call goes through. viewId stays a UI hint that must equal the capture's own projection.
+  async bindCardSource(run, { outputId, viewId = null } = {}, assertActive = () => {}) {
+    const binding = this.assertBound(run, 'publishBriefing')
+    if (typeof outputId !== 'string' || !/^[\da-f-]{36}$/i.test(outputId)) reject('INVALID_BRIEFING_TARGET', 'A result card target needs the published output id', 400)
+    if (viewId !== null && (typeof viewId !== 'string' || !viewId || viewId.length > 256)) reject('INVALID_BRIEFING_TARGET', 'Invalid viewId', 400)
+    const previous = binding.captures.find(capture => capture.kind === 'board' && capture.source.resourceId === outputId)
+    if (previous) return previous
+    const { output, markdown } = await this.store.readOutput(binding.ownerKey, outputId)
+    assertActive()
+    if (output.conversationId !== run.conversationId) reject('INVALID_BRIEFING_TARGET', 'The result belongs to another conversation', 403)
+    const capture = await this.store.capture(binding.ownerKey, run.clientThreadId || run.conversationId, { id: outputId, kind: 'board', label: output.title,
+      sourceRef: { resourceId: outputId, ...(viewId ? { viewId } : {}) }, captureScope: { type: 'board-selection' }, content: { text: markdown, mime: 'text/markdown', truncated: false } }, { assertActive })
+    assertActive()
+    this.assertBound(run, 'publishBriefing')
+    await this.store.bind(binding.ownerKey, run, [capture.sourceId], binding.capabilities, binding.readerConfiguration)
+    assertActive()
+    this.assertBound(run, 'publishBriefing')
+    if (this.bindings.get(this.bindingKey(run)) !== binding) reject('CONTEXT_CHANGED', 'Context binding changed while binding a result card')
+    binding.sourceIds.push(capture.sourceId)
+    binding.captures.push(capture)
+    run.context.captures = binding.captures
+    this.runtime.emit(run, 'context.bound', { captures: binding.captures, bindingId: binding.bindingId })
+    return capture
+  }
+
+  // Cycle 9: the host (no model turn) proposes a briefing that already passed the flow check. Result-card targets ({outputId, viewId}) are bound first and
+  // rewritten to the sourceId the tool accepts; everything then goes through publish(), the same validation and the same 'proposed' record and event as
+  // egdesk_publish_briefing_multi. Needs the briefing capability the user granted for that run; nothing else is opened, moved or started.
+  async proposeBriefing(run, { title, steps }, assertActive = () => {}) {
+    this.assertBound(run, 'publishBriefing')
+    if (!Array.isArray(steps)) reject('INVALID_BRIEFING', 'Briefing requires steps', 400)
+    const bound = []
+    for (const step of steps) {
+      const targets = []
+      for (const target of Array.isArray(step?.targets) ? step.targets : []) {
+        if (target && typeof target === 'object' && Object.hasOwn(target, 'outputId')) {
+          if (Object.keys(target).some(key => !['outputId', 'viewId'].includes(key))) reject('INVALID_BRIEFING_TARGET', 'A result card target has outputId and viewId only', 400)
+          const capture = await this.bindCardSource(run, target, assertActive)
+          targets.push({ sourceId: capture.sourceId, ...(target.viewId ? { viewId: target.viewId } : {}) })
+        } else targets.push(target)
+      }
+      bound.push({ ...step, targets })
+    }
+    return this.publish(run, { title, steps: bound }, assertActive, { multiTarget: true })
   }
 
   async pinOutput(run, artifactId, assertActive = () => {}) {
@@ -941,20 +1043,21 @@ export class ContextRuntime {
     })
   }
 
-  async readOutput(id) {
-    const ownerKey = this.owner(), epoch = this.runtime?.epoch
+  async readOutput(id, authority = null) {
+    // L1 c24: the room's own authority (the HTTP route resolves it from the request's routing hints); without one, the default's, as before
+    const ownerKey = authority ? this.owner(authority) : this.owner(), epoch = this.runtime?.epoch
     const value = await this.store.readOutput(ownerKey, id)
-    this.assertSameAuthority(ownerKey, epoch)
+    if (authority) this.assertAuthority(authority); else this.assertSameAuthority(ownerKey, epoch)
     return value
   }
 
-  async listOutputVersions({ conversationId, outputKey } = {}) {
+  async listOutputVersions({ conversationId, outputKey } = {}, authority = null) {
     if (typeof conversationId !== 'string' || !conversationId || conversationId.length > 512) reject('INVALID_OUTPUT_QUERY', 'conversationId is required', 400)
     if (outputKey !== undefined && (typeof outputKey !== 'string' || !OUTPUT_KEY_PATTERN.test(outputKey))) reject('INVALID_OUTPUT_QUERY', 'Invalid outputKey', 400)
-    const ownerKey = this.owner(), epoch = this.runtime?.epoch
+    const ownerKey = authority ? this.owner(authority) : this.owner(), epoch = this.runtime?.epoch
     const outputs = (await this.store.listOutputs(ownerKey, record => record.conversationId === conversationId && (outputKey === undefined || record.outputKey === outputKey)))
       .sort((a, b) => a.createdAt - b.createdAt || a.version - b.version).slice(-OUTPUT_LIST_LIMIT)
-    this.assertSameAuthority(ownerKey, epoch)
+    if (authority) this.assertAuthority(authority); else this.assertSameAuthority(ownerKey, epoch)
     return { outputs }
   }
 
@@ -1143,7 +1246,22 @@ export class ContextRuntime {
         }
         else {
           this.assertBound(run, 'read')
+          // A pointer of THIS run whose spilled result has passed its retention bound: say so with a closed code, so the model can
+          // tell "gone" from "not allowed". Known only for ids this run itself spilled; anything else stays CONTEXT_FORBIDDEN.
+          if (binding.expiredSpills?.has(args.snapshotId)) reject('SPILL_EXPIRED', 'The spilled tool result is no longer kept', 410)
           if (!binding.sourceIds.includes(args.snapshotId)) reject('CONTEXT_FORBIDDEN', 'Source is not selected for this run', 403)
+          if (binding.spills?.some(spill => spill.sourceId === args.snapshotId)) {
+            try { await this.store.getCapture(binding.ownerKey, args.snapshotId) } catch (error) {
+              if (error.code !== 'CONTEXT_NOT_FOUND') throw error
+              binding.spills = binding.spills.filter(spill => spill.sourceId !== args.snapshotId)
+              binding.sourceIds = binding.sourceIds.filter(id => id !== args.snapshotId)
+              ;(binding.expiredSpills ||= new Set()).add(args.snapshotId)
+              reject('SPILL_EXPIRED', 'The spilled tool result is no longer kept', 410)
+            }
+            assertActive()
+            // The working-memory re-read counter (absent unless the gate's flag set it): the model went back to a spill of this run.
+            try { this.onSpillRead?.(run, { sourceId: args.snapshotId, range: args.range ?? null }) } catch { /* counting never changes a read */ }
+          }
           const readId = randomUUID()
           this.runtime.emit(run, 'context.read.started', { readId, sourceId: args.snapshotId })
           const environment = this.readEnvironment(binding.authority, run, binding.readerConfiguration)
@@ -1217,7 +1335,8 @@ export class ContextRuntime {
       for (const controller of binding.controllers) controller.abort()
       for (const call of this.calls.keys()) if (call.startsWith(`${key}/`)) this.calls.delete(call)
     }
-    for (const engineId of ['codex', 'claude']) if (!options.engineId || options.engineId === engineId) this.readerForEngine(engineId)?.disconnect?.({ ...options, engineId })
+    // L1 c24: a lost profile connection ends THAT profile's reader (when the flag gave it one), not the shared reader of the default account
+    for (const engineId of ['codex', 'claude']) if (!options.engineId || options.engineId === engineId) this.readerForEngine(engineId, options.engineProfileId ? { engineProfileId: options.engineProfileId } : null)?.disconnect?.({ ...options, engineId })
   }
   // Account change: suggestions and source-change records of the old account go too.
   reset(options = {}) {

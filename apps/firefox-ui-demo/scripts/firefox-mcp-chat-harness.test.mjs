@@ -335,6 +335,11 @@ test('point input propagates stale/invalid MCP failure without the selector API 
   await fake.harness.close();
 });
 
+test('omitting the loader source fails before looking for files in a personal Firefox profile', () => {
+  assert.throws(() => bootstrapQaProfile(), /explicit dedicated loader source/);
+  assert.throws(() => bootstrapQaProfile({ loaderSource: 'chrome/utils' }), /explicit dedicated loader source/);
+});
+
 test('bootstrap copies only allowlisted loader utilities into a guarded mkdtemp profile', (t) => {
   const source = fs.mkdtempSync(path.join(canonicalTempRoot(), 'egdesk-loader-fixture-'));
   t.after(() => removeCreatedTemp(source, 'egdesk-loader-fixture-'));

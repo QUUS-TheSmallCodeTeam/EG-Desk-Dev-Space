@@ -1,0 +1,64 @@
+{
+  "set": "multiuser-collaboration-v1",
+  "registered": "2026-11-24T23:40:00+09:00 (lane L1 cycle 14, before any send)",
+  "steps": [
+    {
+      "id": "join",
+      "caps": { "maxRequests": 1, "maxEstTokens": 1000 },
+      "expect": [
+        { "id": "J1", "severity": "hard", "owner": "L1", "who": "A", "text": "A's Desk lists B as present, with the region B is looking at", "check": "presence", "args": { "person": "A", "others": { "equals": 1 }, "withView": 1 } },
+        { "id": "J2", "severity": "hard", "owner": "L1", "who": "B", "text": "B's Desk lists A as present (A shares 'active' only, so no region)", "check": "presence", "args": { "person": "B", "others": { "equals": 1 }, "withView": 0 } },
+        { "id": "J3", "severity": "hard", "owner": "L1", "who": "system", "text": "presence asks the Decision model nothing", "check": "requests", "args": { "equals": 0 } },
+        { "id": "J4", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger holds the same cards (presence is memory only)", "check": "ledger", "args": { "fileUnchanged": true } }
+      ]
+    },
+    {
+      "id": "ask",
+      "caps": { "maxRequests": 6, "maxEstTokens": 6000 },
+      "expect": [
+        { "id": "K1", "severity": "hard", "owner": "L1", "who": "A", "text": "A's Desk knows the request came from B (the service vouched for B's alias), the bridge's audience names B, and the placement hook will receive B", "check": "requester", "args": { "present": true } },
+        { "id": "K2", "severity": "hard", "owner": "L1", "who": "system", "text": "no member alias, request id, question code or coordinate is in any Decision request of this step", "check": "noIdentityInBodies" },
+        { "id": "K3", "severity": "hard", "owner": "L3", "who": "A", "text": "A's own conversation shows the request A sent for B and no system message", "check": "messages", "args": { "by": "system_flow", "equals": 0 } },
+        { "id": "K4", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger holds the same cards", "check": "ledger", "args": { "fileUnchanged": true } }
+      ]
+    },
+    {
+      "id": "surface",
+      "caps": { "maxRequests": 3, "maxEstTokens": 4000 },
+      "expect": [
+        { "id": "P1", "severity": "hard", "owner": "L1", "who": "A", "text": "the Agent's viewer for B's task opened quietly at the rule's spot: B waits and is working, so just beside B's view; not in A's view, not in B's", "check": "surfaceSpot", "args": { "rule": "requester_working", "nearB": true, "inBView": false } },
+        { "id": "P2", "severity": "hard", "owner": "L1", "who": "A", "text": "A's camera and focus are exactly as before; no reveal was scheduled; none of A's cards moved", "check": "aUndisturbed" },
+        { "id": "P3", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the private placement wrote nothing to the shared ledger (file and cards unchanged)", "check": "ledger", "args": { "fileUnchanged": true } },
+        { "id": "P4", "severity": "hard", "owner": "L1", "who": "system", "text": "one placement request: one same-matter question per card the host may send, each card only inside its own question, the run's request quoted, nothing that identifies a person", "check": "placementBody", "args": { "questions": ["same_matter_R1", "same_matter_R2"], "cards": ["A사 견적서 v1 단가표", "점심 메뉴 투표 결과"], "quotes": ["A사 견적서 v2를 v1과 비교해서"] } },
+        { "id": "P5", "severity": "hard", "owner": "L1", "who": "system", "text": "no member alias, request id or coordinate is in the request", "check": "noIdentityInBodies" },
+        { "id": "P6", "severity": "soft", "owner": "L1", "who": "system", "text": "the earlier v1 quote card is the same matter (>= 0.8)", "check": "answer", "args": { "name": "same_matter_R1", "min": 0.8 } },
+        { "id": "P7", "severity": "soft", "owner": "L1", "who": "system", "text": "the lunch vote card is not (<= 0.2)", "check": "answer", "args": { "name": "same_matter_R2", "max": 0.2 } },
+        { "id": "P8", "severity": "hard", "owner": "L1", "who": "B", "text": "B's own Desk shows no new card: the placement is A's private canvas state and reaches B only through the shared ledger, which it does not write", "check": "bDeskUnchanged" }
+      ]
+    },
+    {
+      "id": "result",
+      "caps": { "maxRequests": 6, "maxEstTokens": 6000 },
+      "expect": [
+        { "id": "R1", "severity": "hard", "owner": "L1", "who": "system", "text": "one placement request with the owner question only, quoting the run's own request and answer", "check": "placementBody", "args": { "questions": ["owner_action"], "quotes": ["A사 견적서 v2를 v1과 비교해서", "승인해 주셔야"] } },
+        { "id": "R2", "severity": "soft", "owner": "L1", "who": "system", "text": "the result needs the owner's decision (>= 0.8)", "check": "answer", "args": { "name": "owner_action", "min": 0.8 } },
+        { "id": "R3", "severity": "hard", "owner": "L1", "who": "system", "text": "the placement runtime records: the owner's branch, a pointer raised (placement is on)", "check": "placementRecord", "args": { "kind": "attention", "branch": "owner", "pointer": "raised" } },
+        { "id": "R4", "severity": "hard", "owner": "L3", "who": "A", "text": "A sees exactly one pointer message in A's own conversation, after the Agent's answer", "check": "messages", "args": { "by": "system_flow", "equals": 1 } },
+        { "id": "R5", "severity": "hard", "owner": "L3", "who": "A", "text": "A sees the Agent's answer once", "check": "messages", "args": { "by": "agent", "equals": 1 } },
+        { "id": "R6", "severity": "hard", "owner": "L1", "who": "A", "text": "still nothing moved for A: camera, focus, cards", "check": "aUndisturbed" },
+        { "id": "R7", "severity": "hard", "owner": "L1", "who": "B", "text": "B's own Desk still shows nothing new", "check": "bDeskUnchanged" },
+        { "id": "R8", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger holds the same cards", "check": "ledger", "args": { "fileUnchanged": true } }
+      ]
+    },
+    {
+      "id": "leave",
+      "caps": { "maxRequests": 1, "maxEstTokens": 1000 },
+      "expect": [
+        { "id": "E1", "severity": "hard", "owner": "L1", "who": "A", "text": "B is no longer on A's Desk; the window no longer names B for the run; the bridge refuses a new entry for B", "check": "requester", "args": { "present": false } },
+        { "id": "E2", "severity": "hard", "owner": "L1", "who": "A", "text": "A's Desk lists nobody else", "check": "presence", "args": { "person": "A", "others": { "equals": 0 } } },
+        { "id": "E3", "severity": "hard", "owner": "L1", "who": "system", "text": "B's leaving asks the Decision model nothing", "check": "requests", "args": { "equals": 0 } },
+        { "id": "E4", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger's cards are unchanged (only its membership changed)", "check": "ledger" }
+      ]
+    }
+  ]
+}

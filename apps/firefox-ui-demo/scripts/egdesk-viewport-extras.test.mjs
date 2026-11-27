@@ -368,34 +368,56 @@ test('move dialog wiring: the arrow button is a real control, apply records from
   assert.match(css, /\.egd-placement-nudge:hover \{/);
 });
 
-test('Shift+View bar press: the pick is applied on click, a drag is not a pick', () => {
-  const nodes = new Map(['a', 'b', 'c'].map(id => [id, { id, isConnected: true }]));
-  const calls = [];
-  const state = { activeEntityId: 'a', expandCanvasSelection: list => list };
+test('Shift+View bar pointer release applies selection once and preserves the normal drag path', () => {
+  const nodes = new Map(['a', 'b', 'c'].map(id => [id, { id, isConnected: true, contains: () => true, dataset: {} }]));
+  const listeners = new Map(), calls = [], gestures = [];
+  let ids = ['a'];
+  const state = { activeEntityId: 'a', panModifier: true, expandCanvasSelection: list => list };
   const deps = {
     state, ViewportExtras: Extras,
+    window: { addEventListener: (type, handler) => listeners.set(type, handler) },
     document: { getElementById: id => nodes.get(id) || null },
     cardOf: target => target?.card || null,
+    isCardFullscreen: () => false, HEADER_SELECTOR: 'header', NO_DRAG_SELECTOR: 'button',
+    CanvasLayout: { expandCanvasGroupSelection: (_groups, views) => views },
+    selectedCards: () => ids.map(id => nodes.get(id)),
+    beginGesture: (...args) => gestures.push(args),
     setSelectedEntities: (list, active) => calls.push({ ids: list.map(node => node.id), active: active?.id || null }),
   };
-  const body = cut("    window.addEventListener('click', ev => {\n      const pick = shiftPick;", '\n    }, true);');
-  const h = compile(`let shiftPick = null;
-    const onClick = ev => {
-      const pick = shiftPick;${body}
-    };
-    return { set: pick => { shiftPick = pick; }, get: () => shiftPick, onClick };`, Object.keys(deps))(...Object.values(deps));
+  const handlerCode = cut("    window.addEventListener('pointerdown', ev => {\n      if (ev.button === 2)", '    // UX-05 (D-V5)');
+  compile("let shiftPick = null, preservedSelection = null, suppressShiftClick = null;\n"
+    + "window.addEventListener('pointerdown', ev => {\n      if (ev.button === 2)" + handlerCode,
+    Object.keys(deps))(...Object.values(deps));
   const b = nodes.get('b');
-  h.set({ card: b, ids: ['a'], pressed: ['b'], activeId: 'a', x: 100, y: 100 });
-  h.onClick({ button: 0, clientX: 101, clientY: 102, target: { card: b } });
+  const title = { card: b, closest: selector => selector === 'header' ? title : null };
+  const fire = (type, fields = {}) => {
+    const event = { type, target: title, pointerId: 1, button: 0, shiftKey: true, clientX: 100, clientY: 100,
+      preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
+    listeners.get(type)(event);
+    return event;
+  };
+  assert.equal(fire('pointerdown').prevented, true);
+  assert.equal(gestures.length, 0, 'Shift press never starts a View drag');
+  assert.equal(fire('mousedown').stopped, true, 'a compatibility mouse press cannot reset selection');
+  ids = []; // Even if selection was cleared between press and release, use the captured input.
+  fire('pointerup', { pointerId: 2 });
+  assert.deepEqual(calls, []);
+  fire('pointerup', { clientX: 101, clientY: 102 });
   assert.deepEqual(calls, [{ ids: ['a', 'b'], active: 'b' }]);
-  assert.equal(h.get(), null, 'one press, one pick');
-  h.onClick({ button: 0, clientX: 101, clientY: 102, target: { card: b } });
-  assert.equal(calls.length, 1, 'a plain click afterwards changes nothing here');
-  h.set({ card: b, ids: ['a'], pressed: ['b'], activeId: 'a', x: 100, y: 100 });
-  h.onClick({ button: 0, clientX: 130, clientY: 100, target: { card: b } });
-  assert.equal(calls.length, 1, 'the View was dragged, not picked');
-  h.set({ card: b, ids: ['a', 'b', 'c'], pressed: ['b'], activeId: 'a', x: 5, y: 5 });
-  h.onClick({ button: 0, clientX: 5, clientY: 5, target: { card: b } });
-  assert.deepEqual(calls[1], { ids: ['a', 'c'], active: 'a' }, 'a selected View is taken out');
-  assert.match(surfaceSource, /shiftPick = ev\.shiftKey\s*\? \{ card, ids: selectedCards\(\)\.map\(node => node\.id\)/, 'the selection is read before the press changes it');
+  assert.equal(fire('click').stopped, true);
+  fire('click'); assert.equal(calls.length, 1);
+
+  ids = ['a', 'b', 'c'];
+  fire('pointerdown'); fire('pointermove', { clientX: 130 }); fire('pointerup');
+  assert.equal(calls.length, 1, 'a long movement returning to the original point is not a pick');
+  fire('pointerdown'); fire('pointercancel'); fire('pointerup');
+  assert.equal(calls.length, 1, 'a canceled pointer never applies the pick');
+  fire('pointerdown'); fire('pointerup');
+  assert.deepEqual(calls[1], { ids: ['a', 'c'], active: 'a' });
+  fire('pointerdown', { shiftKey: false });
+  assert.equal(gestures.length, 0, 'the held pan modifier also blocks an otherwise plain drag');
+  state.panModifier = false;
+  assert.equal(fire('pointerdown', { shiftKey: false }).prevented, undefined);
+  assert.equal(fire('mousedown', { shiftKey: false }).stopped, undefined);
+  assert.deepEqual(gestures, [[b, 'move', { free: undefined }]], 'unmodified press starts the regular drag handler');
 });

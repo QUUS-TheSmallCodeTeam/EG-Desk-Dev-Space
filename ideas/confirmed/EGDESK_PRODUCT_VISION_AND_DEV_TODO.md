@@ -2,7 +2,7 @@
 
 **Status**: Living source-of-truth index
 **Implementation path**: `apps/firefox-ui-demo/`
-**Last updated**: 2026-09-27
+**Last updated**: 2026-11-19
 
 This document tracks product decisions and development backlog items that came from active design/development discussion. It is not a marketing whitepaper. The public-facing whitepaper is [Production v8](../../docs/production/EG-DESK%20백서%20-%20Production_v8_한글.md), while this file keeps the current product/runtime direction and todo surface aligned.
 
@@ -55,6 +55,10 @@ Korean. Checked backlog items describe the underlying behavior.
   headless 검증에서 RT-01, CHAT-01, BRW-03은 통과했고 BRW-08/CNV-04의
   포커스 문제는 남아 있다. 실제 계정이나 실제 화면에서 검증한 항목은 없다.
 
+### 2026-11-19 로컬 구현 기준
+
+앞의 날짜별 기록은 당시의 상태다. 이후 Browser가 아니라 **Canvas가 보이는 상태**에서 라벨 편집·Board 저장·재열기를 확인했다. 이 결과를 실제 한글 IME나 모든 Browser 입력 포커스의 검증으로 확대하지 않는다. 일반 Agent DM의 원본 줄과 동의 이후 발언 재사용, Board의 공개 발언 전달은 [현재 조작 안내](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-guide)에 정리했다. 이 안내의 기준은 로컬 기능 브랜치 `feat/agent-memory-grounding-20261119`이며 정식 배포 상태를 뜻하지 않는다.
+
 ## Current Product Frame
 
 EG-Desk is a live work surface that organizes durable work through a Board
@@ -66,7 +70,7 @@ not the Board itself.
 
 Core principles:
 
-- Keep the first screen as the actual work surface, not a landing page.
+- 익숙한 브라우저로 바로 시작한다. 웹을 쓰다가 축소하면 방금 쓰던 페이지가 같은 Desk의 카드였음을 발견한다. 사람·기기·계정·Agent는 각각 설정하고 조합할 수 있지만, Desk를 열기 위해 그 조합을 먼저 완성할 필요는 없다.
 - Treat Board as the work boundary and Card as the view/runtime form.
 - Compose one answer across Chat and Canvas using each medium's own interaction grammar.
 - Put spatial, visual, interactive, artifact, and playback expressions on Canvas while keeping conversational explanation complete in Chat.
@@ -117,7 +121,7 @@ Card is a view/runtime form. "Show it as a card" should be a first-class output 
 
 There are two chat entry modes:
 
-- Agent DM: user talks to a specific agent profile. The agent can route work to a Board Thread when the work belongs there.
+- Agent DM: 한 Agent에게 말하는 개인 채널이다. 공동 작업을 Board에서 이어도 DM 이력은 따라가지 않는다. 공유가 필요하면 대상·범위가 허용된 자료나 발췌만 별도로 연결한다.
 - Board Thread: project/work-room chat attached to a Board. Multiple agents can participate like a group chat.
 
 Chat should remain conversationally complete and avoid pasting artifact bodies
@@ -128,6 +132,19 @@ Chat and Canvas are medium-specific projections of one answer. Chat keeps the
 conversational explanation; Canvas carries spatial, visual, interactive, and
 artifact-oriented expression. A result chip is a navigation affordance, not a
 durable product object.
+
+<a id="vision-agent-channels"></a>
+### 한 Agent, 여러 대화 장소
+
+Agent를 식별하는 질문은 ‘어느 창인가?’가 아니라 **‘누구의 경험으로 이어지는가?’**다. 성격·설정과 그 Agent에게 귀속된 이력이 연속성을 만든다. 프로필은 설정의 한 버전이고 활동 기록은 한 실행에서 일어난 일이다. 둘 중 어느 것도 그 자체로 인격체가 아니다. 같은 설정을 복사한 새 Agent가 원래 Agent의 약속이나 비공개 기억을 이어받지는 않는다.
+
+1. **인격과 기억:** Agent는 이번 일에서 재사용할 수 있는 자신의 경험을 찾는다. 같은 Agent라는 이유로 다른 방의 원문이 열리지는 않는다.
+2. **몸과 환경:** 현재 Desk에서 허용된 화면·도구, 대화 장소와 듣는 사람을 먼저 정한다. 사이드바나 카드의 위치는 수신자도 권한도 아니다.
+3. **판단:** 그 환경에서 무엇을 알고 무엇이 필요한지 판단한다. 내부 판단이나 작업 메모는 대화 발언이 아니다.
+4. **행동:** 화면을 읽거나 변경할 때에는 그 대상에 실제로 위임된 권한을 쓴다. 결과는 해당 실행의 기록에 연결한다.
+5. **대화:** 답은 받는 사람이 있는 채널에 그 Agent의 이름으로 보낸다. 사용자에게는 질문에 필요한 결론을, 요청하면 확인할 수 있는 근거를 준다. 시험 표식이나 엔진 진단을 Agent의 말처럼 붙이지 않는다.
+
+`@A @B`로 같은 방에서 물으면 두 DM에 복사하는 것이 아니다. 두 Agent는 먼저 지목된 쪽이 답을 마칠 때까지 기다리지 않고 각자 생각을 진행한다. 이미 공개된 상대 발언이 자기 턴에 도착하면 하던 일을 이어가며 답할 수 있어야 한다. 접수는 읽음·동의가 아니며 자동 토론 횟수나 합의를 약속하지 않는다. [공개 발언과 진행 중인 턴의 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-room-speech)
 
 ### Agent Runtime
 
@@ -146,6 +163,11 @@ The current Codex SDK path has no dedicated system-prompt field, so EG-Desk send
 
 Browser cards should expose AI-observable state and action history. After an AI action, DOM/title/focus changes should be summarized back to the agent instead of forcing the model to rediscover the page from scratch every time.
 
+**판정과 실행:** 채팅에서 추론하기 전에 호스트가 허용된 자료·시점·응답 유형을 보기로 내고 Decision Model이 관련 항목을 고른다. 브라우저에서도 현재 화면에서 가능한 정형 동작을 먼저 고른다. 새 문장·계획·시뮬레이션 설명이 필요할 때에는 추론 모델이 맡는다. 모델의 선택을 실행하기 전에 호스트가 대상·권한·변경 여부를 검사한다. 이 분업은 목표다. 현재 일반 Chat은 문맥 선별을 켜도 최종 답변을 만드는 모델을 건너뛰지 않는다.
+
+<a id="vision-subscription-routing"></a>
+**구독을 연결한 사용자의 비용 원칙:** 판정은 별도로 허용한 Decisions API 키로, 생성·서술형 추론은 **항상 그 실행에 선택한 구독 계정의 사용량**으로 처리한다. 답변뿐 아니라 요약·초안·백그라운드 교훈 제안에도 같은 기준이 적용된다. 적용 가능한 API 크레딧은 API 측 혜택이지 추론의 비용 경로를 바꾸는 권한이 아니다. 구독 인증·한도가 막히면 이유를 알리고 해당 생성을 보류한다. 유료 생성 API나 다른 계정으로 우회하지 않는다. [현재 경로와 남은 차이](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#billing-boundary)
+
 ### Human-in-the-Loop Await
 
 AI workflows should support dependency-aware Await states. When an upstream
@@ -161,6 +183,38 @@ Ontology is the system model that organizes agent context, relations, state,
 constraints, actions, and evidence. The current Ontology Desk Window visualizes
 and helps inspect/co-design that model; it is not a primary workflow in which an
 agent or end user manually manages the ontology.
+
+<a id="vision-membrain"></a>
+### MemBrain: 기억을 지금 질문에 맞게 읽는 층
+
+MemBrain은 온톨로지 전체의 새 이름이 아니다. Agent가 **언제의 일이고, 무엇에 관한 말이며, 어떻게 아는지** 구분해 답하기 위한 작업명이다. 기존 영업 CRM인 Membrain과 혼동될 수 있어 공개 명칭은 확정하지 않는다. 파일 전체를 ‘과거/현재/미래’ 한 칸에 넣지 않는다. 질문의 ‘지금’이 한 시간인지 한 해인지는 호출하는 쪽에서 정한다. 같은 기록에서도 물리적 대상, 그 대상을 나타내는 디지털 장부, 미래 계획과 가정은 다를 수 있다. 과거임은 알지만 날짜를 모르는 사건, 별도 공지까지 유효한 조건, 시기 미정인 미래 계획, 시점 자체가 미상인 정보도 구별한다.
+
+- **같은 대화에서 큰 주제로 돌아오기(로컬 Codex Agent DM):** 한 DM에서 다른 일을 잠시 다룬 뒤 돌아오면, 이번 요청을 원래 주제에 연결하고 답에 필요한 상위 목적과 하위 결정만 골라 붙일 수 있다. ‘어느 주제에 속하는가’와 ‘어느 앞선 대화가 지금 답에 필요한가’는 별개다. 무관한 곁가지를 이번 추가 입력에서 빼도 채팅 원문이나 기존 엔진 이력은 바뀌지 않는다. Decisions를 켜는 것과 이전 대화를 그 서비스로 보낼 수 있게 하는 것은 별도 동의다. [Decisions에 전달되는 내용](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#membrain-turn-wire) · [같은 세션 토픽 트리와 권한 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-session-topic-tree)
+- **시간 범위(설계):** 먼저 원문과 연결된 대화에서 *무슨 일의 언제*를 묻는지 해석한다. 인용 속 ‘다다음 주’의 기준은 오늘이 아닐 수 있다. 기준 사건·표현·시간대가 정해진 뒤에만 코드가 달력을 계산한다. 월·일·시 재귀 문항은 기본 경로가 아니다. 시간 해석은 어느 기록을 찾아야 하는지도 정한다. 예전 사용량 보고를 인용해 ‘그때 빠른 모드를 썼어?’라고 물으면 인용의 원래 세션과 당시 실제 실행 기록을 찾는다. 현재 작업자 목록으로 과거를 추정하지 않으며, 원본을 볼 수 없거나 실제 모드 기록이 없으면 확인할 수 없다고 답한다. [과거 실행을 묻는 사용자 예](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-quoted-usage-time) · [시간 선별 예시](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#temporal-refinement)
+- **근거:** 파일·발언의 정확한 버전과 구간은 원본이고, 기억 조각은 거기서 다시 쓸 한 주장·결정·교훈이다. 누가 언제 그렇게 말했다는 확인과 그 말이 현실과 맞는다는 확인을 나눈다. 실사 보고와 전언, 전표와 실제 인수, 계산과 추측은 같지 않다. 절차서는 그때 실행됐다는 증거가 아니고 복사본은 두 번째 관측이 아니다. 질문이 장부 기재를 묻는지 현재 현물을 묻는지에 따라 필요한 만큼 근거를 거슬러 올라간다.
+- **선택과 생성:** 검색뿐 아니라 입력도 보기가 있으면 객관식이다. 호스트가 원본을 고정하면 Decision Model이 허용된 구간·분류 또는 ‘해당 없음’을 고른다. 사람이 완성한 조각에도 생성 작업자는 필요 없다. 여러 기록에서 원문에 없는 조건·교훈을 작성할 때만 생성형 작업자가 근거를 붙인 초안을 낸다. 비동기 실행이 저장·공유 권한을 뜻하지 않는다.
+- **저장과 정정:** 호스트만 동의, 대상 Agent·소유자·방, 원본 버전·범위, 중복을 확인해 등록하거나 보류한다. 후속 확인은 이전 판단을 덮지 않고 연결한다. 회의록의 ‘금요일 출고 예정’과 나중 전표의 ‘출고 처리’는 둘 다 남으며 수취 완료를 뜻하지 않는다. 장기 보존·다른 채널·외부 서비스에 넘기는 일에는 각각 맞는 권한이 필요하다.
+- **답의 길이:** 9시 실사 30개에서 2개가 출고됐고 10시까지 다른 변동이 없다는 근거가 있다면, 10시에 ‘지금 몇 개야?’의 답은 ‘지금 28개예요.’다. ‘왜?’에 실사와 출고를 설명한다. 기간이 비거나 출고가 예정뿐이면 그 차이를 숨기지 않는다.
+
+**현재와 목표:** 로컬 기능판의 일반 Agent DM에는 파일 버전·줄 등록과 별도 동의 이후 최근 발언 12개를 연결하는 기능이 있다. 같은 세션의 토픽 연결은 기존에 연결한 Codex의 일반 Agent DM에서만, Decisions `[사용]` 및 API 키에 더해 그 DM에서 별도로 허용한 경우에 적용한다. 허용 이후에 완료·확정된 사용자 메시지와 최종 답변 쌍을 최대 96개까지 참조하고, 새 턴의 주제 소속과 필요한 선행 대화의 관계를 그때그때 추가한다. 트리 전체를 다시 판정하거나 이전 채팅을 소급 등록하지 않으며, 본문 사본도 만들지 않는다. 외부 Decisions는 허용 범위에서 앞선 발언쌍 원문과 새 사용자 메시지를 받아 맥락을 선별할 수 있지만, 실제 답변은 선택한 구독이 작성한다. 범용 기억 조각 등록 API, 새 교훈을 만드는 백그라운드 작업자, 정정 관계의 자동 관리·장기 승격은 설계다. [기억 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-membrain) · [같은 DM에서 주제 이어가기](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-topic-tree)
+
+<a id="vision-board-cross-agent"></a>
+
+### 사람·기기·계정·Agent를 따로 조합한다
+
+누가 요청하는지, 어느 PC에서 실행하는지, 어느 AI 계정이 비용을 부담하는지, 어느 업무 계정이 자료를 읽는지는 독립적이다. 로그인과 Agent 기본 설정을 관리하고, 실제 실행 조합을 확인할 수 있어야 한다. 쓸 수 없는 계정을 다른 사람의 계정으로 조용히 대체하지 않는다. 브라우저 쿠키나 CLI 로그인은 Agent의 성격·기억이 아니다.
+
+**두 가지 협업 출발점(설계).** 내 기존 Board의 일부를 상대에게 열어 주는 방식과, 어느 쪽의 개인 Board에도 들어가지 않고 **둘이 공용 Board를 새로 구성하는 방식**을 구별한다. 후자는 각자 고른 카드·자료·상대에게 허용한 Agent 역할을 업무별로 모으는 것이다. 각자의 Desk·로그인은 남고 새로 붙인 배치와 공동 산출물에는 별도의 공개·보존 조건이 적용된다. 한 사람이 먼저 제안하거나 실행 PC를 제공했다는 이유만으로 다른 사람의 원본이나 공용 Board 관리권을 얻지는 않는다. [주문 317을 둘이 시작하는 예](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-joint-board-start) Agent 설정 사본 가져오기, 소유자가 공개한 발췌로 한 번 질문하기, 사람의 실시간 초대는 서로 다르다. 같은 Board에서 일해도 원본 파일·메일·자격 증명·발송 권한을 나눠 갖지 않는다. [현재 가능한 파일 교환과 한계](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share)
+
+**현재와 다음 단계:** [서로 다른 사람의 Firefox에서 같은 공용 Board 열기](../../apps/firefox-ui-demo/docs/JOINT_BOARD_RUNTIME.md)는 텍스트 자료·수신자·회신까지 연결했다. [표시 구성을 Decision Model이 선택하는 안](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#board-presentation-choice)과 [팀 호스트 미니앱 한 인스턴스를 카드로 쓰는 안](../brainstorming/MINI_APP_ECOSYSTEM.md#npx-sharing)은 설계/격리 검증이며 제품에서 자동 실행하지 않는다.
+
+**협업 목표: 같은 보드 안에서도 누구의 브라우저와 누구의 Agent를 쓰는지 보인다.** 배치를 함께 편집하거나 발표자의 시점을 따라가는 데에는 업무 사이트 화면 전송이 필요하지 않다. 반대로 상대가 로그인해 둔 카드에서 허용한 조회만 맡기거나, 그 카드에 입력 중인 내용까지 함께 보거나, 잠시 조작을 넘기는 일도 선택할 수 있어야 한다. 초대 자체가 이 중 하나로 정의되거나 전부를 허용하는 것은 아니다. 로그인은 실제 실행 기기에 남는다.
+
+민재가 서윤의 정산 Agent로 **민재의 주문**을 검토하고, 동시에 서윤은 민재의 검수 Agent에 **서윤의 주문**을 맡길 수 있는 것이 목표다. 같은 Agent에게 **상대의 로그인된 주문**을 맡기는 것은 별도 범위다. 사용자에게는 ‘누가 부탁했나, 누구의 Agent가 어느 계정에서 무엇을 하나, 답은 누가 받나’가 드러나야 한다. 상대의 개인 대화·기억·구독을 통째로 빌리는 방식은 아니다. 원격 사람 초대, 카드 화면 동시 시청과 사람 간 Agent 직접 호출은 현재 로컬 기능이 아니다. [같은 사이트를 다르게 보는 사용 예](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-shared-card-agents) · [상태와 실행 권한의 기술 경계](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-board-cross-agent)
+
+**협업의 입구는 각자의 Desk에 둔다(목표).** 초대받아 참여하든 둘이 새 보드를 만들든, 허용된 카드는 각자의 기존 Canvas에 이름 있는 한 영역으로 보인다. 상대의 개인 Desk나 채팅방으로 옮겨 가는 것이 아니다. 보드 전체에 참여한 사람이 다음 날 왼쪽 목록에서 다시 열 수 있게 하는 것은 UI 제안이며, 카드만 전달받은 사람에게는 그 카드 밖의 자료나 비공개 보드 이름이 보이지 않아야 한다. 승인된 Desk 안에서 자료를 공개받은 사람이 곧바로 일할 수 있게 한다. 시연자의 역할 선택이나 다음 단계 안내가 업무보다 먼저 보이지 않게 한다. 전표를 앞으로 당기고 개인 메모를 밀어 둔 자리 자체가 일의 맥락이다. 창 크기나 포커스에 맞춰 책상을 자동 정렬하지 않는다. [입장·재진입 매뉴얼과 현재/제안 구분](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-board-entry-doors)
+
+**새 사람이 들어와도 필요한 일만 넘긴다(목표).** 물류 담당 지우가 두 사람의 공용 Board에 합류해도 주문 원본이나 두 수량의 차이는 따라오지 않는다. 별도로 받은 배송 건을 자기 Agent나 사용이 허용된 동료 Agent와 처리하고, 허용된 수신자에게 집하 상태만 회신할 수 있어야 한다. [누가 무엇을 보는지 직접 비교하는 가상 예](../../sketches/board-collaboration-rehearsal/README.md)
 
 ### Coding Surface
 

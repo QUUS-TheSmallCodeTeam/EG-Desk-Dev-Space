@@ -30,7 +30,8 @@ function isAuthRejection(error) {
 }
 
 export function createCodexProfileAppServers({ resolveHome, env = process.env, cwd = process.cwd(), spawnChild = spawn,
-  executable = () => resolveCodexExecutable(env), getBoardPeerContract = () => null, onNotification = () => {}, onServerRequest = () => {}, onConnection = () => {}, onChange = () => {} } = {}) {
+  executable = () => resolveCodexExecutable(env), getBoardPeerContract = () => null, inspectCapabilities = null, onNotification = () => {}, onServerRequest = () => {}, onConnection = () => {}, onChange = () => {},
+  onVersion = () => {} } = {}) {
   const clients = new Map(), stopping = new Set()
   let disposed = false, sequence = 0
   const current = client => clients.get(client.id) === client && !disposed
@@ -89,13 +90,19 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
   function launch(id, owned) {
     const { home, identity } = owned
     const plan = buildCodexAppServerLaunch({ env, listen: 'stdio://', codexHome: home })
-    const bin = executable()
-    let boardPeerContract = null
-    try { boardPeerContract = getBoardPeerContract(bin) } catch { /* optional; chat remains available */ }
+    const bin = executable(id)
+    // L1 c22: what THIS profile's binary can do comes from its own probe (inspectCapabilities), never from the shared app-server's. Without a probe
+    // (older callers, tests) the previous peer-input hook still answers and nothing else is claimed.
+    let capabilities = null
+    if (typeof inspectCapabilities === 'function') { try { capabilities = inspectCapabilities(bin) ?? null } catch { capabilities = null } }
+    let boardPeerContract = null, steerContract = null
+    // With a probe configured nothing is borrowed, not even when this binary's probe failed (then it claims nothing).
+    if (typeof inspectCapabilities === 'function') { boardPeerContract = capabilities?.boardPeerContract ?? null; steerContract = capabilities?.steerContract ?? null }
+    else { try { boardPeerContract = getBoardPeerContract(bin) } catch { /* optional; chat remains available */ } }
     const child = spawnChild(bin, [...plan.args, '-c', 'cli_auth_credentials_store=file'], {
       cwd, env: isolatedCodexEnv(env, plan.envOverrides.CODEX_HOME), shell: false, stdio: ['pipe', 'pipe', 'pipe'],
     })
-    const client = { id, home, identity, child, boardPeerContract, auth: null, models: null, check: null, authRejected: false,
+    const client = { id, home, identity, child, boardPeerContract, steerContract, capabilities, auth: null, models: null, check: null, authRejected: false,
       pending: new Map(), nativeRequests: new Map(), answered: new Set() }
     const rpc = client.rpc = new AppServerRpc({
       experimentalApi: true,
@@ -170,6 +177,8 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     })
     client.init = (async () => {
       await rpc.initialize()
+      // The build this profile's app-server reports (InitializeResponse.userAgent), for the command gate's version pin. Recording only.
+      if (current(client)) { try { onVersion(id, { userAgent: rpc.serverInfo?.userAgent ?? null }) } catch { /* recording only */ } }
       const proof = await preflightOwnedAppServer({ launch: plan, cwd, request: (m, p) => rpc.request(m, p), isCurrent: () => current(client) })
       if (!proof.ready || !current(client)) throw offline()
     })()
@@ -226,6 +235,16 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
       readyClient(id)
     },
     boardPeerContract(id) { return readyClient(id).boardPeerContract },
+    steerContract(id) { return readyClient(id).steerContract ?? null },
+    /** What this profile's own binary can do (dynamicTools, ephemeral, turnSteer, threadDelete), for a ready profile; all false otherwise. */
+    capabilities(id) {
+      const none = Object.freeze({ version: null, dynamicTools: false, qaReadOnly: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, steer: false, steerContract: null, executable: null })
+      try {
+        const client = clients.get(id), owned = resolveHome(id)
+        if (!client || !current(client) || client.home !== owned.home || client.identity !== owned.identity || !client.rpc.ready || !client.auth?.isLoggedIn) return none
+        return client.capabilities ?? none
+      } catch { return none }
+    },
     request(id, method, params) { return readyClient(id).rpc.request(method, params) },
     respond(id, rpcId, result, error) {
       const client = readyClient(id)
@@ -253,6 +272,8 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     },
     reconcile() { for (const id of clients.keys()) { try { resolve(id) } catch {} } },
     residentCount: () => clients.size,
+    /** The Agent profile accounts with a resident server (L1 c25: which accounts hold captures to export). */
+    residentIds: () => [...clients.keys()],
     killAll() {
       for (const { child } of clients.values()) { try { child.kill('SIGKILL') } catch {} }
       for (const { child } of stopping) { try { child.kill('SIGKILL') } catch {} }

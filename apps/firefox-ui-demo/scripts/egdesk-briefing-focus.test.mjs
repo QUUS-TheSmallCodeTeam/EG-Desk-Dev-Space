@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 import * as BriefingState from '../overlay/resources/EGDeskBriefingState.sys.mjs';
 
 const identity = { conversationId: 'conversation-a', runId: 'run-a', answerId: 'answer-a' };
@@ -117,6 +118,30 @@ test('a briefing left in the middle offers that step again, by number', () => {
   assert.equal(BriefingState.briefingResumeOffer(memory, briefing), null);
   BriefingState.rememberBriefingStep(memory, begin(2));
   assert.deepEqual(BriefingState.briefingResumeOffer(memory, briefing), { index: 2, number: 3, stepId: 'three', total: 4 });
+});
+
+// The window keeps this memory (`closeAnswerBriefing._stepMemory ||= new Map()` in eg-desk-surface.uc.js) while the module is
+// imported into Firefox's shared module global: two JS globals, so the window's Map fails `instanceof Map` in the module. A Map
+// from a vm context is the same situation in Node.
+test('the step memory the window keeps (a Map from another JS global) is remembered, offered and forgotten', () => {
+  const windowMap = vm.runInNewContext('new Map()');
+  assert.equal(windowMap instanceof Map, false, 'the Map really comes from another global');
+  assert.equal(BriefingState.briefingResumeOffer(windowMap, briefing), null);
+  BriefingState.rememberBriefingStep(windowMap, begin(2));
+  assert.equal(windowMap.size, 1);
+  assert.deepEqual(BriefingState.briefingResumeOffer(windowMap, briefing), { index: 2, number: 3, stepId: 'three', total: 4 });
+  BriefingState.forgetBriefingStep(windowMap, briefing);
+  assert.equal(windowMap.size, 0);
+  assert.equal(BriefingState.briefingResumeOffer(windowMap, briefing), null);
+});
+
+test('step memory that is not a Map from any global keeps nothing and offers nothing', () => {
+  const lookalike = { size: 1, get: () => ({ index: 2, stepIds: ['one', 'two', 'three', 'four'] }), set() {}, delete() {}, keys: () => [][Symbol.iterator]() };
+  for (const memory of [undefined, null, {}, [], lookalike, new Set(), vm.runInNewContext('new Set()'), vm.runInNewContext('new WeakMap()')]) {
+    assert.doesNotThrow(() => BriefingState.rememberBriefingStep(memory, begin(2)));
+    assert.doesNotThrow(() => BriefingState.forgetBriefingStep(memory, briefing));
+    assert.equal(BriefingState.briefingResumeOffer(memory, briefing), null);
+  }
 });
 
 test('leaving at the first or the last step reopens from the start without asking', () => {

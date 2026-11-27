@@ -27,6 +27,7 @@ function fakeClient(answer) {
 
 function harness({ mode = 'on', configured = true, client = fakeClient(), collect, budgetMs } = {}) {
   const calls = [], events = []
+  const state = { mode, configured }
   let turns = 0, threads = 0
   const chat = new CodexChatRuntime({
     request: async (method, params) => {
@@ -37,7 +38,7 @@ function harness({ mode = 'on', configured = true, client = fakeClient(), collec
       throw new Error(`Unexpected method: ${method}`)
     },
     respond: () => {}, emit: event => events.push(event), emitLegacy: () => {}, verifyFile: async () => null,
-    decisionContext: { mode: () => mode, configured: () => configured, client, budgetMs,
+    decisionContext: { mode: () => state.mode, configured: () => state.configured, client, budgetMs,
       collect: collect || (async () => [
         { id: 'board:plan', kind: 'board', title: 'Launch plan', summary: 'Q4 launch checklist', timeSlice: 'planned', loadText: () => 'Full launch plan text' },
         { id: 'message:m1', kind: 'conversation', title: '사용자: unrelated', summary: 'unrelated', timeSlice: 'past' },
@@ -52,7 +53,7 @@ function harness({ mode = 'on', configured = true, client = fakeClient(), collec
     for (let i = 0; i < 200 && !calls.some(call => call.method === 'turn/start'); i++) await new Promise(resolve => setTimeout(resolve, 10))
     await new Promise(resolve => setTimeout(resolve, 10))
   }
-  return { chat, calls, events, client, turnParams, decisionRows, send }
+  return { chat, calls, events, client, turnParams, decisionRows, send, state }
 }
 
 test("mode 'on' attaches the chosen items as egdesk_decision_context and records an activity row", async () => {
@@ -126,7 +127,7 @@ test('bounded execution policies never run the decision setup', async () => {
   assert.equal(h.decisionRows().length, 0)
 })
 
-test('collectDecisionCandidates reads selections, the Board, recent messages and the ontology; broken stores are skipped', async () => {
+test('collectDecisionCandidates reads permitted selections, the Board and the ontology; a raw transcript is never a capability', async () => {
   const messages = Array.from({ length: 15 }, (_, index) => ({ localMessageId: `m${index}`, role: index % 2 ? 'assistant' : 'user', text: `message ${index}` }))
   const chatStore = { listMessages: (id, { afterSeq }) => (afterSeq === 0 ? { messages: messages.slice(0, 10), hasMore: true, nextCursor: 10 } : { messages: messages.slice(10), hasMore: false, nextCursor: null }) }
   const deskStore = { board: id => (id === 'b1' ? { id: 'b1', title: '출시 Board', head: { body: { text: 'Board body' } } } : null) }
@@ -135,11 +136,47 @@ test('collectDecisionCandidates reads selections, the Board, recent messages and
     body: { boardId: 'b1', selectedSources: [{ id: 'src-1', label: 'Spec.pdf', kind: 'file' }], attachments: [{ title: 'No id' }, 'bad'] },
     clientThreadId: 'c1', excludeMessageId: 'm14', chatStore, deskStore, ontologyStore, maxMessages: 4,
   })
-  assert.deepEqual(sources, { selected: 2, messages: 4, board: 1, ontology: 1 })
-  assert.deepEqual(candidates.map(c => c.id), ['selected:src-1', 'selected:attachments-0', 'board:b1', 'message:m10', 'message:m11', 'message:m12', 'message:m13', 'ontology-snapshot:s1'])
+  assert.deepEqual(sources, { selected: 2, messages: 0, board: 1, ontology: 1 })
+  assert.deepEqual(candidates.map(c => c.id), ['selected:src-1', 'selected:attachments-0', 'board:b1', 'ontology-snapshot:s1'])
   assert.equal(await candidates.find(c => c.id === 'board:b1').loadText(), 'Board body')
   assert.equal(candidates.at(-1).timeSlice, 'planned')
   const broken = await collectDecisionCandidates({ body: { boardId: 'b1' }, clientThreadId: 'c1', chatStore: { listMessages: () => { throw new Error('x') } },
     deskStore: { board: () => { throw new Error('y') } }, ontologyStore: () => ({ readGraph: async () => { throw new Error('z') } }) })
-  assert.deepEqual(broken, { candidates: [], sources: { selected: 0, messages: -1, board: -1, ontology: -1 } })
+  assert.deepEqual(broken, { candidates: [], sources: { selected: 0, messages: 0, board: -1, ontology: -1 } })
+})
+
+test("a result decided under 'on' attaches nothing when the mode or key changed while it was pending", async () => {
+  for (const change of [{ mode: 'off' }, { mode: 'advisory' }, { configured: false }]) {
+    const client = fakeClient(request => { Object.assign(h.state, change); return fakeClient().decide(request) })
+    const h = harness({ client })
+    await h.send({ message: 'What is left in the plan?' })
+    assert.equal(client.requests.length, 1, JSON.stringify(change))
+    assert.equal(h.turnParams().additionalContext?.egdesk_decision_context, undefined, JSON.stringify(change))
+    const text = JSON.stringify(h.decisionRows())
+    assert.match(text, /기록만/)
+  }
+  // advisory stays record-only even when the owner switches to 'on' during the call.
+  const client = fakeClient(request => { h.state.mode = 'on'; return fakeClient().decide(request) })
+  const h = harness({ mode: 'advisory', client })
+  await h.send({ message: 'What is left in the plan?' })
+  assert.equal(h.turnParams().additionalContext?.egdesk_decision_context, undefined)
+})
+
+test("when the mode changes mid-flight, only what the person pinned stays attached, not the model's picks", async () => {
+  const client = fakeClient(request => {
+    h.state.mode = 'off'
+    const answers = {}
+    for (const q of request.questions) answers[q.name] = q.type === 'choice'
+      ? { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: [{ value: q.choices[0].value, probability: 0.9 }] }
+      : { type: 'predicate', probability: 0.95 }
+    return { answers, model: 'gpt-6-luna', usage: { inputTokens: 10 }, latencyMs: 12 }
+  })
+  const h = harness({ client, collect: async () => [
+    { id: 'board:pinned', kind: 'board', title: 'Pinned plan', summary: 'pinned', timeSlice: 'planned', mandatory: true, loadText: () => 'PINNED BODY' },
+    { id: 'board:picked', kind: 'board', title: 'Picked note', summary: 'picked', timeSlice: 'planned', loadText: () => 'PICKED BODY' }] })
+  await h.send({ message: 'What is left in the plan?' })
+  assert.equal(client.requests.length, 1)
+  const value = h.turnParams().additionalContext?.egdesk_decision_context?.value ?? ''
+  assert.match(value, /PINNED BODY/)
+  assert.doesNotMatch(value, /PICKED BODY/)
 })

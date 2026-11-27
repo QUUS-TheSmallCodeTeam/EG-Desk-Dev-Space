@@ -1,0 +1,38 @@
+{
+ "set": "real-engine-upper-order-v1",
+ "description": "u1 (L3): the '위' bundle (EGDESK_UPPER=on) on a plain question that reads a file: the order of the turn as the runtime marked it is memory -> action -> engine (the check stage appears only where the answer is held and checked: an Agent-room direct send). Run with --decisions; with --engine claude the same script covers the Claude engine (not run automatically).",
+ "conversations": [
+  {
+   "id": "upper-order",
+   "flags": {
+    "EGDESK_UPPER": "on"
+   },
+   "folder": {
+    "notes/todo.md": "- [x] 견적서 보내기\n- [ ] 일정 확인\n"
+   },
+   "turns": [
+    {
+     "say": "notes/todo.md 에 남은 항목이 뭐야?",
+     "expect": {
+      "toolCalls": [
+       "egdesk_read_file"
+      ],
+      "answerIncludes": [
+       "일정 확인"
+      ],
+      "noNativeTools": true,
+      "posted": true,
+      "turnStatus": "completed",
+      "stages": {
+       "order": [
+        "memory",
+        "action",
+        "engine"
+       ]
+      }
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,64 @@
+{
+  "set": "l4-briefing-fact-wording",
+  "tokenCeiling": 3000,
+  "productBars": {
+    "onboard_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    }
+  },
+  "passRule": "PASS when the natural noun phrase and the V1-style clause are not judged decided-not-shown (p > .3) on the recorded V2 board. The recorded fact and its connective-trimmed form are recorded: compare them with the other two (connective vs noun). Decision rule: if the trimmed form is judged yes (>= .7) while the recorded one stays under .3, the connective is the cause (trim copular endings in factUnits); if both stay low while the natural fragment is high, the noun is the cause (the answer's own wording; no splitter change); if the V1-style clause is high, a connective alone is not the cause.",
+  "requests": [
+    {
+      "id": "fact-wording",
+      "file": "requests/fact-wording.json",
+      "sha256": "8357f403ccabd976471178322177c5c2172d63882c4fff108d92918d596fa29d",
+      "estInputTokens": 1244,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "as the product quoted it in the V2 draw (c60): .29 in both coverage requests: recorded, not a pass condition (the question is whether the wording moves the judge)"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the trailing connective cut, the noun kept (\"순서\" still claims an order): recorded, not a pass condition (the question is whether the wording moves the judge)"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the natural noun phrase L2 suggests. The board shows \"11월 6일 단가 12,800원으로 견적서 v1을 발송했다\": a decided no (p <= .3) would start the product's re-design for a fact that is on the board"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown (yes >= .7)"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the V1 draw's clause WITH its connective (c59: 1.0 on V1's board). The board shows \"11월 6일 단가 12,800원으로 견적서 v1을 발송했다\": a decided no (p <= .3) would start the product's re-design for a fact that is on the board"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown (yes >= .7)"
+        }
+      ]
+    }
+  ]
+}

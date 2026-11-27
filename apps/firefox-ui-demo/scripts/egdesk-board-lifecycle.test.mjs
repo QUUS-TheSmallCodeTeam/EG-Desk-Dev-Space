@@ -684,7 +684,7 @@ function saveAsHarness(initialStore, { writable = true, snapshotFor = () => ({ .
     document, el, state, BoardLifecycle: Lifecycle,
     coerceAgendaStore: () => JSON.parse(JSON.stringify(store)),
     writeAgendaStoreAndSync: next => { if (!writable) return false; store = JSON.parse(JSON.stringify(next)); return true; },
-    serializeAgendaSnapshot: options => snapshotFor(options),
+    serializeAgendaSnapshot: options => snapshotFor(options), safeLocalBoardSnapshot: snapshot => snapshot,
     saveCurrentAgendaState: options => { saves.push(options); return saveResult === undefined ? { agenda: { id: 'a', title: '자료 정리' }, cards: [{}, {}], shapes: [] } : saveResult; },
     syncBoardToStore: (...args) => { synced.push(args); return Promise.resolve({}); },
     newAgendaId: () => `new-${++seq}`,

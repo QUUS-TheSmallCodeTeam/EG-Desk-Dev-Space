@@ -1,13 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
+import vm from 'node:vm'
 import { rm } from 'node:fs/promises'
 import { readFile } from 'node:fs/promises'
-import { backoffDelayMs, createAccountAccessTracker, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, setBridgeCors } from './codex-bridge-http.mjs'
+import { backoffDelayMs, createAccountAccessTracker, createChatHttpHandler, createRateLimitSync, createReconnectBackoff, guardBridgeRequest, readJsonBody, sendJson, setBridgeCors } from './codex-bridge-http.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
+import { createOntologyHttpHandler } from './egdesk-ontology-http.mjs'
 import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -72,6 +74,54 @@ test('literal Origin null is rejected for absent, trusted and untrusted Fetch Me
     if (allowed) setBridgeCors(req, res)
     assert.equal(res.headers['Access-Control-Allow-Origin'], undefined)
   }
+})
+
+test('bridge CORS adds Terminal scope headers without granting Origin, Chat login or ontology token authority', async () => {
+  const source = await readFile(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('const bridgeServer = createServer(async (req, res) => {')
+  const end = source.indexOf('  // File routes have their own bounded', start)
+  assert.ok(start >= 0 && end > start, 'use the production guard, preflight and ontology dispatch without starting the bridge')
+  const port = 39218, trusted = 'chrome://browser'
+  const profileId = 'a'.repeat(64), token = 'b'.repeat(64)
+  let accountChecks = 0, ontologyReads = 0
+  const chat = new CodexChatRuntime({ request: async () => assert.fail('denied request must not reach the provider'), respond: () => {} })
+  chat.setConnection(true)
+  const auth = createChatEngineAuth({ chat, refreshCodexAccount: async () => { accountChecks++ }, getCodexAuth: () => ({ isLoggedIn: false }) })
+  const handleChatHttp = createChatHttpHandler(chat, auth)
+  const handleOntologyHttp = createOntologyHttpHandler({ port, binding: { profileId, token }, store: { readGraph: () => { ontologyReads++; return { nodes: [] } } } })
+  const handle = vm.runInNewContext(source.slice(start, end) + '\n  await handleChatHttp(req, res, url)\n}); bridgeServer', {
+    BRIDGE_PORT: port, URL, createServer: callback => callback, guardBridgeRequest, sendJson, setBridgeCors,
+    handleMemoryEvidenceHttp: () => assert.fail('not a memory evidence request'), handleOntologyHttp, handleChatHttp,
+  })
+  const terminalHeaders = {
+    'x-egdesk-terminal-owner': '00000000-0000-4000-8000-000000000001',
+    'x-egdesk-terminal-view': '00000000-0000-4000-8000-000000000002',
+  }
+  const headers = { ...terminalHeaders, 'x-egdesk-overlay-build': 'fixture-build', 'x-egdesk-ontology-profile': profileId, 'x-egdesk-ontology-token': token }
+  const call = async (method, path, origin, extra) => {
+    const req = request('{"message":"fixture"}', { origin, ...extra }, path)
+    req.method = method
+    const res = response()
+    await handle(req, res)
+    return res
+  }
+  const preflight = await call('OPTIONS', '/terminal/attach', trusted, { 'access-control-request-headers': Object.keys(terminalHeaders).join(', ') })
+  assert.equal(preflight.status, 204)
+  assert.equal(preflight.headers['Access-Control-Allow-Origin'], trusted)
+  assert.equal(preflight.headers['Access-Control-Allow-Headers'], 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token, X-EGDesk-Terminal-Owner, X-EGDesk-Terminal-View')
+  assert.equal(preflight.headers['Access-Control-Allow-Methods'], 'GET,POST,PUT,OPTIONS')
+  for (const [method, path] of [['OPTIONS', '/terminal/attach'], ['POST', '/chat/send'], ['GET', '/ontology/graph']]) {
+    const refused = await call(method, path, 'https://untrusted.example', headers)
+    assert.deepEqual([refused.status, refused.headers['Access-Control-Allow-Origin']], [403, undefined])
+  }
+  assert.deepEqual([accountChecks, ontologyReads], [0, 0])
+  const chatRefused = await call('POST', '/chat/send', trusted, headers)
+  assert.deepEqual([chatRefused.status, chatRefused.body.code, accountChecks], [401, 'LOGIN_REQUIRED', 1])
+  const { 'x-egdesk-ontology-token': unused, ...withoutToken } = headers
+  const ontologyRefused = await call('GET', '/ontology/graph', trusted, withoutToken)
+  assert.deepEqual([ontologyRefused.status, ontologyRefused.body.code, ontologyReads], [403, 'ONTOLOGY_TOKEN_REQUIRED', 0])
+  assert.equal((await call('GET', '/ontology/graph', trusted, headers)).status, 200)
+  assert.equal(ontologyReads, 1)
 })
 
 test('JSON reader rejects oversized bodies, non-JSON types and non-object data', async () => {
@@ -152,7 +202,14 @@ test('the server mounts the tested stored-engine auth function, without a Codex 
   assert.ok(contextStart >= 0 && contextEnd > contextStart, 'the actual context constructor boundary is present')
   const contextWiring = source.slice(contextStart, contextEnd)
   assert.match(contextWiring, /getAuthority: hints => chat\.contextAuthority\(hints\)/)
-  assert.match(contextWiring, /schemaReady: authority => authority\?\.engineId === 'claude'\s*\? claudeEngine\.isReady\(\) && claudeEngine\.capabilities\(\)\.has\('dynamicTools'\)\s*: nativeCapabilities\.schemaMatch && appServerReady/)
+  // every original fragment still holds (the Claude branch, the shared default), and (L1 c22) a run on another Codex profile is judged by THAT profile's own probe
+  assert.match(contextWiring, /schemaReady: authority => authority\?\.engineId === 'claude'\s*\? claudeEngine\.isReady\(\) && claudeEngine\.capabilities\(\)\.has\('dynamicTools'\)\s*: isProfileSlot\(authority\?\.engineProfileId\) \? codexProfileServers\.capabilities\(authority\.engineProfileId\)\.dynamicTools === true\s*: nativeCapabilities\.schemaMatch && appServerReady/)
+  // (L1 c23: the predicate moved into the slot-readiness module, which the bridge imports; the same text, one definition)
+  assert.match(source, /import \{ createSlotReadiness, isProfileSlot \} from '\.\/egdesk-slot-readiness\.mjs'/)
+  const readinessSource = await readFile(new URL('./egdesk-slot-readiness.mjs', import.meta.url), 'utf8')
+  assert.match(readinessSource, /export const isProfileSlot = id => typeof id === 'string' && id !== '' && id !== CODEX_ENGINE_PROFILE_ID/)
+  assert.match(source, /const profileCapabilityCache = createNativeCapabilityCache\(\)/)
+  assert.match(source, /inspectCapabilities: bin => profileCapabilityCache\(bin\),/, 'each profile server is probed on its own binary')
   assert.match(source, /respond: nativeRespond,/)
   assert.doesNotMatch(source, /respond:.*claudeEngine\.owns/)
 })
@@ -798,8 +855,9 @@ test('/v1/state keeps every existing field in order and adds bridge build, recon
     'engineConfiguration', 'memoryIsolation', 'node', 'auth', 'chat', 'capabilities',
     'bridge', 'appServerReconnect', 'engines', 'inheritedMcp', 'workflow', 'computerControl', 'deskStorageReady',
   ])
-  assert.deepEqual([...block.matchAll(/^ {8}([A-Za-z]\w*)(?=:)/gm)].map(match => match[1]), ['auth', 'chat', 'context', 'files', 'profiles', 'engines', 'boardDeliveryIntent', 'channelContext', 'desk', 'portable'])
+  assert.deepEqual([...block.matchAll(/^ {8}([A-Za-z]\w*)(?=:)/gm)].map(match => match[1]), ['auth', 'chat', 'context', 'files', 'profiles', 'engines', 'boardDeliveryIntent', 'boardPresentation', 'channelContext', 'desk', 'portable'])
   assert.ok(block.includes('boardDeliveryIntent: true,'))
+  assert.ok(block.includes('boardPresentation: true,'))
   assert.ok(block.includes('channelContext: true,'))
   assert.ok(block.includes('bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),'))
   assert.ok(block.includes('appServerReconnect: appServerBackoff.snapshot(),'))
@@ -819,7 +877,6 @@ test('bridge hashes its source once at start, backs off app-server reconnects an
   const open = source.slice(at('socket.onopen = async () => {'), at('socket.onmessage = event => {'))
   assert.ok(open.indexOf('appServerReady = true') < open.indexOf('appServerBackoff.reset()'))
   assert.equal(source.split('appServerBackoff.reset()').length, 2)
-  at("'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token',")
 })
 
 test('run changes and command output are read from bridge memory without an account call, with exact query checks', async () => {

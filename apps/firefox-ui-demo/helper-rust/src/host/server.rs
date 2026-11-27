@@ -327,7 +327,7 @@ pub fn serve_client(
         Err(_) => return ExitReason::Io,
     };
     let writer = Arc::new(Mutex::new(writer));
-    if write_line(&writer, &protocol::hello_ok(config.pid, config.heartbeat_timeout.as_millis() as u64, elapsed_ms(start))).is_err() {
+    if write_line(&writer, &protocol::hello_ok_with(config.pid, config.heartbeat_timeout.as_millis() as u64, elapsed_ms(start), observer.content_enabled())).is_err() {
         return ExitReason::Io;
     }
 
@@ -400,7 +400,7 @@ mod tests {
             WindowList { windows: vec![], titles: if query.titles { "omitted-no-permission" } else { "not-requested" }, truncated: false }
         }
         fn permissions(&self) -> Permissions {
-            Permissions { accessibility: false, screen_recording: false, input_monitoring: false, requested: false, bundled: false }
+            Permissions { accessibility: false, screen_recording: false, input_monitoring: false, requested: false, screen_locked: false, bundled: false }
         }
         fn service(&self) -> ServiceStatus {
             ServiceStatus::new(vec![])

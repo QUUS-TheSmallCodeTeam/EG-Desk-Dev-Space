@@ -10,7 +10,8 @@ import { CONTEXT_SUGGEST_DEFAULT, normalizeContextSuggest } from './egdesk-conte
 //   { "version": 1, "computerControlPolicy": "inherit" | "off",
 //     "contextSuggest": { "mode": "always" | "firstMessage" | "off",
 //                         "neverSuggest": [{ "kind": "site", "host": "bank.example.com" } | { "kind": "folder", "path": "/abs" }] },
-//     "decisionContext": "off" | "advisory" | "on" }
+//     "decisionContext": "off" | "advisory" | "on",
+//     "turnMemory": "off" | "advisory" | "on" }
 // - Missing file or missing field: the module default applies
 //   (DEFAULT_COMPUTER_CONTROL_POLICY in codex-computer-control.mjs,
 //   CONTEXT_SUGGEST_DEFAULT in egdesk-context-resolver.mjs: always suggest,
@@ -36,11 +37,17 @@ const normalizedSuggest = value => { try { return normalizeContextSuggest(value)
 // today's behaviour), 'advisory' (decide and record, attach nothing), 'on'.
 export const DECISION_CONTEXT_MODES = Object.freeze(['off', 'advisory', 'on'])
 export const DECISION_CONTEXT_DEFAULT = 'off'
+// Turn memory (egdesk-turn-memory.mjs): 'off' (default: nothing is read, built or sent), 'advisory' (runs in the background after each turn
+// starts and only records; what the answering model receives never changes) or 'on' (the reconstructed / fetched pages are attached to the
+// turn input and the write judgment stores pending readings). 'on' attaches only while the decision model mode is also 'on'.
+export const TURN_MEMORY_MODES = Object.freeze(['off', 'advisory', 'on'])
+export const TURN_MEMORY_DEFAULT = 'off'
 /** Settings fields this build reads and writes, with their validity rule. */
 const FIELDS = Object.freeze({
   computerControlPolicy: value => COMPUTER_CONTROL_POLICIES.includes(value),
   contextSuggest: value => normalizedSuggest(value) !== null,
   decisionContext: value => DECISION_CONTEXT_MODES.includes(value),
+  turnMemory: value => TURN_MEMORY_MODES.includes(value),
 })
 /** Fields kept in a normalized (frozen) form; others are stored as given. */
 const NORMALIZE = Object.freeze({ contextSuggest: normalizedSuggest })
@@ -190,7 +197,8 @@ export function openBridgeSettings({ dataDir, log = defaultLog, now = Date.now }
       const next = { values: Object.assign(Object.create(null), values, { [name]: clean }), extra }
       try { write(next) }
       catch (error) {
-        say(`${BRIDGE_SETTINGS_FILE} could not be saved (${errorCode(error)}); the setting applies until the bridge restarts`)
+        const effect = name === 'decisionContext' ? 'the previous decision mode remains active' : 'the setting applies until the bridge restarts'
+        say(`${BRIDGE_SETTINGS_FILE} could not be saved (${errorCode(error)}); ${effect}`)
         return false
       }
       values = next.values
@@ -220,6 +228,13 @@ export function openBridgeSettings({ dataDir, log = defaultLog, now = Date.now }
     get saved() { return store.get('decisionContext') !== null },
     get persisted() { return writable },
     save: mode => store.set('decisionContext', mode),
+  })
+  // Turn memory: the saved choice, or 'off'. Explicitly enabled only (edit the file or save through this accessor).
+  store.turnMemory = Object.freeze({
+    get mode() { return store.get('turnMemory') ?? TURN_MEMORY_DEFAULT },
+    get saved() { return store.get('turnMemory') !== null },
+    get persisted() { return writable },
+    save: mode => store.set('turnMemory', mode),
   })
   return store
 }

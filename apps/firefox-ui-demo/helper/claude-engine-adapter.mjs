@@ -36,6 +36,7 @@
 // Never logged or kept: message text, tool inputs, answers, credentials.
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto'
+import { deleteClaudeSessionFiles } from './claude-session-files.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { chatError } from './codex-chat-values.mjs'
@@ -50,7 +51,7 @@ import {
 import { createClaudePermissionBroker } from './claude-engine-permissions.mjs'
 import { EGDESK_MCP_SERVER_NAME, createEgdeskClaudeMcp, egdeskAllowedToolsRule, egdeskMcpConfig } from './egdesk-claude-mcp.mjs'
 import { applyClaudeRateLimit, createClaudeTranslator } from './claude-stream-translate.mjs'
-import { CLAUDE_BOUNDED_MIN_VERSION, CLAUDE_BOUNDED_POLICIES, claudeBoundedInitViolation, claudeBoundedLaunch } from './egdesk-claude-bounded.mjs'
+import { CLAUDE_BOUNDED_MIN_VERSION, CLAUDE_BOUNDED_POLICIES, claudeBoundedInitDiagnosis, claudeBoundedLaunch } from './egdesk-claude-bounded.mjs'
 import { CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, claudeParentLimitEnv, createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 
 export const CLAUDE_ENGINE_ID = 'claude'
@@ -183,6 +184,8 @@ export function createClaudeEngineAdapter(options = {}) {
     clearTimer = timer => clearTimeout(timer),
     mcpOutputLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, collectContextUsage = true,
     profiles = null,
+    // Deleting a conversation also removes the session files Claude Code keeps for it (claude-session-files.mjs). Developer flag, default off.
+    deleteSessionFiles = () => false, claudeHome = null,
   } = options
   const limits = { ...CLAUDE_ADAPTER_DEFAULTS }
   for (const key of Object.keys(limits)) if (Number.isSafeInteger(options[key]) && options[key] > 0) limits[key] = options[key]
@@ -310,6 +313,7 @@ export function createClaudeEngineAdapter(options = {}) {
     if (p.egdeskBoundedPolicy !== undefined && p.egdeskBoundedPolicy !== null) {
       if (!CLAUDE_BOUNDED_POLICIES.includes(p.egdeskBoundedPolicy)) throw definite(chatError('QA_POLICY_UNAVAILABLE', 'Claude supports only the bounded Browser policy', 503))
       spec.bounded = p.egdeskBoundedPolicy
+      spec.boundedRelaxed = p.egdeskBoundedRelaxed === true // u6: the init check of the Claude browser capability (egdesk-claude-bounded)
     }
     if (p.cwd !== undefined && p.cwd !== null) {
       if (!isAbsolute(p.cwd)) throw definite(chatError('INVALID_CWD', 'The working folder must be an absolute path', 400))
@@ -319,6 +323,12 @@ export function createClaudeEngineAdapter(options = {}) {
     // '' is the runtime's explicit "no instructions" (profile off).
     if (p.developerInstructions !== undefined) spec.appendPrompt = typeof p.developerInstructions === 'string' && p.developerInstructions.trim() ? p.developerInstructions : null
     if (Array.isArray(p.dynamicTools)) spec.tools = p.dynamicTools
+    // u1 (EG-Desk harness, flag EGDESK_CLAUDE_HARNESS): the built-in Claude Code tools EG-Desk's own tools replace are switched off with --disallowedTools (names only; the CLI binary is untouched)
+    // u2: the harness thread's EG-Desk tools load upfront (no tool-search round before the first use): server alwaysLoad, per-tool _meta, ENABLE_TOOL_SEARCH=false (documented values: code.claude.com/docs/en/mcp, /env-vars)
+    if (p.egdeskAlwaysLoad === true) spec.alwaysLoad = true
+    // u1: a private turn's thread has NO built-in tools (--tools ""): names only, [] disables them all
+    if (Array.isArray(p.egdeskBuiltinTools)) spec.builtin = Object.freeze(p.egdeskBuiltinTools.filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)).slice(0, 32))
+    if (Array.isArray(p.egdeskDisallowedTools)) spec.disallowed = Object.freeze(p.egdeskDisallowedTools.filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)).slice(0, 32))
     return spec
   }
 
@@ -425,10 +435,11 @@ export function createClaudeEngineAdapter(options = {}) {
       session.activeTurn = null
       const interrupted = turn.interruptRequested === true
       const code = proc.gateCode || 'RUNTIME_LOST'
+      const detail = proc.gateDetail ? `:${proc.gateDetail}` : ''
       deliver('notification', { method: 'turn/completed', params: {
         threadId: session.threadId, turnId: turn.turnId,
         turn: { id: turn.turnId, status: interrupted ? 'interrupted' : 'failed', items: [],
-          error: interrupted ? null : { message: `The Claude process ended before the turn finished (${code})`, code, kind: 'unknown', origin: 'claude' } },
+          error: interrupted ? null : { message: `The Claude process ended before the turn finished (${code}${detail})`, code, kind: 'unknown', origin: 'claude' } },
       } })
     }
     statusChanged()
@@ -441,10 +452,11 @@ export function createClaudeEngineAdapter(options = {}) {
   function onProcessMessage(session, proc, message) {
     if (proc.blocked) return // a bounded process that failed its init check: nothing it says is accepted
     if (proc.bounded && message?.type === 'system' && message.subtype === 'init') {
-      const violation = claudeBoundedInitViolation(message, { serverName: EGDESK_MCP_SERVER_NAME })
+      const violation = claudeBoundedInitDiagnosis(message, { serverName: EGDESK_MCP_SERVER_NAME, relaxed: proc.boundedRelaxed === true })
       if (violation) {
         proc.blocked = true
         proc.gateCode = 'CLAUDE_BOUNDED_UNVERIFIED'
+        proc.gateDetail = `${violation.kind}=${violation.count}` // u6: closed words and a count, never a name or text from the CLI
         void proc.transport.close({ graceMs: 0 }).catch(() => {})
         return
       }
@@ -484,8 +496,9 @@ export function createClaudeEngineAdapter(options = {}) {
   }
 
   function ensureProcess(session, assertDispatch = () => {}) {
-    if (session.proc && !session.proc.exited) return Promise.resolve(session.proc)
+    // a start in flight first: its process is already session.proc before the CLI has started, and a caller must not write to it until the start is done (a1: prepareTurn)
     if (session.starting) return session.starting
+    if (session.proc && !session.proc.exited) return Promise.resolve(session.proc)
     session.starting = (async () => {
       await makeRoom(session)
       const lease = await leaseProcess(session)
@@ -504,11 +517,11 @@ export function createClaudeEngineAdapter(options = {}) {
       const proc = {
         transport: null, exited: false, gateCode: null, owner: ownerKey(), ownerEpoch, mcpPending: new Map(), // rpc id → control request id
         lease, engineBuild: typeof check.version === 'string' ? check.version : null,
-        bounded: spec.bounded || null, blocked: false, boundedVerified: false,
-        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null },
+        bounded: spec.bounded || null, boundedRelaxed: spec.bounded ? spec.boundedRelaxed === true : false, blocked: false, boundedVerified: false,
+        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null, boundedRelaxed: spec.boundedRelaxed === true, disallowed: spec.disallowed ?? null, builtin: spec.builtin ?? null, alwaysLoad: spec.alwaysLoad === true },
         broker: createClaudePermissionBroker({ threadId, egdeskServer: EGDESK_MCP_SERVER_NAME, offerSessionGrant: true,
           nextRpcId: () => nextRpcId(threadId, 'perm') }),
-        mcp: createEgdeskClaudeMcp({ threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME,
+        mcp: createEgdeskClaudeMcp({ alwaysLoad: spec.alwaysLoad === true, threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME,
           nextRpcId: () => nextRpcId(threadId, 'mcp'), outputLimitTokens: mcpOutputLimitTokens }),
       }
       const hasTools = proc.mcp.listTools().length > 0
@@ -519,15 +532,17 @@ export function createClaudeEngineAdapter(options = {}) {
       proc.transport = createTransport({
         ...transportOptions,
         ...(typeof profileDir === 'string' && profileDir ? { claudeConfigDir: profileDir } : {}),
-        extraEnv: { ...(plainObject(transportOptions.extraEnv) || {}), ...limitEnv },
+        extraEnv: { ...(plainObject(transportOptions.extraEnv) || {}), ...limitEnv, ...(spec.alwaysLoad === true ? { ENABLE_TOOL_SEARCH: 'false' } : {}) },
         executablePath, cwd: spec.cwd, version: typeof check.version === 'string' ? check.version : null,
         minVersion, requiredCapabilities, apiKeyEnvPolicy: apiKeyConfirmed ? 'strip' : 'stop', env, platform, inherit,
         model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt,
         ...(helpChecked ? { permissionMode: 'manual', systemPromptSnapshot: 'off' } : {}),
         ...(spec.bounded ? claudeBoundedLaunch() : {}),
         ...(session.hasHistory ? { resume: threadId } : { sessionId: threadId }),
-        mcpConfig: hasTools ? egdeskMcpConfig(EGDESK_MCP_SERVER_NAME) : null,
+        mcpConfig: hasTools ? egdeskMcpConfig(EGDESK_MCP_SERVER_NAME, { alwaysLoad: spec.alwaysLoad === true }) : null,
         allowedTools: hasTools ? [egdeskAllowedToolsRule(EGDESK_MCP_SERVER_NAME)] : null,
+        ...(spec.disallowed?.length && !spec.bounded ? { disallowedTools: [...spec.disallowed] } : {}),
+        ...(spec.builtin && !spec.bounded ? { tools: [...spec.builtin] } : {}),
         controlHandlers: {
           can_use_tool: (request, { requestId }) => {
             // dontAsk already denies; a bounded process never shows an approval card.
@@ -602,7 +617,7 @@ export function createClaudeEngineAdapter(options = {}) {
 
   // Process flags fixed at spawn; a turn that changes one restarts with --resume.
   const flagsDiffer = (flags, spec) => flags.cwd !== spec.cwd || flags.model !== spec.model || flags.effort !== spec.effort
-    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools || flags.bounded !== (spec.bounded || null)
+    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools || flags.bounded !== (spec.bounded || null) || flags.boundedRelaxed !== (spec.boundedRelaxed === true) || JSON.stringify(flags.disallowed ?? null) !== JSON.stringify(spec.disallowed ?? null) || JSON.stringify(flags.builtin ?? null) !== JSON.stringify(spec.builtin ?? null) || flags.alwaysLoad !== (spec.alwaysLoad === true)
 
   function syncStatus() {
     const ready = isReady()
@@ -677,6 +692,24 @@ export function createClaudeEngineAdapter(options = {}) {
       return { thread: { id: threadId, turns: [], cwd: session.spec.cwd }, cwd: session.spec.cwd, model: session.spec.model, ...boundedDescriptor(session.spec) }
     },
 
+    // The files Claude Code kept for a conversation EG-Desk started (L2 c19). Only with the flag, only for an id EG-Desk's own record binds
+    // to that conversation (recorded), under the config folder of the profile the conversation was bound to. The process is closed first.
+    threadDeleteSupported: () => { try { return deleteSessionFiles() === true } catch { return false } },
+    async deleteThread(threadId, profileId, { recorded = false } = {}) {
+      let allowed = false
+      try { allowed = deleteSessionFiles() === true } catch { allowed = false }
+      if (!allowed) throw chatError('THREAD_DELETE_UNSUPPORTED', 'Deleting Claude session files is not enabled', 409)
+      const id = typeof threadId === 'string' ? threadId.toLowerCase() : ''
+      const slot = profileId && profileId !== 'claude-default' ? profileList().find(row => row.id === profileId) : null
+      if (profileId && profileId !== 'claude-default' && !(slot && typeof slot.configDir === 'string')) return { state: 'remains', files: 0, reason: 'profile_unavailable' }
+      const home = claudeHome ?? env.HOME ?? os.homedir()
+      const configured = typeof env.CLAUDE_CONFIG_DIR === 'string' && isAbsolute(env.CLAUDE_CONFIG_DIR) ? env.CLAUDE_CONFIG_DIR : null
+      const configDir = slot ? slot.configDir : configured ?? path.join(home, '.claude')
+      const session = sessions.get(id)
+      if (session) { session.loaded = false; session.dispatchEpoch++; await closeProcess(session); sessions.delete(id) }
+      return deleteClaudeSessionFiles({ configDir, sessionId: id, recorded: recorded === true, platform })
+    },
+
     async releaseThread(threadId) {
       const session = typeof threadId === 'string' ? sessions.get(threadId.toLowerCase()) : null
       if (!session || !session.loaded) return { status: 'notLoaded' }
@@ -684,6 +717,37 @@ export function createClaudeEngineAdapter(options = {}) {
       session.dispatchEpoch++
       await closeProcess(session)
       return { status: 'unsubscribed' }
+    },
+
+    // a1 (교대): start this conversation's process for the turn about to come, with the spec that turn will carry (model, effort), and send nothing, so a turn that
+    // first waits for EG-Desk's own pre-turn work (the browser entry) does not then also wait for the CLI to start. Best effort and never in the way: it does nothing
+    // while a turn starts or runs, never closes or replaces a live process, never moves the folder; a refusal here is the turn's own, later. An unused process idles
+    // out like one after a turn. -> { status: 'started' | 'ready' | 'skipped' }
+    async prepareTurn(params = {}) {
+      const threadId = typeof params?.threadId === 'string' ? params.threadId.toLowerCase() : ''
+      const session = sessions.get(threadId)
+      if (!session || !session.loaded || session.activeTurn || session.turnStarting) return { status: 'skipped' }
+      if (session.proc && !session.proc.exited) return { status: 'ready' }
+      const next = { ...session.spec }
+      try {
+        assertUsable()
+        assertApiKeyEnv()
+        if (params.model !== undefined && params.model !== null) next.model = checkedModel(params.model)
+        if (params.effort !== undefined && params.effort !== null) { if (!CLAUDE_EFFORT_LEVELS.includes(params.effort)) return { status: 'skipped' }; next.effort = params.effort }
+        if (params.cwd !== undefined && params.cwd !== null && params.cwd !== session.spec.cwd) return { status: 'skipped' }
+      } catch { return { status: 'skipped' } }
+      const expectedOwner = ownerKey(), expectedEpoch = ownerEpoch, externalEpoch = getEpoch(), dispatchEpoch = session.dispatchEpoch
+      const assertCurrent = () => {
+        if (ownerKey() !== expectedOwner || ownerEpoch !== expectedEpoch || getEpoch() !== externalEpoch || !session.loaded || session.dispatchEpoch !== dispatchEpoch || sessions.get(threadId) !== session) {
+          throw definite(chatError('READ_CANCELLED', 'Claude preparation was stopped', 409))
+        }
+        assertUsable()
+        assertApiKeyEnv()
+      }
+      session.spec = next
+      try { await ensureProcess(session, assertCurrent) } catch { return { status: 'skipped' } }
+      if (!session.activeTurn && !session.turnStarting) scheduleIdle(session)
+      return { status: 'started' }
     },
 
     async startTurn(params = {}) {

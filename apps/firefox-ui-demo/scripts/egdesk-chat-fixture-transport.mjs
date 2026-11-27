@@ -24,6 +24,7 @@ import { routePermissionRequest } from '../helper/claude-engine-permissions.mjs'
 import { guardBridgeRequest, createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
 import { readEGDeskFileBody } from '../helper/egdesk-file-http.mjs';
 import { ContextRuntime } from '../helper/egdesk-context-runtime.mjs';
+import { createDayOneContextFixture } from './egdesk-dayone-context-fixture.mjs';
 import { createContextHttpHandler } from '../helper/egdesk-context-http.mjs';
 
 const SCENARIO = /^EGDESK_QA_(COMPLETE|TEXT_ONLY|STOP|APPROVAL|USER_INPUT|SUBAGENT|LOST|START_FAIL|REJECT|AMBIGUOUS|CONTEXT|CLAUDE_TEXT|CLAUDE_SESSION_APPROVAL|CLAUDE_APPROVAL_NO_SESSION|CLAUDE_MULTI_SELECT|CLAUDE_RATE_LIMIT|CLAUDE_CONTEXT|CLAUDE_CONTEXT_BLOCKED)\b/;
@@ -270,6 +271,10 @@ let authLookupFails = false;
 let authLoggedIn = !claudeFixture && !modelFreeFixture && !firstCodexAuthFixture;
 let authLoginId = null;
 let accountVariant = 'a';
+const dayOneEnabled = env.EGDESK_QA_DAYONE_CONTEXT === '1';
+if (dayOneEnabled && (env.EGDESK_QA_REAL_TURN !== '0' || memoCase || firstCodexAuthFixture || claudeFixture || modelFreeFixture || runOutputsEnabled || taskGateEnabled || originFileEnabled || sourceChangeReady)) throw new Error('Day One requires an isolated, unseeded synthetic fixture');
+const dayOne = dayOneEnabled ? createDayOneContextFixture({ profile, port: PORT, token, broadcast: broadcastFixtureEvent,
+  owner: () => authLoggedIn ? `email:qa-account-${accountVariant}@egdesk.invalid` : null }) : null;
 let codexContextEpoch = 0;
 let claudeAccountVariant = 'a';
 let claudeEpoch = 0;
@@ -1186,6 +1191,7 @@ const handler = async (req, res) => {
         || (req.socket?.remoteAddress && !['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))) {
       return json(res, 400, { error: 'Fixture accepts only its loopback origin' });
     }
+    if (dayOne && await dayOne.handle(req, res, url)) return;
     if (memoCase) {
       if (!guardBridgeRequest(req, PORT)) return json(res, 403, { error: 'Memo fixture requires a trusted loopback initiator' });
       if (memoClosed) return json(res, 503, { error: 'Memo fixture is closed' });
@@ -1301,6 +1307,11 @@ const handler = async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/__qa/state') {
       if (req.headers['x-egdesk-qa-token'] !== token) return json(res, 403, { error: 'Fixture token required' });
+      if (dayOne) {
+        const d = dayOne.snapshot();
+        return json(res, 200, { fixture: true, profile, artifactRoot, clients: clients.size, streamId: d.streamId, runs: d.runs,
+          observed: { sends: d.sends }, context: { captureBatches: d.captureBatches, deliveries: d.runs.flatMap(run => run.contextPackets.map(packet => ({ sourceId: packet.sourceId, packet }))) }, dayOne: d });
+      }
       return json(res, 200, { fixture: true, profile, host: HOST, port: PORT, origin, artifactRoot, artifactPath,
         ...(memoCase ? { memoRoundTrip: memoEvidence() } : {}),
         ...(firstCodexAuthFixture ? { firstCodexAuthFixture: true, firstCodexAuthBoundary } : {}),
@@ -2039,6 +2050,7 @@ const handler = async (req, res) => {
   }
 };
 const dispose = () => {
+  dayOne?.dispose();
   if (memoCase) {
     memoClosed = true;
     for (const client of clients) { try { client.end(); } catch {} }

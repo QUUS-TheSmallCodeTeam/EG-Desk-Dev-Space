@@ -1,0 +1,97 @@
+{
+  "set": "real-engine-memory-held-v3",
+  "description": "Pattern: held-v2 (the page already in the conversation is not sent again, and the answer comes from it) with the one-packet option on: the selection and the memory loop share one packet, so no page may have its body twice in one turn (noDuplicates), on top of the v2 expectations (turn 1 does not volunteer the later fact; turn 2 re-sends nothing and holds 자동 삭제). Needs --decisions. Expectations by code.",
+  "conversations": [
+    {
+      "id": "memory-held-v3",
+      "flags": {
+        "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
+        "EGDESK_TURN_MEMORY_ONE_PACKET": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "backup/retention",
+            "title": "서버 백업 보관 기간 결정",
+            "body": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "backup/restore-test",
+            "title": "백업 복원 시험 절차",
+            "time": "past",
+            "status": "done",
+            "body": "복원 시험은 매월 첫째 월요일에 하고, 실패하면 그날 안에 담당자를 호출한다.",
+            "links": [
+              {
+                "to": "backup/retention",
+                "type": "follows_from"
+              }
+            ]
+          },
+          {
+            "id": "office/room-rules",
+            "title": "회의실 예약 규칙",
+            "body": "3층 회의실은 사용 30분 전까지 예약하고, 취소는 10분 전까지 할 수 있다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "lunch/survey",
+            "title": "점심 설문 결과",
+            "body": "11월 둘째 주 점심 설문에서 한식을 고른 사람이 가장 많았다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난번 점검 회의에서 서버 백업을 며칠 보관하기로 정했는지 알려줘.",
+          "expect": {
+            "memory": {
+              "attached": [
+                "backup/retention"
+              ],
+              "notAttached": [
+                "office/room-rules",
+                "lunch/survey"
+              ],
+              "noDuplicates": true
+            },
+            "posted": true,
+            "answerIncludes": [
+              "47"
+            ],
+            "answerExcludes": [
+              "자동 삭제"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그럼 그 기간이 지나면 어떻게 하기로 했지?",
+          "expect": {
+            "memory": {
+              "noResends": true,
+              "notAttached": [
+                "office/room-rules",
+                "lunch/survey"
+              ],
+              "noDuplicates": true
+            },
+            "posted": true,
+            "answerIncludes": [
+              "자동 삭제"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

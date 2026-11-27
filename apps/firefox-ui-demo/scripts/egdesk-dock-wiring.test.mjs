@@ -182,7 +182,7 @@ test('Dock buttons route by kind: tools, the 새 카드 menu, windows, close', (
   assert.deepEqual(run('menu', 'create', { menuOpen: true }), [['close-menu']], 'the same button closes its menu');
   assert.deepEqual(run('left', 'memo'), [['memo']]);
   assert.deepEqual(run('left', 'browser'), [['browser']]);
-  assert.deepEqual(run('left', 'terminal'), [['terminal']]);
+  assert.deepEqual(run('left', 'terminal'), [['terminal', { idle: true }]], 'the Dock opens a Terminal window without starting a session');
   for (const [id, name] of [['shelf', 'file'], ['ide', 'ide'], ['ontology', 'ontology'], ['settings', 'settings']]) {
     assert.deepEqual(run('left', id), [[name]], `${id} keeps its action inside the 새 카드 menu`);
   }

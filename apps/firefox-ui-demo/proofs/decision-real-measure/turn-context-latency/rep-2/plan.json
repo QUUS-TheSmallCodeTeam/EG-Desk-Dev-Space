@@ -1,0 +1,42 @@
+{
+  "set": "turn-context-latency-v1/rep-2",
+  "tokenCeiling": 3000,
+  "transport": "product",
+  "passRule": "Record only (latency probe). Run each repetition as its own process: a = first request of the process, b = immediately after, c = after 20 s, d = after 70 s (past the 55000 ms transport idle window). Read elapsedMs, warmBefore and the socket phases against the turn-context budgets 800 ms (warm) / 1500 ms (cold) with scripts/egdesk-turn-context-latency-plan.mjs analyze.",
+  "requests": [
+    {
+      "id": "a-first",
+      "file": "requests/a-first.json",
+      "sha256": "53645b7c59e651b98b42022b193bd0427dfaf936d2d944d17f975783665ca864",
+      "estInputTokens": 656,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "b-immediate",
+      "file": "requests/b-immediate.json",
+      "sha256": "387e0131f6a1149d7b28dc17b7037c4cc1fb852c2a0cd47988bc1e0efa451edd",
+      "estInputTokens": 656,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "c-after-20s",
+      "file": "requests/c-after-20s.json",
+      "sha256": "cc0483104b426b75367b46f32485be973e75b062b5188030120dab6c6dc38b63",
+      "estInputTokens": 656,
+      "waitBeforeMs": 20000,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "d-after-70s",
+      "file": "requests/d-after-70s.json",
+      "sha256": "85368873333f600d56501f0b9b902d1c68bd47d1ef952de70d205654de16b6a5",
+      "estInputTokens": 655,
+      "waitBeforeMs": 70000,
+      "expect": [],
+      "recordOnly": true
+    }
+  ]
+}

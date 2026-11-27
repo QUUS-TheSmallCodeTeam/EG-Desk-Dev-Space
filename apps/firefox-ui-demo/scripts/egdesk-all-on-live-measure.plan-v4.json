@@ -1,0 +1,797 @@
+{
+ "set": "all-on-live-journey",
+ "version": 4,
+ "registered": "2026-11-25 (lane L2 cycle 15), before any send of v4; predictions from the code on int/c14 c680638, the c17 and c18 evidence and the dry run",
+ "basedOn": {
+  "file": "egdesk-all-on-live-measure.plan-v3.json",
+  "sha256": "2c1c5d8b4f03ba23fd16f17c84ff9e1164b1dde09c3f4c8469e6b1bb4dbc3988",
+  "note": "every v3 expectation is kept (same id, severity and owner); packet and no-repeat checks count page bodies (args.count \"bodies\", marked revised); s9.packet accepts a page held from earlier in the session (marked revised); new: own-ending checks and the owner-question step s8b"
+ },
+ "world": {
+  "env": {
+   "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
+   "EGDESK_TURN_MEMORY_KEEP_LATE": "on"
+  },
+  "budgets": "bridge",
+  "note": "developer flags of the all-on world only; the product defaults stay off. budgets \"bridge\": the bridge's turn_context budgets (warm 800 / cold 1,500 ms)."
+ },
+ "how": "Judged only from the results file of a run: what the person sees after each step and the Decision requests of that step. Hard = the journey is broken for the person if it fails; soft = expected but known to be fragile or already reported. \"predicted\" records what this lane expects to fail and why, written before the real run. v2 adds expectations for what the first real run (c16) showed was wrong or misleading for the person although no v1 expectation covered it. v3 adds a genuine recall step and person-level checks of what changed since c16. The scripted subjective model now follows what the product hands it: the recording rule (no promise to record), the choices a task note lists, and the waited-on fact of a note prompt. v4 turns on L7's two turn-memory flags in the world, counts page bodies rather than page headers, and adds the owner question.",
+ "caps": "Per step: about three times the requests and two and a half times the estimated input tokens of the dry run (independentEstimate of helper/egdesk-decision-real-runner.mjs), at least 4 requests and 4000 tokens. The journey total is capped separately (default 80000 tokens, 80 requests). The recall step s3b uses the same rule. The owner-question step s8b uses the same rule.",
+ "steps": [
+  {
+   "id": "s1-first-turn",
+   "caps": {
+    "maxRequests": 18,
+    "maxEstTokens": 22000
+   },
+   "expect": [
+    {
+     "id": "s1.packet",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The first answer is prepared with the A company request and quote v1 pages, and with no PostgreSQL or SQLite page.",
+     "check": "packet",
+     "args": {
+      "include": [
+       "ontology:quote/a-request",
+       "ontology:quote/a-v1"
+      ],
+      "excludePrefix": [
+       "ontology:db/"
+      ],
+      "count": "bodies"
+     },
+     "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+    },
+    {
+     "id": "s1.answer",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The Agent's answer is posted once, as written (the draft check passes it).",
+     "check": "answerAsWritten",
+     "args": {
+      "said": "quote"
+     }
+    },
+    {
+     "id": "s1.no-flow",
+     "severity": "soft",
+     "owner": "L3",
+     "text": "No wait or pointer message for a short turn.",
+     "check": "messageCount",
+     "args": {
+      "by": "system_flow",
+      "equals": 0
+     }
+    },
+    {
+     "id": "s1.own-words",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "When relevant pages were attached, the person gets the Agent's own answer (or its revision), never the fixed \"not enough evidence, tell me which material\" reply.",
+     "check": "ownWords",
+     "predicted": "fails on int/c14 1f36c00 with the c16 answers: claim_0 insufficient .69 then .76 after the revision, present_0 .97/.96 -> DRAFT_CHECK_COPY.askUser (A1; L7 fix not merged yet). An offline replay of the c16 answers reproduces it."
+    },
+    {
+     "id": "s1.own-ending",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+     "check": "endsInOwnWords",
+     "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+    }
+   ]
+  },
+  {
+   "id": "s2-follow-up",
+   "caps": {
+    "maxRequests": 9,
+    "maxEstTokens": 14000
+   },
+   "expect": [
+    {
+     "id": "s2.no-repeat",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "No page already delivered in the first turn is delivered again.",
+     "check": "noRepeatedPages",
+     "args": {
+      "count": "bodies"
+     },
+     "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15).",
+     "predicted": "passes with EGDESK_TURN_MEMORY_PRUNE_HELD on: c17 failed because the turn_context selection re-sent the held a-decision page as a body ([item id=ontology:quote/a-decision ...] with its content), which the flag stops."
+    },
+    {
+     "id": "s2.answer",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The follow-up answer is posted as the Agent wrote it.",
+     "check": "answerAsWritten",
+     "args": {
+      "said": "tidy"
+     },
+     "predicted": "fails: finding A1 (the draft check has no evidence for held pages and rewrites the answer)"
+    },
+    {
+     "id": "s2.one-answer",
+     "severity": "hard",
+     "owner": "L2",
+     "text": "Exactly one Agent message for the turn.",
+     "check": "messageCount",
+     "args": {
+      "role": "assistant",
+      "by": "agent",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s2.told-what-was-posted",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "When the previous answer was not posted as the Agent wrote it, the next turn tells the Agent what the person actually saw.",
+     "check": "toldWhatWasPosted",
+     "predicted": "fails: no path in codex-chat-runtime.mjs passes the posted text to the next turn; the replayed s2 turn input carries neither the refusal nor any note, while the engine thread keeps its own s1 draft."
+    },
+    {
+     "id": "s2.no-unrelated-pages",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The follow-up about the A company quote is prepared with no PostgreSQL or SQLite page.",
+     "check": "packet",
+     "args": {
+      "include": [],
+      "excludePrefix": [
+       "ontology:db/"
+      ],
+      "count": "bodies"
+     },
+     "predicted": "fails with the c16 answers: the held A pages are not fetch candidates mid-session, and the fetch judged pg_1 .90 and pg_2 .98 (pg-health, pg-plan) needed for \"방금 그 내용 정리해줘\".",
+     "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+    },
+    {
+     "id": "s2.triage-need",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The referential follow-up is judged to need nothing the held pages do not cover (need decided no).",
+     "check": "calibrationValue",
+     "args": {
+      "feature": "turn_memory",
+      "q": "triage_need",
+      "max": 0.3
+     },
+     "predicted": "passes: c16 answered need 0 for this message; L7 c18 then skips the fetch when the held pages and the complete list of the other pages were shown."
+    },
+    {
+     "id": "s2.triage-recall",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The recall reading of the follow-up is measured (recorded, no bar).",
+     "check": "calibrationValue",
+     "args": {
+      "feature": "turn_memory",
+      "q": "triage_recall"
+     },
+     "predicted": "measured: c16 answered recall .96."
+    },
+    {
+     "id": "s2.own-ending",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+     "check": "endsInOwnWords",
+     "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+    }
+   ]
+  },
+  {
+   "id": "s3-briefing",
+   "caps": {
+    "maxRequests": 12,
+    "maxEstTokens": 14000
+   },
+   "expect": [
+    {
+     "id": "s3.board",
+     "severity": "hard",
+     "owner": "L4",
+     "text": "The briefing of the follow-up answer ends on the board, with at least two cards.",
+     "check": "briefingOnBoard",
+     "args": {
+      "minCards": 2
+     }
+    },
+    {
+     "id": "s3.timeline",
+     "severity": "soft",
+     "owner": "L4",
+     "text": "The board has a timeline part (what happened, in date order).",
+     "check": "briefingPart",
+     "args": {
+      "shows": "sequence"
+     },
+     "predicted": "fails: ontology pages reach the briefing without a date (pagesFromCandidates keeps only the time slice), so no part in date order is enumerated"
+    },
+    {
+     "id": "s3.remaining",
+     "severity": "soft",
+     "owner": "L4",
+     "text": "The board has a remaining-work part (what is still not done).",
+     "check": "briefingPart",
+     "args": {
+      "shows": "open_items"
+     },
+     "predicted": "fails: ontology nodes outside a snapshot carry no status, so no material is open"
+    },
+    {
+     "id": "s3.no-chat",
+     "severity": "hard",
+     "owner": "L4",
+     "text": "The briefing adds no chat message.",
+     "check": "messageCount",
+     "args": {
+      "equals": 0
+     }
+    },
+    {
+     "id": "s3.board-a-pages",
+     "severity": "hard",
+     "owner": "L4",
+     "text": "When the A company pages are the materials, the board shows at least two cards, all of them A company pages.",
+     "check": "boardCards",
+     "args": {
+      "titleIncludes": "A사",
+      "min": 2,
+      "onlyMatching": true
+     },
+     "predicted": "passes if s2 attaches no new page (L7 c18), so the materials are the held A company pages; an offline replay of the c16 answers on a82a563 gave two A company cards, but its briefing requests were scripted."
+    }
+   ]
+  },
+  {
+   "id": "s3b-recall",
+   "caps": {
+    "maxRequests": 18,
+    "maxEstTokens": 21000
+   },
+   "expect": [
+    {
+     "id": "s3b.fetched",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "A genuine recall of stored material the conversation does not hold fetches it: the PostgreSQL design page is in the packet.",
+     "check": "packet",
+     "args": {
+      "include": [
+       "ontology:db/pg-design"
+      ],
+      "excludePrefix": [
+       "ontology:quote/"
+      ],
+      "count": "bodies"
+     },
+     "predicted": "passes if no PostgreSQL page is held at this point: the need question asks whether the held pages already cover the message, and they are A company pages. At risk if s2 still attaches PostgreSQL pages (c16: pg-health, pg-plan), which the judge may take as covering it, so the referential rule would skip the fetch.",
+     "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+    },
+    {
+     "id": "s3b.no-repeat",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "No page already delivered in this conversation is delivered again.",
+     "check": "noRepeatedPages",
+     "predicted": "passes: held pages are not repeated mid-session.",
+     "args": {
+      "count": "bodies"
+     },
+     "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+    },
+    {
+     "id": "s3b.own-words",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The answer from the fetched design page is posted as the Agent wrote it.",
+     "check": "ownWords",
+     "predicted": "at risk on today's code: with the c16 answers the present-tense predicate fired on every factual sentence (.91 to .97); L3 c18 (predicates as the default design) is not merged yet."
+    },
+    {
+     "id": "s3b.triage-need",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The recall is judged to need stored material (need at least .8).",
+     "check": "calibrationValue",
+     "args": {
+      "feature": "turn_memory",
+      "q": "triage_need",
+      "min": 0.8
+     },
+     "predicted": "unknown: measured for the first time."
+    },
+    {
+     "id": "s3b.triage-recall",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The recall reading of the recall question is measured (recorded, no bar).",
+     "check": "calibrationValue",
+     "args": {
+      "feature": "turn_memory",
+      "q": "triage_recall"
+     },
+     "predicted": "measured for the first time."
+    },
+    {
+     "id": "s3b.own-ending",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+     "check": "endsInOwnWords",
+     "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+    }
+   ]
+  },
+  {
+   "id": "s4-long-command",
+   "caps": {
+    "maxRequests": 15,
+    "maxEstTokens": 16000
+   },
+   "expect": [
+    {
+     "id": "s4.wait",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "Ten seconds into a running command, one wait message is posted.",
+     "check": "flowPosted",
+     "args": {
+      "kind": "explain_wait",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s4.no-command-shown",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The command line is not in any chat message.",
+     "check": "notShown",
+     "args": {
+      "needles": [
+       "payroll-secret",
+       "npm test"
+      ]
+     }
+    },
+    {
+     "id": "s4.no-output-sent",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The command's output is not in the heartbeat's judgment (the command-state judge reads it by design and is not covered here).",
+     "check": "notSent",
+     "args": {
+      "needles": [
+       "running 40 tests"
+      ],
+      "families": [
+       "heartbeat"
+      ]
+     }
+    },
+    {
+     "id": "s4.no-unrelated-pages",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The test-run request is prepared with no PostgreSQL migration page (they later become the evidence the wait message and the answer are checked against).",
+     "check": "packet",
+     "args": {
+      "include": [],
+      "excludePrefix": [
+       "ontology:db/"
+      ],
+      "count": "bodies"
+     },
+     "predicted": "fails with the c16 answers: turn_context rel_7 1.0, rel_9 .55, rel_10 .57 and memory pg_2 .97, op_P4 .91 attach four PostgreSQL pages. Soft: whether a health-check list is relevant to \"run all tests\" is debatable.",
+     "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+    },
+    {
+     "id": "s4.wait-true",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The one wait message says what is true at that moment (a command is still running) and claims no result.",
+     "check": "flowText",
+     "args": {
+      "equals": 1,
+      "mustInclude": [
+       "실행 중"
+      ],
+      "mustNot": [
+       "통과",
+       "실패",
+       "완료",
+       "끝났"
+      ]
+     },
+     "predicted": "passes if the note is posted: L3 c17 checks a note against the facts it was composed from, and the writer words it from the running-command fact. c16 withheld it (present-tense predicate .90/.91)."
+    }
+   ]
+  },
+  {
+   "id": "s5-silence",
+   "caps": {
+    "maxRequests": 8,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s5.stalled-once",
+     "severity": "soft",
+     "owner": "L3",
+     "text": "After forty silent seconds at most one stalled line is posted.",
+     "check": "flowPosted",
+     "args": {
+      "kind": "stalled",
+      "max": 1
+     }
+    },
+    {
+     "id": "s5.no-command-shown",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The command line is still not in any chat message.",
+     "check": "notShown",
+     "args": {
+      "needles": [
+       "payroll-secret",
+       "npm test"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "s6-answer",
+   "caps": {
+    "maxRequests": 4,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s6.answer",
+     "severity": "hard",
+     "owner": "L2",
+     "text": "The answer is posted and the run ends.",
+     "check": "runEnded"
+    },
+    {
+     "id": "s6.one-answer",
+     "severity": "hard",
+     "owner": "L2",
+     "text": "Exactly one Agent message.",
+     "check": "messageCount",
+     "args": {
+      "role": "assistant",
+      "by": "agent",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s6.own-words",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The answer that reports the run's own command result is posted in the Agent's words, not replaced by the fixed \"not enough evidence\" reply.",
+     "check": "ownWords",
+     "predicted": "fails with the c16 answers: claim_0 not_mentioned (ignored: the command activity is opaque evidence) but present_0 .91 then .96 after the revision -> DRAFT_CHECK_COPY.askUser for \"테스트가 모두 통과했습니다.\""
+    },
+    {
+     "id": "s6.own-ending",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+     "check": "endsInOwnWords",
+     "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+    }
+   ]
+  },
+  {
+   "id": "s7-pointer-advisory",
+   "caps": {
+    "maxRequests": 4,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s7.silent",
+     "severity": "hard",
+     "owner": "L1",
+     "text": "With work placement advisory, nothing is posted when the result needs the owner elsewhere.",
+     "check": "messageCount",
+     "args": {
+      "equals": 0
+     }
+    },
+    {
+     "id": "s7.recorded",
+     "severity": "soft",
+     "owner": "L1",
+     "text": "The placement is still decided and recorded.",
+     "check": "placementRecorded"
+    }
+   ]
+  },
+  {
+   "id": "s8-pointer-on",
+   "caps": {
+    "maxRequests": 6,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s8.pointer",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "With work placement on, exactly one pointer message tells the owner where the result is.",
+     "check": "flowPosted",
+     "args": {
+      "kind": "pointer",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s8.one-message",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "Exactly one new message.",
+     "check": "messageCount",
+     "args": {
+      "equals": 1
+     }
+    }
+   ]
+  },
+  {
+   "id": "s8b-finished-result",
+   "caps": {
+    "maxRequests": 6,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s8b.owner-question-own",
+     "severity": "hard",
+     "owner": "L1",
+     "text": "The owner question about the finished result quotes the answer as the Agent wrote it, never a text the draft check appended.",
+     "check": "quotesOwnAnswer",
+     "args": {
+      "answerStep": "s6-answer",
+      "families": [
+       "work_placement"
+      ]
+     },
+     "predicted": "passes: L1 c16 quotes runOwnAnswerText (the posted answer without the check's appended copy); with the c17 answers nothing is appended to the s6 answer, so the check also needs the request to quote the Agent's sentences."
+    },
+    {
+     "id": "s8b.owner-question-asked",
+     "severity": "soft",
+     "owner": "L1",
+     "text": "For a finished result whose need for the owner code cannot tell, the owner question is asked.",
+     "check": "sentIn",
+     "args": {
+      "families": [
+       "work_placement"
+      ],
+      "needles": []
+     },
+     "predicted": "passes: the attention request has state finished and ownerMustAct false, the one case the placement judge asks."
+    }
+   ]
+  },
+  {
+   "id": "s9-status-remark",
+   "caps": {
+    "maxRequests": 21,
+    "maxEstTokens": 30000
+   },
+   "expect": [
+    {
+     "id": "s9.one-run",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The status remark starts one run only (the record of it is a side judgment, not a second run).",
+     "check": "mainTurns",
+     "args": {
+      "equals": 1
+     }
+    },
+    {
+     "id": "s9.reading",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The remark is kept as a pending reading of the migration plan page; no page is changed.",
+     "check": "readingPending",
+     "args": {
+      "pageId": "ontology:db/pg-plan"
+     }
+    },
+    {
+     "id": "s9.packet",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The turn has the migration plan page: sent now, or already held from earlier in this conversation (nothing already in the conversation is sent again); no A company page is sent.",
+     "check": "packetOrHeld",
+     "args": {
+      "include": [
+       "ontology:db/pg-plan"
+      ],
+      "excludePrefix": [
+       "ontology:quote/"
+      ],
+      "count": "bodies"
+     },
+     "revised": "the user's rule: a page already delivered earlier in the session is not sent again, so holding it satisfies this. v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15).",
+     "predicted": "passes: the plan page is delivered in s3b and held at s9."
+    },
+    {
+     "id": "s9.claim-backed",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "An answer that says it will record (or has recorded) something is only posted when a reading or a page was written in that turn.",
+     "check": "recordClaimBacked",
+     "args": {
+      "claimPattern": "기록해 두|기록했|기록해 둘|저장해 두|적어 두"
+     },
+     "predicted": "fails: the write judgment proposed update_status on P7 (ontology:db/pg-plan, tw_target .99, tw_status done .94) but speech_time_0 past_unspecified .73 < .85 left the time slice unknown; the update branch of judgeTurnWrite does not check the slice (the new-page branch does) and createWikiWriter refuses it as invalid. Nothing tells the Agent or the person."
+    },
+    {
+     "id": "s9.rule-given",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The answering turn is told that EG-Desk, not the Agent, decides what is recorded (the recording rule rides on the turn).",
+     "check": "contextKey",
+     "args": {
+      "key": "egdesk_recording"
+     },
+     "predicted": "passes: the rule rides on turns whose triage decides recording yes (c16: record 1.0). With it the scripted Agent does not promise a record, so v2 s9.claim-backed now measures whether the rule reached the Agent."
+    },
+    {
+     "id": "s9.target-offered",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The write judgment is offered the page the remark is about (the migration plan).",
+     "check": "sentIn",
+     "args": {
+      "families": [
+       "memory_write"
+      ],
+      "needles": [
+       "PostgreSQL 마이그레이션 배포 계획"
+      ]
+     },
+     "predicted": "fails on today's code in the v3 journey, whatever the answers: judgeTurnWrite takes the first 8 candidates, this turn's picks first and then the held pages in delivery order; after the recall step the plan page (held since s3b) is past the eighth. In the v2 journey it is first. The person-level consequence is v1 s9.reading."
+    },
+    {
+     "id": "s9.own-ending",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+     "check": "endsInOwnWords",
+     "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+    }
+   ]
+  },
+  {
+   "id": "s10-browser-task",
+   "caps": {
+    "maxRequests": 12,
+    "maxEstTokens": 10000
+   },
+   "expect": [
+    {
+     "id": "s10.asks-once",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "The browser task asks which business once, and the conversation is open for the reply.",
+     "check": "taskAsked"
+    },
+    {
+     "id": "s10.no-move",
+     "severity": "soft",
+     "owner": "L8",
+     "text": "Nothing is clicked or opened before the person answers.",
+     "check": "navigated",
+     "args": {
+      "urls": []
+     }
+    },
+    {
+     "id": "s10.choices-given",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "When the task needs the person, the Agent is given the choices the page offered (the two businesses), so it can ask a question that can be answered.",
+     "check": "taskChoices",
+     "args": {
+      "min": 2
+     },
+     "predicted": "fails with the c16 answers: page_state content .69 < .70 (checked before next_step, which was needs_user_context .70 < .75) -> uncertain -> escalated with no candidates; the note says tell_user_and_ask_in_chat with candidates []."
+    },
+    {
+     "id": "s10.question-lists-both",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "The question the person gets names both businesses.",
+     "check": "messageMentions",
+     "args": {
+      "needles": [
+       "123-45-67890",
+       "987-65-43210"
+      ]
+     },
+     "predicted": "passes: L8 c16 pauses choice_needed with both businesses built by code, and the Agent names the choices its note lists."
+    },
+    {
+     "id": "s10.own-ending",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+     "check": "endsInOwnWords",
+     "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+    }
+   ]
+  },
+  {
+   "id": "s11-browser-reply",
+   "caps": {
+    "maxRequests": 15,
+    "maxEstTokens": 11000
+   },
+   "expect": [
+    {
+     "id": "s11.in-run",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "The reply goes into the run that asked.",
+     "check": "replyInRun"
+    },
+    {
+     "id": "s11.download",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "The task opens the second business and its invoice download, in that order.",
+     "check": "navigated",
+     "args": {
+      "urls": [
+       "https://portal.example.test/biz/2",
+       "https://portal.example.test/download/2.pdf"
+      ]
+     }
+    },
+    {
+     "id": "s11.report",
+     "severity": "soft",
+     "owner": "L8",
+     "text": "One Agent message reports the result.",
+     "check": "messageCount",
+     "args": {
+      "role": "assistant",
+      "by": "agent",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s11.record",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The finished task is written as a page of this conversation.",
+     "check": "pageWritten",
+     "args": {
+      "scope": "dm:dm-browser",
+      "by": "browser_task"
+     }
+    },
+    {
+     "id": "s11.own-ending",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+     "check": "endsInOwnWords",
+     "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+    }
+   ]
+  }
+ ]
+}

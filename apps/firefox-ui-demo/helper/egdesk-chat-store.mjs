@@ -4,7 +4,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 
-const VERSION = 4
+const VERSION = 5
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_IMPORT_BYTES = 64 * 1024 * 1024
 const TERMINAL_RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
@@ -348,6 +348,17 @@ const V4_UPGRADE = `
 const V4_TABLES = [...V3_TABLES, 'run_project_origins']
 const V4_COLUMNS = { ...V3_COLUMNS, run_project_origins: ['local_conversation_id', 'local_run_id', 'conversation_id', 'run_id', 'private_json'] }
 
+// Scope-only metadata; no draft, consent generation or classifier output.
+const V5_UPGRADE = `
+    CREATE TABLE topic_answer_guards (
+      local_conversation_id TEXT NOT NULL, request_id TEXT NOT NULL, run_id TEXT,
+      PRIMARY KEY(local_conversation_id, request_id), UNIQUE(local_conversation_id, run_id),
+      FOREIGN KEY(local_conversation_id, request_id) REFERENCES requests(local_conversation_id, request_id)
+    );
+`
+const V5_TABLES = [...V4_TABLES, 'topic_answer_guards']
+const V5_COLUMNS = { ...V4_COLUMNS, topic_answer_guards: ['local_conversation_id', 'request_id', 'run_id'] }
+
 // Older builds refuse a newer file (closed, never reset), so the exact data is
 // kept beside it first. VACUUM INTO writes one consistent copy, WAL included,
 // into a new private file; nothing is migrated unless the copy completed.
@@ -366,6 +377,40 @@ function backupVersion(db, filename, version) {
   }
 }
 
+// The deleted conversation's rows also go from every upgrade backup this store kept (backupVersion: <file>.v<n>.bak). The backups stay;
+// only that conversation's rows go, from the tables the backup has, children first, overwritten (secure_delete), and the copy is rewritten
+// without free pages (VACUUM). Owner decision, L2 c18.
+const CONVERSATION_TABLES = ['event_refs', 'topic_answer_guards', 'events', 'messages', 'runs', 'run_project_origins', 'native_runs', 'native_messages', 'imports', 'room_members', 'requests', 'threads']
+const BACKUP_VERSIONS = [1, 2, 3, 4]
+function scrubBackups(filename, clientThreadId) {
+  const out = []
+  for (const version of BACKUP_VERSIONS) {
+    const backup = `${filename}.v${version}.bak`
+    let info
+    try { info = lstatSync(backup) } catch { continue }
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || !isOwnedAndPrivate(backup, info, 0o077)) { out.push({ version, scrubbed: false, reason: 'not_private' }); continue }
+    let copy
+    try {
+      copy = new DatabaseSync(backup)
+      copy.exec('PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;')
+      const present = new Set(copy.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name))
+      const row = present.has('threads') ? copy.prepare('SELECT local_conversation_id FROM threads WHERE client_thread_id=?').get(clientThreadId) : null
+      if (!row) { out.push({ version, scrubbed: true, rows: 0 }); continue }
+      copy.exec('BEGIN IMMEDIATE')
+      let rows = 0
+      try {
+        for (const table of CONVERSATION_TABLES) if (present.has(table)) rows += Number(copy.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(row.local_conversation_id).changes)
+        copy.exec('COMMIT')
+      } catch (error) { try { copy.exec('ROLLBACK') } catch { /* keep the error */ } throw error }
+      // Rewrite the copy without free pages, so nothing of the deleted rows stays in the file (schema and user_version are kept).
+      if (rows) copy.exec('VACUUM')
+      out.push({ version, scrubbed: true, rows })
+    } catch { out.push({ version, scrubbed: false, reason: 'failed' }) }
+    finally { try { copy?.close() } catch { /* ignore */ } }
+  }
+  return out
+}
+
 function initialize(db, filename) {
   db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
   if (String(db.prepare('PRAGMA journal_mode=WAL').get().journal_mode).toLowerCase() !== 'wal') fail('STORE_OPEN_FAILED', 'WAL could not be enabled', 500)
@@ -382,15 +427,15 @@ function initialize(db, filename) {
     return names.every(name => found.has(name))
   })
   if (version === VERSION) {
-    if (!tablesPresent(V4_TABLES) || !columnsPresent(V4_COLUMNS)) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+    if (!tablesPresent(V5_TABLES) || !columnsPresent(V5_COLUMNS)) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
     return
   }
-  if ([1, 2, 3].includes(version)) {
-    if (!tablesPresent(version === 3 ? V3_TABLES : REQUIRED_TABLES) || (version >= 2 && !columnsPresent(version === 3 ? V3_COLUMNS : V2_COLUMNS))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
+  if ([1, 2, 3, 4].includes(version)) {
+    if (!tablesPresent(version === 4 ? V4_TABLES : version === 3 ? V3_TABLES : REQUIRED_TABLES) || (version >= 2 && !columnsPresent(version === 4 ? V4_COLUMNS : version === 3 ? V3_COLUMNS : V2_COLUMNS))) fail('STORE_CORRUPT', 'Chat schema is incomplete; database was not reset', 500)
     backupVersion(db, filename, version)
     db.exec('BEGIN IMMEDIATE')
     try {
-      db.exec(`${version === 1 ? V2_UPGRADE : ''} ${version < 3 ? V3_UPGRADE : ''} ${V4_UPGRADE} PRAGMA user_version=${VERSION};`)
+      db.exec(`${version === 1 ? V2_UPGRADE : ''} ${version < 3 ? V3_UPGRADE : ''} ${version < 4 ? V4_UPGRADE : ''} ${V5_UPGRADE} PRAGMA user_version=${VERSION};`)
       db.exec('COMMIT')
     } catch (error) {
       try { db.exec('ROLLBACK') } catch { /* Preserve original failure. */ }
@@ -404,6 +449,7 @@ function initialize(db, filename) {
     ${V2_UPGRADE}
     ${V3_UPGRADE}
     ${V4_UPGRADE}
+    ${V5_UPGRADE}
     PRAGMA user_version=${VERSION};
     COMMIT;`)
 }
@@ -442,12 +488,13 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     run: db.prepare('SELECT * FROM runs WHERE local_conversation_id=? AND local_run_id=?'),
     request: db.prepare('SELECT * FROM requests WHERE local_conversation_id=? AND request_id=?'),
     // The binding is among a conversation's first events; seq order stops there.
-    binding: db.prepare("SELECT details_json FROM events WHERE local_conversation_id=? AND event='native.thread.bound' ORDER BY seq LIMIT 1"),
+    // the binding of the room's CURRENT native thread (a room continued on another account has an earlier one: L1 c21)
+    binding: db.prepare("SELECT details_json FROM events WHERE local_conversation_id=? AND event='native.thread.bound' AND json_extract(details_json, '$.conversationId')=? ORDER BY seq LIMIT 1"),
     native: db.prepare('SELECT * FROM threads WHERE conversation_id=? LIMIT 2'),
   }
   const publicThread = row => {
     if (!row) return null
-    const binding = row.conversation_id ? q.binding.get(row.local_conversation_id) : null
+    const binding = row.conversation_id ? q.binding.get(row.local_conversation_id, row.conversation_id) : null
     return thread(row, bindingSession(row, binding ? parse(binding.details_json) : null))
   }
   let closed = false
@@ -610,6 +657,38 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     fail('LOCAL_RUN_ID_REQUIRED', 'Checkpoint requires localRunId, native runId, or requestId')
   }
 
+  function verifiedUtterance(store, { clientThreadId, conversationId, agentId, ownerHash, localMessageId, role, seq = null }, maxChars) {
+    ensureOpen(); const row = requireThread(clientThreadId), id = row.local_conversation_id
+    if (!conversationId || row.conversation_id !== conversationId || row.agent_profile_id !== agentId || !ownerHash ||
+        !['user','assistant'].includes(role) || !localMessageId || store.getNativeAudience(conversationId) !== agentId) return null
+    const message = q.message.get(id, localMessageId)
+    if (!message?.request_id) return null
+    const req = q.request.get(id, message.request_id), outcome = req && parse(req.outcome_json)
+    if (!req || !outcome?.accepted || outcome.dispatchStatus !== 'confirmed' || outcome.conversationId !== conversationId ||
+        outcome.accountIdentity?.ownerHash !== ownerHash || outcome.accountIdentity?.status !== 'verified' || !outcome.runId || !outcome.localRunId) return null
+    const native = db.prepare('SELECT run_id FROM native_runs WHERE local_conversation_id=? AND local_run_id=?').get(id, outcome.localRunId)
+    if (native?.run_id !== outcome.runId) return null
+    const m = parse(message.public_json)
+    if (m.role !== role || typeof m.text !== 'string' || !m.text.trim() || m.text.length > maxChars || !m.text.isWellFormed()) return null
+    let event, original
+    if (role === 'user') {
+      if (req.local_message_id !== localMessageId) return null
+      event = q.event.get(id, 'request:' + message.request_id + ':accepted')
+      if (event?.event !== 'message.accepted' || event.local_message_id !== localMessageId || event.ts !== req.accepted_at) return null
+      original = parse(event.message_json)
+    } else {
+      if (message.local_run_id !== outcome.localRunId || m.phase !== 'final_answer' || m.status !== 'complete' || m.completionConfirmed !== true || m.projectionTruncated) return null
+      if (!Number.isSafeInteger(seq) || seq <= 0) return null
+      event = q.eventSeq.get(id, seq)
+      if (!event || event.event !== 'message.completed' || event.local_run_id !== outcome.localRunId || event.run_id !== outcome.runId ||
+          event.request_id !== req.request_id || event.local_message_id !== localMessageId) return null
+      original = parse(event.details_json)
+      if (original.phase !== 'final_answer' || original.status !== 'complete' || original.completionConfirmed !== true || original.projectionTruncated) return null
+    }
+    if ((seq !== null && seq !== event.seq) || original?.role !== role || original.text !== m.text || !Number.isSafeInteger(event.ts) || event.ts < 0) return null
+    return { role, quote: original.text, seq: event.seq, spokenAt: event.ts, requestId: req.request_id, localRunId: outcome.localRunId, runId: outcome.runId }
+  }
+
   // ── Room Agent and members (v3) ──
   const memberOf = row => ({ memberKey: row.member_key, kind: row.kind, profileId: row.profile_id, role: row.role, addedAt: row.added_at, label: row.label })
   const membersOf = localId => db.prepare('SELECT * FROM room_members WHERE local_conversation_id=? ORDER BY position, member_key').all(localId).map(memberOf)
@@ -636,6 +715,33 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
 
   return {
     createConversation(input) { ensureOpen(); return tx(() => create(input)) },
+    // Every local message id of one conversation (memory refers to them as chat-message:<id>); [] when it does not exist.
+    localMessageIds(clientThreadId) {
+      ensureOpen()
+      const row = q.thread.get(identifier(clientThreadId, 'clientThreadId'))
+      return row ? db.prepare('SELECT local_message_id FROM messages WHERE local_conversation_id=? ORDER BY first_seq').all(row.local_conversation_id).map(r => r.local_message_id) : []
+    },
+    // The person deleted this conversation (surface "완전히 삭제"): every row of it goes, in one transaction, children first. Deleted pages
+    // are overwritten (secure_delete) and the WAL is checkpointed and truncated, so the words do not stay in the database files.
+    // Unknown conversation: { deleted: false }. Upgrade backups lose this conversation's rows too (scrubBackups); the backups themselves stay.
+    deleteConversation(clientThreadId) {
+      ensureOpen()
+      const key = identifier(clientThreadId, 'clientThreadId')
+      const row = q.thread.get(key)
+      if (!row) return { deleted: false, rows: 0, backups: scrubBackups(filename, key) } // a repeated delete still scrubs what a backup kept
+      const id = row.local_conversation_id
+      const previous = db.prepare('PRAGMA secure_delete').get().secure_delete
+      db.exec('PRAGMA secure_delete=ON')
+      try {
+        const rows = tx(() => {
+          const n = CONVERSATION_TABLES.reduce((count, table) => count + Number(db.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(id).changes), 0)
+          // L1 c22: the room's account segments go with it (the table exists only after a switch)
+          return n + (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get() ? Number(db.prepare('DELETE FROM room_account_segments WHERE local_conversation_id=?').run(id).changes) : 0)
+        })
+        try { db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() } catch { /* a reader holds the WAL: it is truncated at the next checkpoint */ }
+        return { deleted: true, rows, backups: scrubBackups(filename, key) }
+      } finally { db.exec(`PRAGMA secure_delete=${previous ? 'ON' : 'OFF'}`) }
+    },
     getConversation(clientThreadId) { ensureOpen(); return publicThread(q.thread.get(identifier(clientThreadId, 'clientThreadId'))) },
     // The local conversation bound to one native conversation, or null.
     getConversationByNative(conversationId) {
@@ -643,6 +749,18 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       const rows = q.native.all(identifier(conversationId, 'conversationId'))
       if (rows.length > 1) fail('NATIVE_MAPPING_CONFLICT', 'More than one local conversation claims this native thread', 409)
       return publicThread(rows[0] ?? null)
+    },
+    // Internal point lookup, independent of the mutable selected Agent. One local chat
+    // binds exactly one native history. The event records no source, handle or text.
+    getNativeAudience(conversationId) {
+      ensureOpen()
+      const rows = q.native.all(identifier(conversationId, 'conversationId'))
+      if (rows.length > 1) fail('NATIVE_MAPPING_CONFLICT', 'Ambiguous native audience', 409)
+      const row = rows[0] && q.event.get(rows[0].local_conversation_id, 'native-dm-audience')
+      if (!row) return null
+      const profileId = parse(row.details_json)?.profileId
+      if (row.event !== 'native.audience.reserved' || typeof profileId !== 'string' || !PROFILE_ID.test(profileId)) fail('INVALID_CHAT_RECORD', 'Unverified native audience')
+      return profileId
     },
     listConversations({ cursor = null, limit = 100 } = {}) {
       ensureOpen(); page(0, limit)
@@ -782,6 +900,75 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
         return result.record
       })
     },
+    // Persist eligibility before calling the engine. Only a definite refusal
+    // may remove an unbound marker. An ambiguous reply needs exact correlation.
+    reserveTopicAnswer(clientThreadId, requestId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      db.prepare('INSERT INTO topic_answer_guards(local_conversation_id, request_id) VALUES (?, ?)').run(row.local_conversation_id, identifier(requestId, 'requestId'))
+    },
+    bindTopicAnswer(clientThreadId, requestId, runId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      const id = identifier(runId, 'runId')
+      const changed = db.prepare('UPDATE topic_answer_guards SET run_id=? WHERE local_conversation_id=? AND request_id=? AND (run_id IS NULL OR run_id=?)').run(id, row.local_conversation_id, identifier(requestId, 'requestId'), id)
+      if (changed.changes !== 1) fail('TOPIC_ANSWER_BINDING', 'Scoped answer binding is unavailable', 409)
+    },
+    cancelTopicAnswer(clientThreadId, requestId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      db.prepare('DELETE FROM topic_answer_guards WHERE local_conversation_id=? AND request_id=? AND run_id IS NULL').run(row.local_conversation_id, identifier(requestId, 'requestId'))
+    },
+    pendingTopicAnswer(clientThreadId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      return db.prepare('SELECT request_id FROM topic_answer_guards WHERE local_conversation_id=? AND run_id IS NULL LIMIT 1').get(row.local_conversation_id)?.request_id ?? null
+    },
+    guardedTopicAnswer(clientThreadId, runId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      return !!db.prepare('SELECT 1 FROM topic_answer_guards WHERE local_conversation_id=? AND run_id=?').get(row.local_conversation_id, identifier(runId, 'runId'))
+    },
+    getNativeRunCheckpoint(clientThreadId, runId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      const match = db.prepare('SELECT public_json FROM runs WHERE local_conversation_id=? AND run_id=? LIMIT 1').get(row.local_conversation_id, identifier(runId, 'runId'))
+      return match ? parse(match.public_json) : null
+    },
+    // L1 c21 (the runtime calls this only with its roomAccount flag on): the room continues on another account of the same engine. Its
+    // native thread so far is recorded as an earlier segment (with the account its EG-Desk memory was written under), and the room is
+    // re-pinned to the new account with no native thread yet: the next send starts one there. The table is created on first use.
+    switchRoomAccount({ clientThreadId, engineProfileId, memoryOwnerKey = null }) {
+      ensureOpen()
+      return tx(() => {
+        const row = requireThread(clientThreadId), slot = identifier(engineProfileId, 'engineProfileId')
+        db.exec('CREATE TABLE IF NOT EXISTS room_account_segments (local_conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, conversation_id TEXT, engine_id TEXT, engine_profile_id TEXT, memory_owner_key TEXT, switched_at INTEGER NOT NULL, PRIMARY KEY (local_conversation_id, seq))')
+        const n = db.prepare('SELECT COUNT(*) AS n FROM room_account_segments WHERE local_conversation_id=?').get(row.local_conversation_id).n
+        const first = n ? db.prepare('SELECT memory_owner_key FROM room_account_segments WHERE local_conversation_id=? ORDER BY seq LIMIT 1').get(row.local_conversation_id).memory_owner_key : null
+        const owner = first ?? (typeof memoryOwnerKey === 'string' && memoryOwnerKey ? memoryOwnerKey.slice(0, 512) : null)
+        db.prepare('INSERT INTO room_account_segments VALUES (?, ?, ?, ?, ?, ?, ?)').run(row.local_conversation_id, n + 1, row.conversation_id ?? null, row.engine_id ?? null, row.engine_profile_id ?? null, owner, Date.now())
+        db.prepare('UPDATE threads SET conversation_id=NULL, engine_profile_id=? WHERE local_conversation_id=?').run(slot, row.local_conversation_id)
+        return { clientThreadId: row.client_thread_id, engineProfileId: slot, previous: { conversationId: row.conversation_id ?? null, engineProfileId: row.engine_profile_id ?? null } }
+      })
+    },
+    /** L1 c22: the native threads a room LEFT when it changed accounts, with the engine and account each ran on: [{ conversationId, engineId, engineProfileId }]. */
+    roomSegments(clientThreadId) {
+      ensureOpen()
+      const row = requireThread(clientThreadId)
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get()) return []
+      return db.prepare('SELECT conversation_id, engine_id, engine_profile_id FROM room_account_segments WHERE local_conversation_id=? AND conversation_id IS NOT NULL ORDER BY seq').all(row.local_conversation_id)
+        .map(r => ({ conversationId: r.conversation_id, engineId: r.engine_id ?? null, engineProfileId: r.engine_profile_id ?? null }))
+    },
+    /** L1 c22: a native thread some room left for another account -> { clientThreadId, engineId, engineProfileId } (the account it ran on), else null. */
+    segmentOf(conversationId) {
+      ensureOpen()
+      const id = identifier(conversationId, 'conversationId')
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get()) return null
+      const r = db.prepare('SELECT s.engine_id, s.engine_profile_id, t.client_thread_id FROM room_account_segments s JOIN threads t ON t.local_conversation_id=s.local_conversation_id WHERE s.conversation_id=? ORDER BY s.seq LIMIT 1').get(id)
+      return r ? { clientThreadId: r.client_thread_id, engineId: r.engine_id ?? null, engineProfileId: r.engine_profile_id ?? null } : null
+    },
+    /** The account a room's EG-Desk memory was written under, when the room changed accounts; else null (the current one applies). */
+    roomMemoryOwnerKey(clientThreadId) {
+      ensureOpen()
+      const row = requireThread(clientThreadId)
+      const has = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get()
+      if (!has) return null
+      return db.prepare('SELECT memory_owner_key FROM room_account_segments WHERE local_conversation_id=? ORDER BY seq LIMIT 1').get(row.local_conversation_id)?.memory_owner_key ?? null
+    },
     bindNative(input) { ensureOpen(); shape(input, ['clientThreadId', 'conversationId', 'engineId', 'engineProfileId', 'localRunId', 'runId', 'localMessageId', 'messageId']); return tx(() => bind(requireThread(input.clientThreadId), input)) },
     /**
      * CHAT-01: remember the Agent picked for this room (profileId and the
@@ -878,6 +1065,65 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       ensureOpen(); const row = requireThread(clientThreadId)
       const found = q.message.get(row.local_conversation_id, identifier(localMessageId, 'localMessageId'))
       return found ? parse(found.public_json) : null
+    },
+    // Private point read for an already-consented DM. Public projections/imports are not speech receipts.
+    // Return the original event time and exact delivered text, never the current projection or a work note.
+    speechSource(args) {
+      const rec = verifiedUtterance(this, args, 2048)
+      if (!rec) return null
+      const { role, quote, seq, spokenAt } = rec; return { role, quote, seq, spokenAt }
+    },
+    topicBoundary(clientThreadId) { ensureOpen(); return requireThread(clientThreadId).last_seq },
+    topicHistoryAdjacent(clientThreadId, afterSeq, beforeUserId) {
+      ensureOpen(); const room = requireThread(clientThreadId), id = room.local_conversation_id
+      const current = beforeUserId === null ? { first_seq: room.last_seq + 1 } : q.message.get(id, beforeUserId)
+      if (!current || !Number.isSafeInteger(afterSeq) || afterSeq < 0 || afterSeq >= current.first_seq) return false
+      // A lost reply may leave only the accepted event and a dispatching/unknown request,
+      // but no projected run. Neither a missing run nor a resume can prove a complete slice.
+      // Only a definite pre-start refusal or a durably failed/interrupted run is skippable.
+      const gap = db.prepare(`SELECT 1 FROM events e LEFT JOIN requests q ON q.local_conversation_id=e.local_conversation_id AND q.request_id=e.request_id
+        WHERE e.local_conversation_id=? AND e.event='message.accepted' AND e.seq>? AND e.seq<? AND NOT (
+          (COALESCE(json_extract(q.outcome_json,'$.dispatchStatus'),'')='rejected' AND json_extract(q.outcome_json,'$.accepted') IS 0) OR
+          (COALESCE(json_extract(q.outcome_json,'$.dispatchStatus'),'')='confirmed' AND EXISTS (SELECT 1 FROM events t WHERE t.local_conversation_id=e.local_conversation_id
+            AND t.request_id=e.request_id AND t.run_id=json_extract(q.outcome_json,'$.runId') AND t.local_run_id=json_extract(q.outcome_json,'$.localRunId')
+            AND t.event='run.completed' AND t.seq>e.seq AND t.seq<? AND json_extract(t.details_json,'$.status') IN ('failed','interrupted')))) LIMIT 1`)
+        .get(id, afterSeq, current.first_seq, current.first_seq)
+      return !gap && !db.prepare(`SELECT 1 FROM runs r WHERE r.local_conversation_id=? AND r.first_seq>? AND r.first_seq<?
+        AND COALESCE(json_extract(r.public_json,'$.status'),'unknown') NOT IN ('failed','interrupted','cancelled') AND NOT EXISTS(
+          SELECT 1 FROM events e WHERE e.local_conversation_id=r.local_conversation_id AND e.event='message.accepted' AND e.request_id=r.request_id AND e.seq<=?) LIMIT 1`)
+        .get(id, afterSeq, current.first_seq, afterSeq)
+    },
+    // A pair is one accepted request and its ONE live, confirmed final in a durably
+    // completed native run. A terminal snapshot, imported row or commentary alone is not proof.
+    topicPairSource({ clientThreadId, conversationId, agentId, ownerHash, user, assistant }) {
+      ensureOpen()
+      const scope = { clientThreadId, conversationId, agentId, ownerHash }
+      if (!user?.localMessageId || !assistant?.localMessageId || !Number.isSafeInteger(assistant.seq)) return null
+      const u = verifiedUtterance(this, { ...scope, localMessageId: user.localMessageId, role: 'user', seq: user.seq ?? null }, 20000)
+      const a = u && verifiedUtterance(this, { ...scope, localMessageId: assistant.localMessageId, role: 'assistant', seq: assistant.seq }, 20000)
+      if (!a || a.requestId !== u.requestId || a.localRunId !== u.localRunId || a.runId !== u.runId || a.seq <= u.seq) return null
+      const id = requireThread(clientThreadId).local_conversation_id, r = q.run.get(id, a.localRunId), run = r && parse(r.public_json)
+      if (!run || run.status !== 'completed' || run.engine?.id !== 'codex' || run.runId !== a.runId || run.requestId !== u.requestId ||
+          run.conversationId !== conversationId || run.profileBinding?.profileId !== agentId || run.board || run.stateless || run.truncated || run.error) return null
+      const finals = run.messages?.filter(m => m.role === 'assistant' && m.phase === 'final_answer')
+      if (finals?.length !== 1 || finals[0].localMessageId !== assistant.localMessageId || finals[0].completionConfirmed !== true || finals[0].text !== a.quote) return null
+      const terminal = db.prepare("SELECT seq,json_extract(details_json,'$.status') AS status FROM events WHERE local_conversation_id=? AND event='run.completed' AND local_run_id=? AND run_id=? AND request_id=? ORDER BY seq DESC LIMIT 1").get(id, u.localRunId, a.runId, u.requestId)
+      return terminal?.status === 'completed' && terminal.seq > a.seq ? { user: u, assistant: a } : null
+    },
+    // Exact predecessor of the accepted request, not the last assistant row anywhere in the room.
+    // No fallback across a user message, interrupted reply or unresolved import.
+    previousPublicAnswerRun(clientThreadId, beforeMessageId) {
+      ensureOpen(); const row = requireThread(clientThreadId)
+      let beforeSeq = Number.MAX_SAFE_INTEGER
+      if (beforeMessageId !== null) {
+        const current = q.message.get(row.local_conversation_id, beforeMessageId)
+        if (!current || parse(current.public_json)?.role !== 'user') return null
+        beforeSeq = current.last_seq
+      }
+      const prev = db.prepare('SELECT local_run_id, public_json FROM messages WHERE local_conversation_id=? AND last_seq<? ORDER BY last_seq DESC LIMIT 1').get(row.local_conversation_id, beforeSeq)
+      if (!prev) return null
+      const m = parse(prev.public_json)
+      return m.role === 'assistant' && m.phase === 'final_answer' && ['complete','completed','final'].includes(m.status) ? prev.local_run_id : null
     },
     getAcceptedText(clientThreadId, requestId) {
       ensureOpen(); const row = requireThread(clientThreadId)

@@ -58,7 +58,7 @@ test('buildHash is deterministic, ignores line endings and unloaded files, and c
 
 test('the real bridge build covers its helper modules, not tests or modules it never loads', () => {
   const names = bridgeSourceFiles().map(file => file.name)
-  for (const name of ['codex-bridge-server.mjs', 'codex-bridge-http.mjs', 'egdesk-bridge-build.mjs', 'codex-chat-runtime.mjs', 'terminal-pty-worker.mjs']) assert.ok(names.includes(name), name)
+  for (const name of ['codex-bridge-server.mjs', 'codex-bridge-http.mjs', 'egdesk-bridge-build.mjs', 'codex-chat-runtime.mjs', 'egdesk-session-topic.mjs', 'terminal-pty-worker.mjs']) assert.ok(names.includes(name), name)
   assert.ok(!names.some(name => name.endsWith('.test.mjs') || name.startsWith('../') || name.startsWith('node_modules/')))
   // The workflow runtime loads the task graph modules; the portable routes (RT-03) load the bundle library.
   for (const name of ['egdesk-workflow-runtime.mjs', 'egdesk-event-bus.mjs', 'egdesk-task-store.mjs']) assert.ok(names.includes(name), name)

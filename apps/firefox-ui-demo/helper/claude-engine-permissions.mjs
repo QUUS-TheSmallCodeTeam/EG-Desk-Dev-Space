@@ -269,6 +269,9 @@ export function routePermissionRequest(request, { threadId, turnId = null, rpcId
     ...(reason ? { reason } : {}),
     ...(kind === 'commandExecution' ? { command: typeof input.command === 'string' ? input.command : null, cwd: typeof cwd === 'string' ? cwd : null } : {}),
     availableDecisions: canGrantSession ? ['accept', 'acceptForSession', 'decline', 'cancel'] : ['accept', 'decline', 'cancel'],
+    // The rule contents the session choice would add (null = the whole tool), so the runtime's command gate can see what the CLI
+    // would later run without asking. In memory only: never in a notification, never persisted.
+    ...(canGrantSession && kind === 'commandExecution' ? { sessionRules: sessionUpdates(approval).flatMap(update => update.rules.map(rule => rule.ruleContent ?? null)) } : {}),
   }
   return {
     route: 'approval',

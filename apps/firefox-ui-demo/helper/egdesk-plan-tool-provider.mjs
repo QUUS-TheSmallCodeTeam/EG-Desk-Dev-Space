@@ -99,7 +99,7 @@ export function createPlanToolProvider({ plans, schemaReady = () => true } = {})
   return {
     providerId: PLAN_PROVIDER_ID,
     runtime: null,
-    specs() { return schemaReady() ? PLAN_TOOL_SPECS : [] },
+    specs(route) { return schemaReady(route) ? PLAN_TOOL_SPECS : [] },
     dispatch(run, event) {
       // The same native call delivered twice proposes once.
       const key = `${run?.answerId ?? ''}/${event?.callId ?? ''}`

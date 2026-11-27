@@ -129,8 +129,9 @@ export async function openTaskSourceRegistry({ directory = null, store = null, l
     }
   }
 
-  const currentOwner = () => {
-    const owner = getOwnerKey()
+  // L1 c25 (U11): getOwnerKey(boardId) -- a Board that belongs to a plan of a room on an Agent profile answers that room's account; others, the default
+  const currentOwner = boardId => {
+    const owner = getOwnerKey(boardId)
     if (typeof owner !== 'string' || !owner) throw nativeTaskError('TASK_AUTHORITY', 'Sign in to prepare Agent tasks', 403)
     return owner
   }
@@ -139,7 +140,7 @@ export async function openTaskSourceRegistry({ directory = null, store = null, l
     if (typeof boardId !== 'string' || boardId.length > 256 || !BOARD_ID.test(boardId)) throw nativeTaskError('TASK_SOURCE_INPUT', 'boardId must be an opaque ID', 400)
     if (typeof message !== 'string' || !message.trim() || message.length > MAX_TEXT) throw nativeTaskError('TASK_SOURCE_INPUT', `message must be 1-${MAX_TEXT} characters`, 400)
     try { validateChatCwd({ cwd }) } catch { throw nativeTaskError('TASK_SOURCE_INPUT', 'cwd must be an absolute local path', 400) }
-    const owner = currentOwner()
+    const owner = currentOwner(boardId)
     const dropped = []
     let chars = totalChars
     for (const [sourceRef, record] of sources) {
@@ -166,7 +167,7 @@ export async function openTaskSourceRegistry({ directory = null, store = null, l
   // Side-effect-free: verifies Board and owner, returns only adapter INPUT fields.
   function resolve(context = {}) {
     const source = sources.get(context?.binding?.sourceRef)
-    if (!source || source.boardId !== context.boardId || source.owner !== currentOwner()) {
+    if (!source || source.boardId !== context.boardId || source.owner !== currentOwner(context.boardId)) {
       throw nativeTaskError('TASK_INPUT_UNRESOLVED', 'Task input is unavailable for this Board or account', 403)
     }
     return { message: source.message, ...(source.cwd === undefined ? {} : { cwd: source.cwd }) }
@@ -184,7 +185,7 @@ export async function openTaskSourceRegistry({ directory = null, store = null, l
       throw nativeTaskError('TASK_GATE_ANSWER', `The answer must be 1-${MAX_GATE_ANSWER_CHARS} characters`, 400)
     }
     if (looksSecret(text)) throw nativeTaskError('TASK_GATE_ANSWER_PRIVATE', 'The answer looks like a password, key or personal number and was not kept', 400)
-    const owner = currentOwner()
+    const owner = currentOwner(boardId)
     const dropped = [...answers.keys()].slice(0, Math.max(0, answers.size - maxAnswers + 1))
     const textRef = `task-answer-${makeId()}`
     const record = { graphId, taskId, gateId, boardId, owner, text }
@@ -205,7 +206,7 @@ export async function openTaskSourceRegistry({ directory = null, store = null, l
   function answerText({ textRef, graphId, taskId, gateId, boardId } = {}) {
     const answer = answers.get(textRef)
     if (!answer || answer.graphId !== graphId || answer.taskId !== taskId || answer.gateId !== gateId ||
-        answer.boardId !== boardId || answer.owner !== currentOwner()) {
+        answer.boardId !== boardId || answer.owner !== currentOwner(boardId)) {
       throw nativeTaskError('TASK_INPUT_UNRESOLVED', 'The answer to this question is unavailable for this Board or account', 403)
     }
     return answer.text
@@ -219,7 +220,8 @@ export async function openTaskSourceRegistry({ directory = null, store = null, l
 }
 
 /** POST /task-sources {boardId, message, cwd?} -> 201 {sourceRef}. Loopback + Origin guarded, signed-in only. */
-export function createTaskSourceHttpHandler({ sources, ensureAuth, port = 39218 }) {
+// hintsOfBoard(boardId) (L1 c26): the room a plan's Board belongs to, so its account is the one checked; undefined = the default sign-in, as before.
+export function createTaskSourceHttpHandler({ sources, ensureAuth, port = 39218, hintsOfBoard = () => undefined }) {
   if (typeof ensureAuth !== 'function') throw new TypeError('ensureAuth is required')
   return async (req, res, parsedUrl = null) => {
     let url
@@ -234,7 +236,7 @@ export function createTaskSourceHttpHandler({ sources, ensureAuth, port = 39218 
       if (req.method !== 'POST') throw nativeTaskError('TASK_ROUTE_NOT_FOUND', 'Use POST', 405)
       const body = await readJsonBody(req, { maxBytes: 128 * 1024 })
       if (Object.keys(body).some(key => !['boardId', 'message', 'cwd'].includes(key))) throw nativeTaskError('TASK_SOURCE_INPUT', 'Invalid task source fields', 400)
-      await ensureAuth()
+      await ensureAuth(hintsOfBoard(body.boardId))
       sendJson(res, 201, await sources.register(body))
     } catch (error) {
       const status = Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599 ? error.httpStatus : 500

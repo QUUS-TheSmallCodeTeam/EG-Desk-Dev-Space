@@ -1,0 +1,154 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { checkDraft } from './egdesk-draft-check.mjs'
+
+// The draft check's second way of asking (design 'predicates'): per sentence its own block (the sentence and the evidence code relates
+// to it, quoted with time tags) and two yes/no questions; code combines. The default ('choice') is unchanged. Mock clients only.
+// The s1 material is the public synthetic wiki of the all-on journey (the evidence items as the product built them on 2026-11-24).
+const S1_EVIDENCE = [
+  { id: 'a-v1', kind: 'document', time: 'past', status: 'unknown', source: 'document', text: 'A사 견적서 v1 발송 11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.' },
+  { id: 'a-v2', kind: 'document', time: 'planned', status: 'unknown', source: 'document', text: 'A사 견적서 v2 수정 계획 단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.' },
+  { id: 'pg', kind: 'document', time: 'present', text: 'PostgreSQL 헬스체크 3종 체크리스트' },
+  { id: 'tool1', kind: 'tool', opaque: true },
+]
+const S1_DRAFT = 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.'
+function client(answer) {
+  const requests = []
+  return { requests, async decide(request) { requests.push(request); const answers = {}; for (const q of request.questions) answers[q.name] = answer(q, request); return { answers, usage: { inputTokens: 10 } } } }
+}
+const p = probability => ({ type: 'predicate', probability })
+
+test('default design is the predicates (cycle 18); the choice stays selectable; the predicate design quotes the evidence once and each sentence on its own', async () => {
+  const byDefault = client(q => p(q.name.startsWith('sup_') ? 0.95 : 0.04))
+  await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE.filter(e => !e.opaque), mode: 'on', client: byDefault })
+  assert.deepEqual(byDefault.requests[0].questions.map(q => [q.name, q.type]), [['sup_0', 'predicate'], ['tense_0', 'predicate']])
+  const choice = client(q => (q.type === 'choice' ? { type: 'choice', choice: 'supported', confidence: 0.9, probabilities: [{ value: 'supported', probability: 0.95 }, { value: 'insufficient', probability: 0.03 }] } : p(0.02)))
+  await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE.filter(e => !e.opaque), mode: 'on', client: choice, design: 'choice' })
+  assert.deepEqual(choice.requests[0].questions.map(q => [q.name, q.type]), [['claim_0', 'choice'], ['present_0', 'predicate']])
+  const pred = client(q => p(q.name.startsWith('sup_') ? 0.95 : 0.04))
+  const out = await checkDraft({ draft: `${S1_DRAFT}\n담당자는 김 대리입니다.`, evidence: S1_EVIDENCE, mode: 'on', client: pred, design: 'predicates' })
+  const request = pred.requests[0]
+  assert.deepEqual(request.questions.map(q => [q.name, q.type]), [['sup_0', 'predicate'], ['tense_0', 'predicate'], ['sup_1', 'predicate'], ['tense_1', 'predicate']])
+  assert.match(request.questions[0].instructions, /^Does the evidence say what sentence S1 says/); assert.equal(request.questions[1].instructions, 'Does sentence S1 say that something is done or true now that the evidence records only as planned or only as past?', 'the measured wording (a c24 rewording lost the w-disk-now guard and was reverted)')
+  const blocks = request.input.map(row => row.content)
+  assert.equal(blocks.length, 4, 'the rules, the evidence once, then one block per sentence')
+  assert.match(blocks[1], /^Evidence:\n\[E1 time=past status=unknown\]\n"""\nA사 견적서 v1 발송 11월 6일/); assert.match(blocks[1], /\[E2 time=planned status=unknown\]\n"""\nA사 견적서 v2 수정 계획/)
+  assert.match(blocks[1], /\[E3 time=present\]\n"""\nPostgreSQL/); assert.doesNotMatch(blocks[1], /content not available/, 'a content-free reference is not quoted')
+  assert.deepEqual(blocks.slice(2), ['Sentence S1:\n"""\nA사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.\n"""', 'Sentence S2:\n"""\n담당자는 김 대리입니다.\n"""'])
+  assert.equal(out.outcome, 'passed'); assert.equal(out.calibration.design, 'predicates')
+  assert.deepEqual(out.calibration.judgments.map(j => [j.q, j.would]), [['claim_supported', 'accept'], ['claim_tense', 'accept'], ['claim_supported', 'accept'], ['claim_tense', 'accept']])
+})
+
+test('code combines: unverified needs a confident no on a concrete sentence and no content-free reference; a tense yes is a finding; the middle settles nothing', async () => {
+  const run = async (sup, tense, { evidence = S1_EVIDENCE.filter(e => !e.opaque), draft = S1_DRAFT } = {}) => {
+    const c = client(q => p(q.name.startsWith('sup_') ? sup : tense))
+    const out = await checkDraft({ draft, evidence, mode: 'advisory', client: c, design: 'predicates' })
+    return out.findings.map(f => f.kind)
+  }
+  assert.deepEqual(await run(0.95, 0.05), [])
+  assert.deepEqual(await run(0.1, 0.05), ['unverified'])
+  assert.deepEqual(await run(0.31, 0.05), [], 'not confidently unsupported: nothing concluded')
+  assert.deepEqual(await run(0.1, 0.05, { evidence: S1_EVIDENCE }), [], 'a content-free reference may hold it')
+  assert.deepEqual(await run(0.1, 0.05, { draft: '곧 정리해서 알려 드릴게요.' }), [], 'nothing concrete to verify')
+  assert.deepEqual(await run(0.95, 0.9), ['present_tense'])
+  // a failed or missing answer settles nothing
+  const broken = client(() => null)
+  const out = await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE, mode: 'on', client: broken, design: 'predicates' })
+  assert.deepEqual([out.outcome, out.text], ['passed', S1_DRAFT])
+})
+
+test('the s1 answer: with sound answers on the predicate design it is posted as written; with the real choice answers of 2026-11-24 it was replaced', async () => {
+  const sound = client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.04))
+  const posted = await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE, mode: 'on', client: sound, design: 'predicates', revise: async () => assert.fail('no revision') })
+  assert.deepEqual([posted.outcome, posted.text], ['passed', S1_DRAFT])
+  // the real answers to the choice body: claim_0 insufficient (.69 then .76), present_0 .97 then .96
+  const real = [{ claim_0: { type: 'choice', choice: 'insufficient', confidence: 0.69, probabilities: [{ value: 'insufficient', probability: 0.77 }, { value: 'supported', probability: 0.2 }] }, present_0: p(0.97) },
+    { claim_0: { type: 'choice', choice: 'insufficient', confidence: 0.76, probabilities: [{ value: 'insufficient', probability: 0.82 }, { value: 'supported', probability: 0.15 }] }, present_0: p(0.96) }]
+  let n = 0
+  const replay = { async decide() { return { answers: real[n++], usage: null } } }
+  const blocked = await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE, mode: 'on', client: replay, design: 'choice', revise: async () => '앞에서 확인한 내용 기준으로, A사 견적은 요청을 받은 뒤 첫 견적서를 보냈고 수정본은 팀장 승인 뒤 보낼 예정입니다.' })
+  // The present predicate flagged a correctly worded plan; since c19 the person sees the model's own rewrite (never a fixed sentence). The
+  // re-check judges only concrete sentences, and the rewrite has none ("A사" alone is not a concrete detail), so it is not asked again.
+  assert.deepEqual([blocked.outcome, blocked.calls, n, blocked.findings.map(f => f.kind)], ['revised', 1, 1, ['present_tense']])
+  assert.match(blocked.text, /^앞에서 확인한 내용 기준으로/)
+})
+
+test('concreteOnly (heartbeat messages, composed from facts of the present): a sentence without a concrete detail is not sent; none left, no request', async () => {
+  const c = client(() => p(0.5))
+  const facts = [{ id: 'now', kind: 'run_state', time: 'present', text: '10 seconds have passed. The assistant is running a command: `npm test`.' }]
+  const none = await checkDraft({ draft: '확인하는 데 시간이 조금 걸리고 있어요. 곧 이어서 말씀드릴게요.', evidence: facts, mode: 'on', client: c, concreteOnly: true })
+  assert.deepEqual([none.outcome, c.requests.length], ['unchecked', 0])
+  const some = await checkDraft({ draft: '`npm test`를 10초째 돌리고 있어요. 곧 이어서 말씀드릴게요.', evidence: facts, mode: 'on', client: c, concreteOnly: true, design: 'predicates' })
+  assert.equal(c.requests.length, 1); assert.deepEqual(c.requests[0].questions.map(q => q.name), ['sup_0', 'tense_0'])
+  assert.notEqual(some.outcome, undefined)
+  const all = client(() => p(0.5))
+  await checkDraft({ draft: '확인하는 데 시간이 조금 걸리고 있어요.', evidence: facts, mode: 'on', client: all, design: 'choice' })
+  assert.equal(all.requests.length, 1, 'without concreteOnly the plain sentence is still asked about (answers, unchanged)')
+})
+
+// c26 (L2 c22 finding, Main HIGH): with turn memory attached the check had the pages AND one opaque reference for the memory key, and an unsupported sentence is ignored while any
+// evidence is opaque: "벤치마크에서 쓰기 지연이 40% 줄었습니다" against a page saying 18% was posted at judge .03. The reference is gone where the pages are evidence; what the
+// checker really cannot read (a guarded page, a page cut for the check, evidence the gate withheld) still keeps the rule off, so a correct sentence is never removed for it.
+const PAGE = { id: 'mem1', kind: 'memory', time: 'past', status: 'unknown', source: 'document', text: '쓰기 지연 벤치마크\n벤치마크 결과 쓰기 지연이 18% 줄었다. 읽기 지연은 변하지 않았다.' }
+test('memory pages as readable evidence: 40% against a page saying 18% is caught; the correct 18% sentence passes', async () => {
+  const wrong = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 40% 줄었습니다.', evidence: [PAGE], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
+  assert.ok(wrong.findings.some(f => f.kind === 'unverified'), 'unsupported with readable evidence'); assert.notEqual(wrong.text, '벤치마크에서 쓰기 지연이 40% 줄었습니다.')
+  const right = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 18% 줄었습니다.', evidence: [PAGE], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.04)) })
+  assert.deepEqual([right.findings.length, right.text], [0, '벤치마크에서 쓰기 지연이 18% 줄었습니다.'])
+})
+test('what the checker cannot read keeps the rule off: an opaque item, a page cut for the check, evidence the gate withheld (an item the bound left out does not: c28)', async () => {
+  const wrongSup = () => client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)), draft = '벤치마크에서 쓰기 지연이 40% 줄었습니다.'
+  const opaque = await checkDraft({ draft, evidence: [PAGE, { id: 'mem2', kind: 'context', time: 'past', source: 'memory', opaque: true }], mode: 'on', client: wrongSup() })
+  assert.equal(opaque.findings.filter(f => f.kind === 'unverified').length, 0, 'a guarded page the checker cannot read')
+  const long = { ...PAGE, text: `${PAGE.text}\n${'부록 '.repeat(400)}` } // longer than the check's per-item bound: the tail is not seen
+  const cut = await checkDraft({ draft, evidence: [long], mode: 'on', client: wrongSup() })
+  assert.equal(cut.findings.filter(f => f.kind === 'unverified').length, 0, 'a page cut for the check')
+  const withheld = await checkDraft({ draft, evidence: [PAGE], mode: 'on', client: wrongSup(), egress: { allows: () => true, filterEvidence: items => items.filter(i => i.kind !== 'memory') } })
+  assert.equal(withheld.findings.filter(f => f.kind === 'unverified').length, 0, 'memory the run\'s gate keeps out of the check: the model had it, the checker may not')
+  const readable = await checkDraft({ draft, evidence: [PAGE], mode: 'on', client: wrongSup(), egress: { allows: () => true, filterEvidence: items => items } })
+  assert.ok(readable.findings.some(f => f.kind === 'unverified'), 'the same page where the gate allows it: caught')
+})
+
+// c28 (L2 c24, real v8 run, a SAFETY defect): s13's false "PostgreSQL 전환 배포를 완료했습니다." was posted as written. The check saw the plan page (planned, "배포 전이다"), the judge said sup 0.00 and
+// tense .01, but the evidence had more items than the bound and the c26 rule treated the one that did not fit as `cut`, which switched the unsupported rule off. The items below are the s13/s14
+// evidence of the all-on journey (the synthetic wiki; eleven records for a bound of eight), in the order the product hands them over.
+const PG = (id, time, status, text) => ({ id, kind: 'memory', time, status, source: 'document', text })
+const PLAN = PG('mem1', 'planned', 'plan', 'PostgreSQL 마이그레이션 배포 계획\n12월 첫째 주에 SQLite에서 PostgreSQL로 전환 배포한다. 아직 배포 전이다.')
+const OTHER = Array.from({ length: 10 }, (_, i) => PG(`mem${i + 2}`, i % 3 === 0 ? 'past' : 'present', 'done', `${['견적서 v1 발송 기록', '헬스체크 3종 체크리스트', '롤백 절차 문서', '알림 채널 설정', '캐시 비우기 순서'][i % 5]} ${i}\n${['A사 단가 12,800원', '디스크 사용률 점검', '30분 안에 되돌린다', '슬랙 채널 연결', '배포 직후 확인'][i % 5]} (${i}).`))
+const sentence = new Map([['complete', 'PostgreSQL 전환 배포를 완료했습니다.'], ['plan', '12월 첫째 주에 배포할 예정입니다.']])
+const evidenceHeads = request => request.input.find(row => /^Evidence:/.test(row.content)).content.split('\n').filter(l => l.startsWith('[E'))
+test('s13: a completion claim the plan page contradicts is caught although the evidence has more items than the bound (the over-the-bound item no longer excuses it)', async () => {
+  const evidence = [PLAN, ...OTHER] // 11 items, the plan page among the first eight
+  const c = client(q => p(q.name.startsWith('sup_') ? 0 : 0.01)) // the real v8 answers: sup_0 0.00, tense_0 .01
+  const out = await checkDraft({ draft: sentence.get('complete'), evidence, mode: 'on', client: c })
+  assert.ok(out.findings.some(f => f.kind === 'unverified'), 'unsupported by items the judge saw: a finding'); assert.notEqual(out.text, sentence.get('complete'))
+  assert.deepEqual([out.stats.items, out.stats.leftOut, out.stats.cut], [8, 3, 0], 'the counts are in the result')
+  assert.equal(c.requests[0].input.find(r => /^Evidence:/.test(r.content)).content.includes('아직 배포 전이다'), true, 'the judge saw the plan page')
+})
+test('s14: the plan page beyond the bound is kept because it is related to the draft; a correct plan sentence passes', async () => {
+  const evidence = [...OTHER, PLAN] // the plan page is the eleventh item: first-eight-by-position would drop it
+  const c = client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.02))
+  const out = await checkDraft({ draft: sentence.get('plan'), evidence, mode: 'on', client: c })
+  const heads = evidenceHeads(c.requests[0]); assert.equal(heads.length, 8)
+  assert.ok(c.requests[0].input.find(r => /^Evidence:/.test(r.content)).content.includes('12월 첫째 주에 SQLite에서 PostgreSQL로 전환 배포한다'), 'ranked in: the related record')
+  assert.deepEqual([out.findings.length, out.text], [0, sentence.get('plan')]); assert.equal(out.stats.leftOut, 3)
+})
+test('with no more items than the bound nothing is ranked: the list is the product\'s own order, byte for byte', async () => {
+  const evidence = [...OTHER.slice(0, 7), PLAN]
+  const c = client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.02))
+  await checkDraft({ draft: sentence.get('complete'), evidence, mode: 'on', client: c })
+  const body = c.requests[0].input.find(r => /^Evidence:/.test(r.content)).content
+  assert.deepEqual(evidence.map(e => body.indexOf(e.text.split('\n')[0])).every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1])), true, 'all eight, in order')
+})
+test('the 40%/18% case with memory pages beyond the bound: the related page is kept and the wrong figure is caught; the correct long page sentence still passes (cut text excuses)', async () => {
+  const bench = PG('mem11', 'past', 'unknown', '쓰기 지연 벤치마크\n벤치마크 결과 쓰기 지연이 18% 줄었다. 읽기 지연은 변하지 않았다.')
+  const wrong = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 40% 줄었습니다.', evidence: [...OTHER, bench], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
+  assert.ok(wrong.findings.some(f => f.kind === 'unverified'), '40% against the page that says 18%')
+  const long = { ...bench, text: `${bench.text}\n${'부록 '.repeat(400)}` }
+  const right = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 18% 줄었습니다.', evidence: [...OTHER, long], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
+  assert.equal(right.findings.filter(f => f.kind === 'unverified').length, 0, 'a page cut for the check may hold the figure: not called unsupported')
+})
+test('what the record says: evidence counts (items, opaque, cut, leftOut) are in the result stats and the calibration row accepts them', async () => {
+  const out = await checkDraft({ draft: sentence.get('plan'), evidence: [PLAN, ...OTHER], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.02)) })
+  assert.deepEqual(out.stats, { sentences: 1, terms: 0, items: 8, opaque: 0, cut: 0, leftOut: 3 })
+})

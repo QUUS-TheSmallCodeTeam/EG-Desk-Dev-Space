@@ -429,15 +429,15 @@ test('computer calls seen only in native history are counted without a time or a
   for (const hidden of ['HISTORY_ARGUMENT', 'HISTORY_IMAGE']) assert.ok(!JSON.stringify(state).includes(hidden), hidden)
 })
 
-test('run.started names the computer-control policy of an ordinary Codex run only when the runtime has the setting', async () => {
+test('run.started and snapshots report the applied policy of an owned ordinary Codex run only when configured', async () => {
   const policyOf = h => h.events.filter(event => event.event === 'run.started').map(event => event.details.computerControl)
   for (const policy of ['inherit', 'off']) {
     const h = runtime({ policy })
     const run = await h.chat.send({ message: 'Hi', requestId: 'r-1' })
     assert.deepEqual(policyOf(h), [{ policy }])
     assert.deepEqual(Object.keys(h.events.find(event => event.event === 'run.started').details), ['status', 'computerControl'])
-    // Only details change: the run itself carries no new field.
-    assert.equal(Object.hasOwn(h.chat.snapshot().runs[0], 'computerControl'), false)
+    // A new subscriber can read the same applied policy from a snapshot.
+    assert.deepEqual(h.chat.snapshot().runs[0].computerControl, { policy })
     await h.finish(run)
   }
   // The bridge's saved setting counts as having the setting; a change applies to the next run.
@@ -448,18 +448,38 @@ test('run.started names the computer-control policy of an ordinary Codex run onl
   h.chat.setComputerControlPolicy('off')
   await h.chat.send({ message: 'Again', requestId: 'r-2', conversationId: first.conversationId })
   assert.deepEqual(policyOf(h), [{ policy: 'inherit' }, { policy: 'off' }])
+  assert.deepEqual(h.chat.snapshot().runs.map(run => run.computerControl), [{ policy: 'inherit' }, { policy: 'off' }])
   // Without the setting run.started keeps its earlier shape.
   const plain = runtime()
   await plain.chat.send({ message: 'Hi', requestId: 'r-1' })
   assert.deepEqual(plain.events.find(event => event.event === 'run.started').details, { status: 'inProgress' })
-  // Bounded QA threads never get the policy (computer control is off there regardless).
-  const qa = runtime({ policy: 'inherit', custom: async (method, params) => {
-    if (method === 'thread/start') return { thread: { id: 'qa-thread' }, cwd: '/work', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
-    if (method === 'mcpServerStatus/list' && params.threadId) return { data: [], nextCursor: null }
-    if (method === 'experimentalFeature/list') return { data: ['browser_use', 'browser_use_external', 'computer_use'].map(name => ({ name, enabled: false })), nextCursor: null }
-  } })
-  await qa.chat.send({ message: 'Read', requestId: 'qa-1', executionPolicy: { mode: 'readOnlyQa' } })
-  assert.equal(Object.hasOwn(qa.events.find(event => event.event === 'run.started').details, 'computerControl'), false)
+  assert.equal(Object.hasOwn(plain.chat.snapshot().runs[0], 'computerControl'), false)
+})
+
+test('bounded run events and snapshots do not inherit the ordinary Codex setting', async () => {
+  for (const mode of ['readOnlyQa', 'browserBounded', 'fixtureBrowserQa']) {
+    const qa = runtime({ policy: 'inherit', custom: async (method, params) => {
+      if (method === 'thread/start') return { thread: { id: 'qa-thread' }, cwd: '/work', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      if (method === 'mcpServerStatus/list' && params.threadId) return { data: [], nextCursor: null }
+      if (method === 'experimentalFeature/list') return { data: ['browser_use', 'browser_use_external', 'computer_use'].map(name => ({ name, enabled: false })), nextCursor: null }
+    } })
+    const run = await qa.chat.send({ message: 'Read', requestId: 'qa-1', executionPolicy: { mode } })
+    assert.equal(run.executionPolicy.mode, mode)
+    assert.equal(Object.hasOwn(qa.events.find(event => event.event === 'run.started').details, 'computerControl'), false, mode)
+    assert.equal(Object.hasOwn(qa.chat.snapshot().runs[0], 'computerControl'), false, mode)
+  }
+})
+
+test('a native history-only turn and unowned live notifications do not inherit the current setting', async () => {
+  const h = runtime({ policy: 'off', custom: async method => method === 'thread/resume' ? {
+    thread: { id: 'history-thread', turns: [{ id: 'historical', status: 'completed', items: [] }] }, cwd: '/work',
+  } : undefined })
+  const resumed = await h.chat.resume({ conversationId: 'history-thread' })
+  assert.deepEqual(resumed.runs.map(run => [run.runId, Object.hasOwn(run, 'computerControl')]), [['historical', false]])
+  await h.chat.handleNotification({ method: 'turn/started', params: { threadId: 'history-thread', turn: { id: 'unowned', status: 'inProgress', items: [] } } })
+  await h.chat.handleNotification({ method: 'turn/started', params: { threadId: 'history-thread', turn: { id: 'historical', status: 'inProgress', items: [] } } })
+  assert.deepEqual(h.chat.snapshot().runs.map(run => [run.runId, run.status, Object.hasOwn(run, 'computerControl')]), [['historical', 'completed', false]])
+  assert.deepEqual(h.events, [])
 })
 
 test('run.computerUse and computer.used reach the stored run checkpoint and events, still without content', async () => {

@@ -829,6 +829,13 @@ await runUiFlow('rendered-ui-fixture-transport', async ({ harness, check, captur
     rotated.genericIdUnchanged && rotated.localId === accountThread.id && !rotated.conversationId && rotated.previousRunUnconfirmed);
   await selectQaThread(harness, accountThread);
   await visible(harness, '[data-testid="chat-binding-held"]');
+  const held = await chrome(harness, () => {
+    const notice = document.querySelector('[data-testid="chat-binding-held"]');
+    const button = notice?.querySelector('[data-testid="chat-new-unbound-room"]');
+    return { copy: notice?.textContent, button: button?.textContent, accessibleName: button?.getAttribute('aria-label') };
+  });
+  check('held copy explains A → B and explicitly offers a blank fresh room',
+    held.copy?.includes('현재 계정이 달라') && held.copy.includes('대화나 초안을 가져가지 않습니다') && held.button === '새 방' && !!held.accessibleName);
   const retained = await chrome(harness, (id) => {
     const thread = window.__egdesk.state.codex.threads.find(item => item.id === id);
     return { reference: thread.retainedNativeBinding,

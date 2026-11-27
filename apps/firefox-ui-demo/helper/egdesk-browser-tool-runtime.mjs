@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { CURRENT_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
-import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
+import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
+import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
 
 // Lane A/native adapter: chrome /chat/send includes selectedSources from the
 // submitted Chat draft before it is cleared. Never infer action authority from
@@ -18,6 +19,8 @@ const target = { type: 'object', additionalProperties: false, required: ['ref', 
   properties: { ...Object.fromEntries(['ref', 'role', 'label', 'href', 'value', 'tag'].map(key => [key, { type: 'string' }])),
     disabled: { type: 'boolean' }, bounds: { type: 'object', additionalProperties: false,
       properties: Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, { type: 'number' }])) } } }
+// In-process identity, not an accepted model JSON argument or a change to pinned tool schemas.
+export const NAMED_CHANGE = Object.freeze({ kind: 'named-page-change', value: 'same-document' })
 const postcondition = { type: 'object', additionalProperties: false, required: ['kind', 'value'],
   properties: { kind: { type: 'string', enum: ['visible-text', 'url', 'target-value'] }, value: { type: 'string' } } }
 const base = { cardId: { type: 'string' }, observationId: { type: 'string' }, expectedRevision: { type: 'integer' } }
@@ -66,7 +69,7 @@ function spec(name, description, properties, required) {
 export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_observe', 'Observe one explicitly selected Browser Card. Coordinates are Browser surface-local; camera movement does not change the target. Elements inside open and closed shadow roots and same-origin frames are included, and a frame element ref carries its frame path (for example f2/el_9); cross-origin, private or unreadable frames appear only in inaccessibleFrames and cannot be read or operated. Elements a page made clickable without a native control (cursor:pointer or onclick) have role clickable; a label around a hidden radio or checkbox has that role with value checked or unchecked; an element that scrolls its own content has role scrollable (or its own role) and its scroll offsets in scrollContainers. A selected account label does not prove site login.',
     { cardId: base.cardId }, ['cardId']),
-  spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card to an http(s) URL on the same site (registrable domain) as the currently observed document; other sites and https-to-http downgrades are rejected. Then observe. A dispatched request does not prove load or an external effect.',
+  spec('egdesk_browser_navigate', 'Request navigation in the bound Browser Card to an http(s) URL on the same site (registrable domain) as the currently observed document or a site explicitly allowed for this conversation; https-to-http downgrades are rejected. Pass cardId, observationId and expectedRevision from a fresh observation, the absolute url, and postcondition {kind:"url", value:the destination URL}. Do not use a visible-text or target-value postcondition here; observe after navigation to check page content. A dispatched request does not prove load or an external effect.',
     { ...base, url: { type: 'string' }, postcondition }, ['cardId', 'observationId', 'expectedRevision', 'url', 'postcondition']),
   spec('egdesk_browser_click', 'Request one guarded DOM click on an observed element without pointerdown or a focus step. A site may ignore synthetic clicks or focus another element itself. Requires a fresh observation, exact target precondition and testable DOM postcondition; an interaction grant is not proof of external authorization or submission success. A click that would land on another element is refused before input, and the error names what covers it (obscuredBy) so you can deal with that element first.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
@@ -124,6 +127,58 @@ export const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze(['egdesk_browser_nav
 const READ_TOOLS = new Set(BROWSER_READ_TOOL_NAMES)
 
 function reject(code, message) { throw Object.assign(new Error(message), { code }) }
+// L6 a1 (D25): which observed fact made a Browser action "not sent" (BROWSER_OBSERVATION_STALE), in one closed word. Every refusal before any input
+// reached the helper as that one code, so a deterministic refusal (the Card's site rule, a viewport or focus that moves, another binding) could not be told
+// from a page that really changed. Read from the Card's or the page actor's refusal text, never from page content: a word outside this list is 'other'.
+//   observation  the helper's own copy: not the latest observation of this Card, or another revision (nothing was sent to the Card)
+//   document / revision / viewport / focus / url / identity / scroll / frame   the page actor's (or the Card's) observed-state guard, by the fact that moved
+//   site-rule    the Card's rule for the conversation's sites refused the move     target   the observed element changed or is not usable
+//   binding / card-generation / card-busy / budget / user-hold   the Card refused the request itself     reply-lost   the reply was lost; the actor proved it never entered
+//   input-authority   the Card did not authorize the input at the last moment (another run or binding holds the Card's selection, the lease or the document moved)
+export const BROWSER_STALE_REASONS = Object.freeze(['observation', 'document', 'revision', 'viewport', 'focus', 'url', 'identity', 'scroll', 'frame',
+  'site-rule', 'target', 'binding', 'card-generation', 'card-busy', 'budget', 'user-hold', 'input-authority', 'reply-lost', 'other'])
+// With input-authority: which check of the Card's last-moment authorization denied the input (browserToolAuthorizePhysicalAction's deny words).
+// A parent/actor refusal can precede the lease callback, so it has no lease.deniedBy.
+// Both engines use this same list; never store the actor's free-form error.
+const ACTOR_INPUT_DENIED_REASONS = ['missing-browsing-context', 'missing-embedder', 'missing-authorizer',
+  'ui-denied', 'parent-callback-error', 'deadline-expired-after-approval', 'unknown']
+export const BROWSER_INPUT_DENIED_REASONS = Object.freeze([...ACTOR_INPUT_DENIED_REASONS, 'lease-already-used', 'request-id-mismatch', 'deadline-mismatch', 'deadline-expired',
+  'browser-identity-mismatch', 'browsing-context-identity-mismatch', 'window-global-identity-mismatch', 'window-global-not-current',
+  'inner-window-id-mismatch', 'browsing-context-id-mismatch', 'run-binding-changed', 'run-cancelled', 'run-stopped', 'card-lease-changed', 'card-closed',
+  'card-browser-mismatch', 'interaction-not-granted', 'selection-run-mismatch', 'action-type-mismatch', 'action-ref-mismatch', 'action-url-mismatch',
+  'live-binding-changed', 'live-binding-unavailable'])
+export function inputDeniedReasonOf(response) {
+  const match = /^Browser action authority was revoked before input \[([a-z-]{1,40})\]$/.exec(typeof response.error === 'string' ? response.error : '')
+  if (BROWSER_INPUT_DENIED_REASONS.includes(response.inputDeniedBy)) return response.inputDeniedBy
+  return ACTOR_INPUT_DENIED_REASONS.includes(match?.[1]) ? match[1] : null
+}
+// With target (L6 a1b): which check of the page actor refused the observed element: a field that moved (role, label, href, value, tag), not a listed control any more
+// (candidate), another element under that ref (reference), gone from the page, hidden, disabled, or not an editable field.
+export const BROWSER_TARGET_REASONS = Object.freeze(['role', 'label', 'href', 'value', 'tag', 'candidate', 'reference', 'gone', 'hidden', 'disabled', 'not-editable'])
+export function targetReasonOf(text) {
+  const word = /Browser (?:target (?:changed|is unavailable|is not an editable field)|action requires an observed element reference) \[([a-z-]{1,24})\]/.exec(typeof text === 'string' ? text.slice(0, 600) : '')?.[1]
+  return word && BROWSER_TARGET_REASONS.includes(word) ? word : null
+}
+export const isBrowserUserHold = error => error?.code === 'BROWSER_OBSERVATION_STALE' && error.staleBy === 'user-hold'
+function userHoldError() {
+  return Object.assign(new Error('The person took control of this Browser Card'), { code: 'BROWSER_OBSERVATION_STALE', staleBy: 'user-hold' })
+}
+export function staleReasonOf(text) {
+  const message = typeof text === 'string' ? text.slice(0, 600) : ''
+  const named = /\bstale \[([a-z-]{1,24})\]/.exec(message)?.[1]
+  if (named && BROWSER_STALE_REASONS.includes(named)) return named
+  if (/outside the allowed sites/.test(message)) return 'site-rule'
+  if (/Browser frame is stale/.test(message)) return 'frame'
+  if (/Browser target (?:changed|is unavailable|is not an editable field)|observed element reference/.test(message)) return 'target'
+  if (/run binding is missing or changed|profile or account (?:epoch|context) changed|Card, profile or account context changed/.test(message)) return 'binding'
+  if (/different Card generation/.test(message)) return 'card-generation'
+  if (/Browser Card is (?:already )?being operated/.test(message)) return 'card-busy'
+  if (/authority was revoked before input/.test(message)) return 'input-authority'
+  if (/reconciled as never sent/.test(message)) return 'reply-lost'
+  if (/budget expired|lease is missing or expired|budget is too short/.test(message)) return 'budget'
+  if (/operating this Browser Card directly/.test(message)) return 'user-hold'
+  return 'other'
+}
 function record(value) { return value && typeof value === 'object' && !Array.isArray(value) }
 function short(value, max = 512) { return typeof value === 'string' && value.length > 0 && value.length <= max }
 function sameTarget(left, right) {
@@ -301,11 +356,12 @@ function validateArgs(tool, args) {
     }
     return
   }
-  if (!validPostcondition(args.postcondition, ['egdesk_browser_fill', 'egdesk_browser_type'].includes(tool) ? MAX_FILL_TEXT : 512)) {
+  if (!(tool === 'egdesk_browser_click' && args.postcondition === NAMED_CHANGE) && !validPostcondition(args.postcondition, ['egdesk_browser_fill', 'egdesk_browser_type'].includes(tool) ? MAX_FILL_TEXT : 512)) {
     reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   }
   if (tool === 'egdesk_browser_navigate') {
-    if (!safeUrl(args.url) || args.postcondition.kind !== 'url') reject('INVALID_BROWSER_TOOL', 'Navigation requires an explicit safe URL and URL postcondition')
+    if (!safeUrl(args.url)) reject('INVALID_BROWSER_TOOL', 'Navigation requires an explicit safe URL')
+    if (args.postcondition.kind !== 'url') throw Object.assign(new Error('Navigation requires a URL postcondition'), { code: 'INVALID_BROWSER_TOOL', invalidBy: 'navigation-postcondition-kind' })
     return
   }
   if (!validTarget(args)) reject('INVALID_BROWSER_TOOL', 'An exact observed element precondition is required')
@@ -416,7 +472,15 @@ function provenNotDispatched(response) {
 function adoptNavigationPolicy(binding, response) {
   if (!record(response) || !Object.hasOwn(response, 'navigationPolicy')) return
   const normalized = normalizeNavigationPolicy(response.navigationPolicy)
-  if (normalized.ok && normalized.policy.scope === 'same-site' && !normalized.policy.allowDowngrade) binding.navigationPolicy = normalized.policy
+  if (normalized.ok && normalized.policy.scope === 'same-site' && !normalized.policy.allowDowngrade) { binding.navigationPolicy = normalized.policy; holdVouchedSites(binding) }
+}
+// u10: a site the Card itself answered 'site-allowed' for, in THIS run, stays in the helper's copy of the policy even when a later policy the Card sends does not list it (the Card re-checks every navigation,
+// history move and new Card against its own set; the helper's copy only decides whether to send the request). A block rule still wins (evaluateNavigation checks the block list first).
+function holdVouchedSites(binding) {
+  if (!binding.vouchedSites?.size) return
+  const policy = binding.navigationPolicy || DEFAULT_NAVIGATION_POLICY
+  const merged = normalizeNavigationPolicy({ scope: policy.scope, allow: [...new Set([...policy.allow, ...binding.vouchedSites])], block: [...policy.block], allowDowngrade: false })
+  if (merged.ok) binding.navigationPolicy = merged.policy
 }
 function navigationDecision(binding, fromUrl, url) {
   return evaluateNavigation(url, binding.navigationPolicy || DEFAULT_NAVIGATION_POLICY, { fromUrl, layer: 'tool' })
@@ -431,7 +495,7 @@ function cardSummary(binding) {
     ...(card.openedFrom ? { openedFrom: card.openedFrom } : {}) }))
 }
 
-export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now, clock = sameClock,
+export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = () => getOwnerKey(), timeoutMs = 15000, now = Date.now, clock = sameClock,
   actionGatePolicy = CURRENT_ACTION_GATE_POLICY } = {}) {
   if (typeof sendToUi !== 'function' || typeof getOwnerKey !== 'function' || typeof clock !== 'function' ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
@@ -466,6 +530,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   // budgetMs is the same deadline as a relative budget, so Firefox can spend
   // it on its own monotonic clock (REA 웹8, BRW-12).
   async function requestUi(payload, binding, run, trace = {}, { budgetMs = timeoutMs } = {}) {
+    // c34 (flag EGDESK_TERMINAL_OPEN_URL): a card showing an AI provider's sign-in or account page, and any request to go to one, is opaque to the Agent (no observe, screenshot, click, fill, navigate, open)
+    if (payload.kind !== 'cancel' && authOpaqueOn() && (isAuthOpaqueUrl(payload.binding?.url) || isAuthOpaqueUrl(payload.url) || isAuthOpaqueUrl(payload.action?.url))) reject('BROWSER_CARD_OPAQUE', 'This Browser Card shows a sign-in page of an AI service. The person signs in themselves; EG-Desk does not observe or operate it')
     const requestId = randomUUID()
     const targetCardEpoch = payload.selection?.cardEpoch || payload.binding?.cardEpoch || payload.cardEpoch
     if (!short(targetCardEpoch, 160)) reject('BROWSER_UI_PROTOCOL', 'Browser request has no exact Card generation')
@@ -474,7 +540,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       const response = await Promise.race([
         Promise.resolve().then(() => {
           if (payload.kind !== 'cancel' && (!binding || binding.closed || closedRuns.has(run?.answerId) ||
-              binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress')) {
+              binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress')) {
             reject('BROWSER_RUN_ENDED', 'Browser run or account ended before UI dispatch')
           }
           // Allocated at the actual handoff (open-browser-use moveSequence),
@@ -490,6 +556,15 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       if (!record(response) || response.requestId !== requestId) reject('BROWSER_UI_PROTOCOL', 'Browser UI response does not match this request')
       if (JSON.stringify(response).length > 180000) reject('BROWSER_UI_PROTOCOL', 'Browser UI response exceeded the bounded limit')
       Object.assign(trace, uiTiming(response.timing))
+      // BRW-13 revokes this run's grant. Remember the refusal only on that binding's Card;
+      // a later grant uses a new binding. Never reinterpret an uncertain physical action.
+      if (payload.kind !== 'bind' && payload.kind !== 'cancel' && payload.kind !== 'reconcile' &&
+          response.status === 'rejected' && staleReasonOf(response.error) === 'user-hold' &&
+          (payload.kind !== 'act' || (provenNotDispatched(response) && !response.dialog))) {
+        const card = binding?.cards.get(payload.cardId)
+        if (card) card.userHeld = true
+        if (payload.kind !== 'act') throw userHoldError() // act keeps its existing dispatch proof below
+      }
       return response
     } catch (error) {
       // A timeout is neither "no effect" nor "cancelled" (REA T-03); it only
@@ -500,9 +575,13 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     } finally { clearTimeout(timer) }
   }
 
-  function prepare({ selectedSources = [], ownerKey = getOwnerKey() } = {}) {
+  // L1 c24 (owner decision U11): the account a Browser grant is bound to is the account of the slot running the room. `ownerKeyFor(engineProfileId)` answers the
+  // room's own account when the room-account flag is on and the room is on an Agent profile; otherwise (and by default) the default sign-in, as before.
+  // The binding remembers its slot, so every later check compares with THAT account.
+  const ownerNow = item => ownerKeyFor(item?.engineProfileId)
+  function prepare({ selectedSources = [], engineProfileId, ownerKey = ownerKeyFor(engineProfileId) } = {}) {
     if (Array.isArray(selectedSources) && selectedSources.length === 0) return null
-    if (!short(ownerKey, 256) || ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_REQUIRED', 'Current Engine account must be known and unchanged')
+    if (!short(ownerKey, 256) || ownerKey !== ownerKeyFor(engineProfileId)) reject('BROWSER_OWNER_REQUIRED', 'Current Engine account must be known and unchanged')
     if (!Array.isArray(selectedSources) || selectedSources.length > 4) reject('INVALID_BROWSER_SELECTION', 'Select at most four Browser Cards')
     const cards = new Map()
     for (const source of selectedSources) {
@@ -522,7 +601,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         selectedUrl: ref.uri, permission: source.browserToolPermission,
         selectionToken: selection.token, clientThreadId: selection.threadId, sourceId: source.id, ...identity })
     }
-    const value = { ownerKey, cards, preparedAt: now() }
+    const value = { ownerKey, ...(engineProfileId ? { engineProfileId } : {}), cards, preparedAt: now() }
     preparedRuns.add(value)
     return value
   }
@@ -536,17 +615,17 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
 
   async function bind(run, prepared) {
     if (!short(run?.answerId, 160) || !short(run?.clientThreadId, 160) ||
-        !preparedRuns.has(prepared) || prepared.ownerKey !== getOwnerKey()) reject('BROWSER_BINDING_FORBIDDEN', 'Browser run binding is unavailable for this account')
+        !preparedRuns.has(prepared) || prepared.ownerKey !== ownerNow(prepared)) reject('BROWSER_BINDING_FORBIDDEN', 'Browser run binding is unavailable for this account')
     if (closedRuns.has(run.answerId)) reject('BROWSER_RUN_ENDED', 'Cancelled Browser run cannot be rebound')
     if (bindings.has(run.answerId) || pendingBindings.has(run.answerId)) reject('BROWSER_BINDING_EXISTS', 'Browser run is already bound or binding')
-    const binding = { ownerKey: prepared.ownerKey, runId: run.runId || run.answerId,
+    const binding = { ownerKey: prepared.ownerKey, ...(prepared.engineProfileId ? { engineProfileId: prepared.engineProfileId } : {}), runId: run.runId || run.answerId,
       clientThreadId: run.clientThreadId, selectedCards: [...prepared.cards.values()],
       cards: new Map(), pending: new Set(), calls: new Map(), closed: false, seq: 0,
       navigationPolicy: DEFAULT_NAVIGATION_POLICY, refusedSites: new Set() }
     pendingBindings.set(run.answerId, binding)
     try {
       for (const card of prepared.cards.values()) {
-        if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
+        if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== ownerNow(prepared) || run.status !== 'inProgress') {
           reject('BROWSER_RUN_ENDED', 'Browser run or account ended during binding')
         }
         if (card.clientThreadId !== binding.clientThreadId) reject('BROWSER_BINDING_FORBIDDEN', 'Browser selection belongs to another Chat thread')
@@ -560,12 +639,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
             response.binding.engineAccountKey !== card.engineAccountKey ||
             response.binding.authorityEpoch !== card.authorityEpoch) reject('BROWSER_BINDING_STALE', 'Selected Browser identity changed before binding')
         if (binding.closed || closedRuns.has(run.answerId) || run.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser run ended during binding')
-        if (prepared.ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
+        if (prepared.ownerKey !== ownerNow(prepared)) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
         adoptNavigationPolicy(binding, response)
         binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null,
           busy: false, uncertain: false, uncertainAction: null, pendingTransition: null, lastFill: null, noEffectClick: null })
       }
-      if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
+      if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== ownerNow(prepared) || run.status !== 'inProgress') {
         reject('BROWSER_RUN_ENDED', 'Browser run or account ended before binding completed')
       }
       bindings.set(run.answerId, binding)
@@ -583,6 +662,22 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     }
   }
 
+  // C9: hand a live binding from one run object to another (the pre-turn binding of the direct browser entry becomes the
+  // turn's run once the native turn exists). The UI keeps seeing the original runId (binding.runId); only the helper's key
+  // changes. Same owner and Chat thread are required; a closed or unknown binding is refused.
+  function adopt(fromRun, toRun) {
+    const binding = bindings.get(fromRun?.answerId)
+    if (!binding || binding.closed || closedRuns.has(fromRun.answerId) || !short(toRun?.answerId, 160) || !short(toRun?.clientThreadId, 160) ||
+        bindings.has(toRun.answerId) || pendingBindings.has(toRun.answerId) || closedRuns.has(toRun.answerId) ||
+        binding.clientThreadId !== toRun.clientThreadId || binding.ownerKey !== ownerNow(binding)) {
+      reject('BROWSER_BINDING_FORBIDDEN', 'Browser binding cannot move to this run')
+    }
+    bindings.delete(fromRun.answerId)
+    bindings.set(toRun.answerId, binding)
+    return { cards: [...binding.cards.values()].map(({ cardId, profileId, accountId, permission, ui }) =>
+      ({ cardId, profileId, accountId, permission, userContextId: ui.userContextId, accountStatus: ui.accountStatus || 'unverified' })) }
+  }
+
   // Observation and wait both replace the Card's single fresh observation.
   // A pending document transition is resolved only by a new document whose
   // readback satisfies the original postcondition.
@@ -591,7 +686,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const transitionRecovered = !!(transition &&
       snapshot.documentId !== transition.priorDocumentId &&
       ['interactive', 'complete'].includes(snapshot.readyState) &&
-      !transition.wasAlreadyTrue && checkPostcondition(transition.condition, snapshot, transition.ref))
+      !transition.wasAlreadyTrue && (checkPostcondition(transition.condition, snapshot, transition.ref) ||
+        (transition.typedGet && formResultLanded(snapshot.url, transition.condition.value))))
     if (transitionRecovered) { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
     if (card.lastFill && card.lastFill.documentId !== snapshot.documentId) card.lastFill = null
     narrowPointerFallback(card, snapshot)
@@ -626,13 +722,15 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const wait = { for: args.for, timeoutMs: args.timeoutMs,
       ...(documentId ? { ref: args.ref, documentId } : {}),
       // While a dispatched transition is pending, the prior document cannot
-      // satisfy load/idle; the actor keeps waiting for its replacement.
-      ...(transition ? { notDocumentId: transition.priorDocumentId } : {}) }
+      // satisfy load/idle. For navigation, chrome can wait for the replacement
+      // WindowGlobal before sending the document-scoped actor query.
+      ...(transition ? { notDocumentId: transition.priorDocumentId } : {}),
+      ...(args.for === 'load' && transition?.priorInnerWindowId ? { notInnerWindowId: transition.priorInnerWindowId } : {}) }
     // A wait spends the current observation: the page is expected to change.
     card.observation = null
     const trace = {}
     const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80, wait }, trace)
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
     const reported = response?.snapshot?.wait
     let snapshot
     try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
@@ -668,7 +766,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     card.observation = null
     const trace = {}
     const response = await observeRequest(run, binding, card, { textLimit: OBSERVE_TEXT_LIMIT, elementLimit: 80, wait }, trace)
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
     const reported = response?.snapshot?.wait
     let snapshot
     try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
@@ -701,7 +799,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   // are 'unknown'. Read-only: no lease, never a second action.
   async function reconcileAct(run, binding, card, { callId, actRequestId, guard, actSeq }) {
     const unknown = reason => ({ dispatched: 'unknown', summary: { answered: false, reason } })
-    if (binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') {
+    if (binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') {
       return unknown('run-ended')
     }
     let response
@@ -735,15 +833,16 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const tool = event?.tool
     validateArgs(tool, args)
     const binding = bindings.get(run?.answerId)
-    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
+    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
     const card = binding.cards.get(args.cardId)
     if (!card) reject('BROWSER_CARD_NOT_SELECTED', 'Browser Card was not selected for this run')
+    if (card.userHeld) throw userHoldError()
     if (card.busy) reject('BROWSER_CARD_BUSY', 'Wait for the current Browser request to finish')
     if (!READ_TOOLS.has(tool) && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
     if (tool === 'egdesk_browser_observe') {
       const trace = {}
       const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 }, trace)
-      if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
+      if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
       adoptNavigationPolicy(binding, response)
       const recovery = recordObservation(card, snapshot)
@@ -756,7 +855,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       // pixels never become input coordinates (REA 웹6).
       const trace = {}
       const response = await observeRequest(run, binding, card, SCREENSHOT_OBSERVE_OPTIONS, trace)
-      if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
+      if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
       narrowPointerFallback(card, snapshot)
       if (!validScreenshot(snapshot.screenshot)) reject('BROWSER_OBSERVATION_UNAVAILABLE', 'The selected Browser did not return a verifiable screenshot')
@@ -782,7 +881,9 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (card.uncertain && !(pointerAfterClick && card.uncertainAction?.action === 'click')) {
       reject('BROWSER_OUTCOME_UNKNOWN', 'A prior Browser action has an unknown outcome; select the context again')
     }
-    if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
+    if (!observed || observed.id !== args.observationId || observed.snapshot.revision !== args.expectedRevision) {
+      throw Object.assign(new Error('Observe this Browser Card again before acting'), { code: 'BROWSER_OBSERVATION_STALE', staleBy: 'observation' })
+    }
     if (tool === 'egdesk_browser_history') return historyMove(run, binding, card, args, observed)
     const byRef = Object.hasOwn(args, 'ref')
     if (byRef) {
@@ -848,6 +949,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     // A single observation authorizes at most one dispatch. Unknown outcomes are
     // not retried automatically; the next action requires a new observation.
     card.observation = null
+    const previousFill = card.lastFill
     if (!(tool === 'egdesk_browser_press' && card.lastFill?.ref === args.ref)) card.lastFill = null
     // One dispatched press per no-effect click. A proven refusal may restore
     // only the original scope; it never restores the spent observation.
@@ -872,7 +974,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const mutationGeneration = beginMutation(binding)
     // Restore only eligibility to be checked by the next valid observation, never input permission.
     const restoreFallback = () => {
-      if (!eligibility || binding.closed || binding.ownerKey !== getOwnerKey() || run.status !== 'inProgress') return
+      if (!eligibility || binding.closed || binding.ownerKey !== ownerNow(binding) || run.status !== 'inProgress') return
       Object.assign(card, clickLock)
       if (binding.mutationGeneration === mutationGeneration) card.noEffectClick = eligibility
     }
@@ -882,8 +984,16 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       card.uncertainAction = { action: action.type, timing: { ...trace } }
       if (action.type === 'navigate' ||
           (['click', 'press', 'pointer-click', 'type-text'].includes(action.type) && condition && ['url', 'visible-text'].includes(condition.kind))) {
-        card.pendingTransition = { condition, ref: args.ref || null,
-          priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue }
+        // The loop can recognize a GET landing with added site parameters. Its next action must not
+        // remain locked behind an exact-URL mismatch. Require the confirmed fill on this document,
+        // the observed submitter's exact GET destination and a new, ready document (recordObservation).
+        const filled = previousFill?.documentId === observed.snapshot.documentId && observed.snapshot.interactiveElements.find(el => el.ref === previousFill.ref && el.value === previousFill.value)?.value
+        const typedGet = action.type === 'navigate' && condition?.kind === 'url' && args.url === condition.value &&
+          sameSiteNavigation(observed.snapshot.url, args.url) && filled && [...new URL(args.url).searchParams.values()].includes(filled) &&
+          observed.snapshot.interactiveElements.some(el => !el.disabled && el.nav?.form?.method === 'get' && el.nav.form.submitUrl === args.url && !el.nav.form.sensitive && !el.nav.sensitiveRegion && ['submit', 'image'].includes(el.nav.type))
+        card.pendingTransition = { ...(typedGet ? { typedGet: true } : {}), condition, ref: args.ref || null,
+          priorDocumentId: observed.snapshot.documentId, actionType: action.type, wasAlreadyTrue,
+          ...(action.type === 'navigate' && observed.snapshot.innerWindowId ? { priorInnerWindowId: observed.snapshot.innerWindowId } : {}) }
       }
     }
     // BRW-12: after a lost response, ask once whether the actor entered
@@ -902,7 +1012,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         // The no-effect click's own lock stays; only the unsent press is undone.
         restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
-          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false,
+          { code: 'BROWSER_OBSERVATION_STALE', staleBy: 'reply-lost', dispatchPhase: 'not-dispatched', dispatched: false,
             reconcile: outcome.summary, timing: { ...trace } })
       }
       error.dispatchPhase = outcome.dispatched === true ? 'dispatched' : 'unknown'
@@ -928,7 +1038,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const callId = short(event?.callId, 160) ? event.callId : null
     const pending = requestUi({ kind: 'act', runId: binding.runId,
       clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
-      ...(callId ? { callId } : {}), action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run, trace)
+      ...(callId ? { callId } : {}), ...(event?.actor === 'decision' || event?.actor === 'model' ? { actor: event.actor } : {}), // a1: who chose this action (the task tool's loop or the conversation model), for the Card's record
+      action, guard, ...(condition ? { postcondition: condition } : {}) }, binding, run, trace)
     binding.pending.add(pending)
     let response
     try { response = await pending }
@@ -938,16 +1049,19 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       throw error
     }
     finally { binding.pending.delete(pending); card.busy = false }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during action; effect is unknown')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during action; effect is unknown')
     const dialog = dialogOf(response.dialog)
     if (response.status !== 'acted' || !record(response.receipt)) {
       const obscuredBy = obscuredByOf(response)
       // Not sent: only this observation is spent; no lock, no retry. The
       // model re-observes and may decide again under a new call ID.
       if (provenNotDispatched(response) && !response.dialog) {
+        const inputDeniedBy = inputDeniedReasonOf(response)
         restoreFallback()
         throw Object.assign(new Error('Browser action was not sent; observe this Browser Card again before trying it'),
-          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
+          { code: 'BROWSER_OBSERVATION_STALE', staleBy: staleReasonOf(response.error), dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace },
+            ...(inputDeniedBy ? { inputDeniedBy } : {}),
+            ...(targetReasonOf(response.error) ? { targetBy: targetReasonOf(response.error) } : {}),
             ...(obscuredBy ? { obscuredBy } : {}) })
       }
       markUnknown()
@@ -988,6 +1102,33 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const common = { cardId: card.cardId, action: action.type, dispatchReceipt: dispatchReceipt || null,
       after: after || null, observation: response.receipt.observation || null, timing: { ...trace },
       ...(dialog ? { dialog } : {}) }
+    if (condition === NAMED_CHANGE) {
+      // Poll observations only, never repeat input. A receipt alone, revision bump, disappearing button,
+      // spinner or unrelated document cannot finish a read-after-click request.
+      const before = observed.snapshot
+      const elements = s => s.interactiveElements.map(e => JSON.stringify([e.role, e.label, e.value, e.disabled]))
+      const prior = new Set(elements(before))
+      const loading = s => s.text.some(line => /^(?:loading|please wait|로딩\s*중|불러오는\s*중)[.!…\s]*$/iu.test(String(line).trim())) || s.interactiveElements.some(e => e.role === 'progressbar')
+      let sawLoading = readbackIsCurrent && loading(after)
+      const end = performance.now() + Math.min(timeoutMs, 8000)
+      card.busy = true
+      try {
+        while (readbackIsCurrent && !dialog && performance.now() < end && !binding.closed) {
+          const response = await requestUi({ kind: 'observe', runId: binding.runId, clientThreadId: binding.clientThreadId, cardId: card.cardId, binding: card.ui,
+            options: { textLimit: 60, elementLimit: 80 } }, binding, run, {}, { budgetMs: Math.max(1, Math.floor(end - performance.now())) })
+          const fresh = observationFrom(response, card.cardId)
+          if (binding.closed || binding.ownerKey !== ownerNow(binding) || run.status !== 'inProgress' || response.dialog || fresh.url !== before.url || fresh.documentId !== before.documentId) break
+          if (loading(fresh)) sawLoading = true
+          else if (sawLoading || fresh.text.some(line => !before.text.includes(line)) || elements(fresh).some(item => !prior.has(item))) {
+            recordObservation(card, fresh)
+            return { ...common, after: fresh, observationId: card.observation.id, status: 'postcondition-observed', postcondition: { ...condition, matched: true }, externalEffectVerified: false }
+          }
+          await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(250, end - performance.now()))))
+        }
+      } catch (error) { markUnknown(); throw error } finally { card.busy = false }
+      markUnknown()
+      return { ...common, status: 'postcondition-unverified', externalEffectVerified: false }
+    }
     if (containerScroll) {
       // Readback: the container's offsets in the current after-snapshot.
       const afterContainer = readbackIsCurrent ? scrollContainerOf(after, args.ref) : null
@@ -1034,7 +1175,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     // The press reached what the no-effect click could not: the Card's lock
     // from that click ends with an observed postcondition.
     if (matched && action.type === 'pointer-click') { card.uncertain = false; card.uncertainAction = null; card.pendingTransition = null }
-    if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, documentId: observed.snapshot.documentId }
+    if (matched && action.type === 'fill') card.lastFill = { ref: args.ref, value: args.text, documentId: observed.snapshot.documentId }
     return { status: matched ? 'postcondition-observed' : 'postcondition-unverified', ...common,
       postcondition: { ...condition, matched, wasAlreadyTrue },
       ...(action.type === 'navigate' ? { navigationScope, pageLoadVerified: false } : {}),
@@ -1054,23 +1195,34 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       cardId: card.cardId, binding: card.ui, site: site.site, patterns: [...site.patterns] }, binding, run, trace,
       { budgetMs: Math.min(SITE_REQUEST_BUDGET_MS, 60000) })
     binding.pending.add(pending)
+    const askedAt = now()
     let response
     try { response = await pending }
     catch (error) {
       if (error?.code === 'BROWSER_UI_TIMEOUT') {
-        return { status: 'site-pending', cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
+        return { status: 'site-pending', pendingBy: 'helper-timeout', waitedMs: Math.max(0, now() - askedAt), cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
       }
       throw error
     }
     finally { binding.pending.delete(pending) }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during the site request')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during the site request')
     if (!['site-allowed', 'site-refused', 'site-pending'].includes(response?.status)) reject('BROWSER_UI_PROTOCOL', 'Browser UI site answer is unreadable')
     adoptNavigationPolicy(binding, response)
     if (response.status === 'site-refused') binding.refusedSites.add(site.site)
-    const reflected = site.patterns.every(pattern => binding.navigationPolicy.allow.includes(pattern))
+    let reflected = site.patterns.every(pattern => binding.navigationPolicy.allow.includes(pattern))
+    let policySync = null
+    if (!reflected && response.status === 'site-allowed' && response.site === site.site) { // the Card vouches for exactly the site asked about
+      binding.vouchedSites ||= new Set(); for (const pattern of site.patterns) binding.vouchedSites.add(pattern)
+      holdVouchedSites(binding)
+      reflected = site.patterns.every(pattern => binding.navigationPolicy.allow.includes(pattern)); policySync = reflected ? 'card-vouched' : null
+    }
     const status = response.status === 'site-allowed' && reflected ? 'site-allowed'
       : response.status === 'site-refused' ? 'site-refused' : 'site-pending'
-    return { status, cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
+    // u10: why a site request ended 'site-pending', in closed words and numbers (never text): the Card's question timed out or was dismissed unanswered ('unanswered'), the helper stopped waiting
+    // ('helper-timeout', above), or the person allowed it but this run's navigation policy does not hold the site ('unreflected'). waitedMs: how long the person's answer took.
+    const pendingBy = status !== 'site-pending' ? null : response.status === 'site-allowed' ? 'unreflected' : 'unanswered'
+    const ui = record(response.diag) ? { askedLeftMs: Number.isSafeInteger(response.diag.leftMs) ? response.diag.leftMs : null, answeredAfterMs: Number.isSafeInteger(response.diag.waitedMs) ? response.diag.waitedMs : null } : null
+    return { status, ...(pendingBy ? { pendingBy } : {}), ...(policySync ? { policySync } : {}), waitedMs: Math.max(0, now() - askedAt), ...(ui ? { ui } : {}), cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
   }
 
   // egdesk_browser_open_card (D-B2): the UI opens a Card in the same profile,
@@ -1090,7 +1242,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     binding.pending.add(pending)
     let response
     try { response = await pending } finally { binding.pending.delete(pending) }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended while opening a Card')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended while opening a Card')
     const opened = response?.binding
     if (response?.status !== 'card-opened' || !record(opened) || !short(opened.cardId, 160) || binding.cards.has(opened.cardId) ||
         !short(opened.cardEpoch, 160) || opened.profileId !== card.profileId || opened.accountId !== card.accountId ||
@@ -1147,12 +1299,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     binding.pending.add(pending)
     let response
     try { response = await pending } finally { binding.pending.delete(pending); card.busy = false }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during the history move; effect is unknown')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during the history move; effect is unknown')
     const receipt = response?.receipt?.dispatchReceipt
     if (response?.status !== 'acted' || !record(receipt)) {
       if (record(response) && provenNotDispatched(response)) {
         throw Object.assign(new Error('History move was not sent; observe this Browser Card again'),
-          { code: 'BROWSER_OBSERVATION_STALE', dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace } })
+          { code: 'BROWSER_OBSERVATION_STALE', staleBy: staleReasonOf(response.error), dispatchPhase: 'not-dispatched', dispatched: false, timing: { ...trace } })
       }
       throw Object.assign(new Error(response?.error || 'History move was not confirmed'),
         { code: 'BROWSER_ACTION_UNVERIFIED', timing: { ...trace }, dispatchPhase: 'unknown', dispatched: 'unknown' })
@@ -1165,9 +1317,14 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
 
   async function dispatch(run, event) {
     const tool = event?.tool
+    // Native thread schemas are pinned. If the caller omitted only the redundant
+    // URL assertion, derive the exact destination; never replace an explicit assertion.
+    if (tool === 'egdesk_browser_navigate' && record(event.arguments) && !Object.hasOwn(event.arguments, 'postcondition')) {
+      event = { ...event, arguments: { ...event.arguments, postcondition: { kind: 'url', value: event.arguments.url } } }
+    }
     validateArgs(tool, event?.arguments)
     const binding = bindings.get(run?.answerId)
-    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') {
+    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') {
       reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
     }
     const callId = event?.callId
@@ -1205,5 +1362,5 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     pendingBindings.clear()
     return Promise.allSettled(pending)
   }
-  return { prepare, specs, bind, dispatch, cancelRun, reset }
+  return { prepare, specs, bind, adopt, dispatch, cancelRun, reset }
 }

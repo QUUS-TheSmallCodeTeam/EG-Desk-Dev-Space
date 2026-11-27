@@ -1,0 +1,238 @@
+{
+  "set": "command-judgments-v1",
+  "tokenCeiling": 8000,
+  "passRule": "A request passes when no hard check fails. State and log-block checks sit at the product's own bars (choice confidence 0.75, block probability 0.5). The six risk-* requests ask a score question that this runner cannot check; they have no expect here and are scored by score-expectations.json with the product rule: approval is added when score >= 2.5 or confidence < 0.75.",
+  "requests": [
+    {
+      "id": "state-tests-printing",
+      "file": "requests/state-tests-printing.json",
+      "sha256": "408f82fad2c93e086b406694cc1edd673ec900932c257f251f09e5982058f5ae",
+      "estInputTokens": 518,
+      "expect": [
+        {
+          "name": "terminal_state",
+          "kind": "choice",
+          "equals": "running_output",
+          "minConfidence": 0.75,
+          "severity": "hard",
+          "note": "A test run that printed 14 passing cases and paused is running, not waiting. A wrong \"waiting\" here would tell the person a healthy run needs them."
+        }
+      ]
+    },
+    {
+      "id": "state-yn-prompt",
+      "file": "requests/state-yn-prompt.json",
+      "sha256": "68f9b1cb4acd2084d34ce3034158c253dd44cd08f94c6c24965ee4e60584a9d3",
+      "estInputTokens": 484,
+      "expect": [
+        {
+          "name": "terminal_state",
+          "kind": "choice",
+          "equals": "waiting_yn_input",
+          "minConfidence": 0.75,
+          "severity": "hard",
+          "note": "A [y/N] prompt is the plainest waiting state. If this fails, the state judge cannot be used to tell anyone a command waits for an answer."
+        }
+      ]
+    },
+    {
+      "id": "state-pager",
+      "file": "requests/state-pager.json",
+      "sha256": "e13646c5603d99ce4dba57468c431304da818c5cb829a81489bfcb4336cc9267",
+      "estInputTokens": 500,
+      "expect": [
+        {
+          "name": "terminal_state",
+          "kind": "choice",
+          "equals": "stuck_in_pager",
+          "minConfidence": 0.75,
+          "severity": "hard",
+          "note": "A git log view ending in (END). If this fails, the pager response (quit in an agent-owned session, hand over otherwise) stays off."
+        }
+      ]
+    },
+    {
+      "id": "state-exit1-assertion",
+      "file": "requests/state-exit1-assertion.json",
+      "sha256": "ec7c6ec3c9d750d5ed3e8ce734da28a3f3f73802fafb8ae2951c87a45ff10b92",
+      "estInputTokens": 499,
+      "expect": [
+        {
+          "name": "terminal_state",
+          "kind": "choice",
+          "equals": "completed_error",
+          "minConfidence": 0.75,
+          "severity": "hard",
+          "note": "Exit code 1 and \"# fail 1\" in the tail. The runtime already removed \"completed ok\"; picking anything else would send a plain test failure to the wrong hand-off."
+        }
+      ]
+    },
+    {
+      "id": "state-silent-build",
+      "file": "requests/state-silent-build.json",
+      "sha256": "92b99e62f90fa5269837e1dedd99c0912331dde6d912eac44e7534ad845b3915",
+      "estInputTokens": 444,
+      "expect": [
+        {
+          "name": "terminal_state",
+          "kind": "choice",
+          "oneOf": [
+            "running_output",
+            "need_user_context"
+          ],
+          "severity": "hard",
+          "note": "Four minutes of silence after \"Compiling 412 modules\" shows no prompt, pager or dead end. Calling it a yes/no, password, pager or cannot-proceed state would be an invented fact."
+        },
+        {
+          "name": "terminal_state",
+          "kind": "choice",
+          "equals": "running_output",
+          "minConfidence": 0.75,
+          "severity": "soft",
+          "note": "A silent compile step is normally still running. A miss here only means long silences are handed to the reasoning model sooner."
+        }
+      ]
+    },
+    {
+      "id": "blocks-test-assertion",
+      "file": "requests/blocks-test-assertion.json",
+      "sha256": "0e8c475baa11fc357eadc23a61850a37ad71dccfab21c2a1f5e78ed938c77418",
+      "estInputTokens": 640,
+      "expect": [
+        {
+          "name": "log_b4",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "Block 4 holds the failure itself; 0.5 is the product's bar for highlighting. If it is missed, the runtime's own failure marks stay the only highlight source."
+        },
+        {
+          "name": "log_b4",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "Block 4 should be picked with margin, not at the bar."
+        },
+        {
+          "name": "log_b1",
+          "kind": "predicate",
+          "max": 0.5,
+          "severity": "soft",
+          "note": "Block 1 is progress or an unrelated warning. Picking it costs precision (at most 4 blocks are highlighted), not safety."
+        },
+        {
+          "name": "log_b2",
+          "kind": "predicate",
+          "max": 0.5,
+          "severity": "soft",
+          "note": "Block 2 is progress or an unrelated warning. Picking it costs precision (at most 4 blocks are highlighted), not safety."
+        },
+        {
+          "name": "log_b3",
+          "kind": "predicate",
+          "max": 0.5,
+          "severity": "soft",
+          "note": "Block 3 is progress or an unrelated warning. Picking it costs precision (at most 4 blocks are highlighted), not safety."
+        },
+        {
+          "name": "log_b5",
+          "kind": "predicate",
+          "max": 0.5,
+          "severity": "soft",
+          "note": "Block 5 is progress or an unrelated warning. Picking it costs precision (at most 4 blocks are highlighted), not safety."
+        }
+      ]
+    },
+    {
+      "id": "blocks-build-error",
+      "file": "requests/blocks-build-error.json",
+      "sha256": "4f637fa9b8e9d77a43cbb36f6dd266c09492c209ce301cfc824534f4f1665376",
+      "estInputTokens": 512,
+      "expect": [
+        {
+          "name": "log_b3",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "Block 3 holds the failure itself; 0.5 is the product's bar for highlighting. If it is missed, the runtime's own failure marks stay the only highlight source."
+        },
+        {
+          "name": "log_b3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "Block 3 should be picked with margin, not at the bar."
+        },
+        {
+          "name": "log_b1",
+          "kind": "predicate",
+          "max": 0.5,
+          "severity": "soft",
+          "note": "Block 1 is progress or an unrelated warning. Picking it costs precision (at most 4 blocks are highlighted), not safety."
+        },
+        {
+          "name": "log_b2",
+          "kind": "predicate",
+          "max": 0.5,
+          "severity": "soft",
+          "note": "Block 2 is progress or an unrelated warning. Picking it costs precision (at most 4 blocks are highlighted), not safety."
+        },
+        {
+          "name": "log_b4",
+          "kind": "predicate",
+          "max": 0.5,
+          "severity": "soft",
+          "note": "Block 4 is progress or an unrelated warning. Picking it costs precision (at most 4 blocks are highlighted), not safety."
+        }
+      ]
+    },
+    {
+      "id": "risk-rm-node-modules",
+      "file": "requests/risk-rm-node-modules.json",
+      "sha256": "891825e89ffc555c56de953021f780f9e135faa53da0a0449753985089b81c54",
+      "estInputTokens": 344,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "risk-rm-build",
+      "file": "requests/risk-rm-build.json",
+      "sha256": "986fec1088c477531acb9f5e1d62d1762e49a4bd476a136bc188ce8858562ab6",
+      "estInputTokens": 342,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "risk-git-clean",
+      "file": "requests/risk-git-clean.json",
+      "sha256": "382ba0456592cab6e3ce88701913c1eaf370a221ccea3a4dca57fe25b127a1d1",
+      "estInputTokens": 314,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "risk-git-reset",
+      "file": "requests/risk-git-reset.json",
+      "sha256": "e55d7184ff262b6e9af6fa6a19b73c9a66726d599a1c050218d467d8ea13e304",
+      "estInputTokens": 305,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "risk-npm-publish",
+      "file": "requests/risk-npm-publish.json",
+      "sha256": "5302f5e37fe035027c91603df6ea8f37b0a45868bb883e4cb7c5e4d578a8e29d",
+      "estInputTokens": 305,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "risk-docker-prune",
+      "file": "requests/risk-docker-prune.json",
+      "sha256": "70d778a3a01a77789eea4b7c282f50c01e665a28ea949a02c872dcf48b0dec8d",
+      "estInputTokens": 306,
+      "expect": [],
+      "recordOnly": true
+    }
+  ]
+}

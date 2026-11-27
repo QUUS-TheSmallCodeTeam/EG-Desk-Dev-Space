@@ -1,0 +1,44 @@
+{
+ "set": "heartbeat-c18",
+ "tokenCeiling": 1643,
+ "passRule": "Pass: every hard expectation holds. A yes must reach 0.8 (the heartbeat's bar; the draft check acts at 0.7 and is registered at 0.8 here too), a no 0.5 or less. Soft expectations are findings. No retries; one request per pattern.",
+ "requests": [
+  {
+   "id": "need-silence-25s",
+   "file": "requests/need-silence-25s.json",
+   "sha256": "5a7020baa26f0f59187c80ccc1b7784a717745325759925969c4d730bd7599d6",
+   "estInputTokens": 636,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "True silence: the person must be told something; code words it as the stall line."
+    },
+    {
+     "name": "message__ask_1",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "A plain plan step needs nothing from the person: a ride-along note must not turn into a question."
+    }
+   ]
+  },
+  {
+   "id": "ride-along-needs-10s",
+   "file": "requests/ride-along-needs-10s.json",
+   "sha256": "a116c2b4ef9929cadb477681fec9b3b5f5acf0cb864b28b0b34b76dd68cba28c",
+   "estInputTokens": 678,
+   "expect": [
+    {
+     "name": "message__ask_1",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "The information only the person has is named plainly: the early question must come from the ride-along judgment."
+    }
+   ]
+  }
+ ]
+}

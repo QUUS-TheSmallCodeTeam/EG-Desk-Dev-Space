@@ -566,6 +566,45 @@ test('human focus change invalidates a model action without taking focus back', 
   assert.equal(f.focusCalls, 0)
 })
 
+test('L6 a1 (D25): a stale refusal names the observed fact that moved, in one closed word, still before any input', async () => {
+  const cases = {
+    revision: f => { f.pendingMutations.push({}) },
+    viewport: f => { f.win.innerHeight = 470 },
+    focus: f => { f.actor.document.activeElement = f.input },
+    url: f => { f.win.location.href = 'data:text/html,isolated-fixture-other' },
+    document: f => { f.actor.document = { ...f.actor.document } },
+  }
+  for (const [word, move] of Object.entries(cases)) {
+    const f = localDocumentFixture()
+    const before = f.actor.snapshot()
+    const button = before.interactiveElements.find(item => item.role === 'button')
+    move(f)
+    await assert.rejects(f.actor.act({ type: 'click', ref: button.ref }, guarded(guardFrom(before, button))),
+      new RegExp(`^Error: Browser observation is stale \\[${word}\\]; observe the current page again$`), word)
+    assert.equal(f.clicks, 0, word)
+    assert.equal(f.focusCalls, 0, word)
+  }
+  // the Gecko identity of the observed document
+  const f = localDocumentFixture()
+  const before = f.actor.snapshot()
+  const button = before.interactiveElements.find(item => item.role === 'button')
+  await assert.rejects(f.actor.act({ type: 'click', ref: button.ref }, guarded({ ...guardFrom(before, button), innerWindowId: 41 })),
+    /^Error: Browser observation is stale \[identity\]; the document changed$/)
+  assert.equal(f.clicks, 0)
+  // L6 a1b: the observed element's own checks name theirs too (no DOM mutation in between, so the document guard passes)
+  const g = localDocumentFixture()
+  const seen = g.actor.snapshot()
+  const target = seen.interactiveElements.find(item => item.role === 'button')
+  g.button.innerText = 'Different action'
+  await assert.rejects(g.actor.act({ type: 'click', ref: target.ref }, guarded(guardFrom(seen, target))), /^Error: Browser target changed \[label\]; observe again$/)
+  g.button.innerText = 'Increment'
+  await assert.rejects(g.actor.act({ type: 'click', ref: target.ref }, guarded({ ...guardFrom(seen, target), target: { ...target, ref: 'el_other' } })),
+    /^Error: Browser action requires an observed element reference \[reference\]$/)
+  g.button.disabled = true
+  await assert.rejects(g.actor.act({ type: 'click', ref: target.ref }, guarded(guardFrom(seen, target))), /^Error: Browser target is unavailable \[disabled\]; observe again$/)
+  assert.equal(g.clicks, 0)
+})
+
 test('fieldset-disabled and aria-disabled ancestor controls are observed and guarded as unavailable', async () => {
   for (const reason of ['fieldset', 'aria-ancestor']) {
     const f = localDocumentFixture()

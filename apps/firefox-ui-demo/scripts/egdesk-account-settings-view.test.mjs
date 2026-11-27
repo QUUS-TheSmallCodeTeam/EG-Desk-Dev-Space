@@ -320,30 +320,43 @@ test('decision model section: unknown offline, key hint only, Korean verificatio
   assert.equal(offline.status, 'unknown');
   assert.equal(offline.canSave, false);
   assert.equal(offline.modeEnabled, false);
-  assert.equal(offline.mode, 'off');
+  assert.equal(offline.mode, null);
+  assert.ok(offline.modes.every(choice => !choice.selected));
   const empty = View.decisionSettingsView({ configured: false, store: 'missing', keyHint: null, mode: 'off', budget: { month: '2026-11', inputTokens: 0, cap: null } }, { connected: true });
   assert.equal(empty.status, 'empty');
   assert.equal(empty.keyLine, '저장된 키 없음');
   assert.equal(empty.canSave, true);
   assert.equal(empty.canDelete, false);
+  assert.match(empty.scopeNote, /직접 고르거나 로컬 기록/);
+  assert.match(empty.invocationNote, /실행 기록이 아닙니다/);
+  assert.match(empty.keyActionNote, /키 확인을 위해 OpenAI에 요청/);
+  assert.match(empty.modeNote, /OpenAI Decisions를 사용하지 않습니다/);
+  assert.match(View.decisionSettingsView({ configured: true, mode: 'on', budget: { inputTokens: 10, cap: 10 } }, { connected: true }).modeNote, /한도에 도달/);
   assert.deepEqual(empty.modes.map(m => [m.label, m.selected]), [['끔', true], ['기록만', false], ['사용', false]]);
-  assert.equal(empty.budgetLine, '이번 달 입력 0 토큰');
+  assert.equal(empty.budgetLine, '이번 달 집계된 입력 0 토큰');
   assert.match(empty.creditNote, /Pro·Business.*API 조직의 project key/);
   const saved = View.decisionSettingsView({ configured: true, store: 'loaded', keyHint: '…WXYZ', mode: 'advisory' }, { connected: true });
   assert.equal(saved.keyLine, '저장된 키 …WXYZ');
   assert.equal(saved.canDelete, true);
   assert.equal(saved.mode, 'advisory');
   assert.equal(saved.modes.find(m => m.selected).label, '기록만');
-  assert.match(View.decisionSettingsView({ configured: false, mode: 'on' }, { connected: true }).modeNote, /키를 저장하면 적용됩니다/);
+  assert.match(saved.modeNote, /OpenAI에 보낼.*API 비용.*기록에만.*붙이지 않습니다/);
+  assert.match(View.decisionSettingsView({ configured: true, mode: 'on' }, { connected: true }).modeNote, /OpenAI에 보낼.*API 비용.*허용된 선택 자료를 답변 입력에 붙입니다/);
+  assert.match(View.decisionSettingsView({ configured: false, mode: 'on' }, { connected: true }).modeNote, /저장된 키가 없어 지금은 요청하지 않습니다/);
   assert.equal(View.decisionSettingsView({ configured: false, store: 'unavailable', mode: 'off' }, { connected: true }).canSave, false);
   assert.equal(View.decisionVerificationText('verified'), '확인됨');
   assert.match(View.decisionVerificationText('no_credit'), /^크레딧 없음/);
+  assert.equal(View.decisionVerificationText('rate_limited'), '요청 한도에 걸림 · 키는 저장했습니다. 잠시 뒤 다시 시도하세요.');
+
   assert.equal(View.decisionVerificationText('invalid_key'), '키가 올바르지 않습니다');
   assert.match(View.decisionVerificationText('model_unavailable'), /쓸 수 없습니다/);
   assert.match(View.decisionVerificationText('unreachable'), /연결하지 못했습니다/);
   assert.match(View.decisionVerificationText('something-else'), /연결하지 못했습니다/);
   assert.deepEqual(View.decisionCredentialOutcome({ result: { verification: 'verified' } }), { phase: 'done', verification: 'verified', text: '확인됨' });
   assert.equal(View.decisionCredentialOutcome({ result: { verification: 'no_credit' } }).phase, 'warning');
+  // A saved key with the mode still 끔 points to the mode switch; 기록만/사용 add nothing.
+  assert.match(View.decisionCredentialOutcome({ result: { verification: 'verified', mode: 'off' } }).text, /^확인됨 · 모드가 ‘끔’이라 아직 쓰이지 않습니다\. 아래에서 ‘사용’을 고르면 쓸 수 있습니다\.$/);
+  for (const mode of ['advisory', 'on']) assert.equal(View.decisionCredentialOutcome({ result: { verification: 'verified', mode } }).text, '확인됨');
   const rejected = View.decisionCredentialOutcome({ error: { code: 'DECISION_KEY_REJECTED', verification: 'invalid_key' } });
   assert.equal(rejected.phase, 'error');
   assert.match(rejected.text, /키가 올바르지 않습니다 · 키를 저장하지 않았습니다/);
@@ -353,7 +366,7 @@ test('decision model section: unknown offline, key hint only, Korean verificatio
 
 test('SUB-11 profile list: label, shared/owned marker, remove only for owned inactive, Codex extras 준비 중', () => {
   const engines = [
-    { id: 'claude', profiles: [
+    { id: 'claude', profileAddAndLogin: true, profiles: [
       { id: 'claude-default', label: 'Claude', owned: false, active: true, auth: { status: 'signedIn' } },
       { id: 'claude-ab12', label: '회사', owned: true, active: false },
       { id: 'claude-ab12', label: '중복', owned: true },
@@ -370,6 +383,8 @@ test('SUB-11 profile list: label, shared/owned marker, remove only for owned ina
   const codex = View.engineProfilesView(engines, 'codex', { connected: true });
   assert.equal(codex.rows[1].authText, '준비 중');
   assert.equal(codex.rows[1].canActivate, false);
+  assert.equal(codex.canAdd, false);
+  assert.match(codex.addUnavailable, /추가해 로그인할 수 없습니다/);
   assert.equal(View.engineProfilesView(engines, 'claude', { connected: false }).rows.length, 0);
 });
 
@@ -418,4 +433,146 @@ test('isolated Codex terminal allowlist verifies slot metadata and the command h
     openTerminal: () => ({}), terminalApi: () => ({ isConnected: () => true, write: async value => { written.push(value); } }) });
   assert.equal(result.phase, 'started');
   assert.deepEqual(written, [`${line}\r`]);
+});
+
+test('account-add form localizes blank validation and focuses the named field before any API action', () => {
+  const source = readSurfaceSource();
+  const start = source.indexOf('    const renderEngineProfiles = (engineId) => {');
+  const fragment = source.slice(start, source.indexOf('    const renderAccountTab = () => {', start));
+  const el = (tag, props, ...children) => ({ tag, props, children, attrs: { ...props }, focused: false, textContent: '',
+    setAttribute(key, value) { this.attrs[key] = value; }, removeAttribute(key) { delete this.attrs[key]; }, focus() { this.focused = true; } });
+  const actions = [];
+  const state = { codex: { connected: true, engines: [{ id: 'codex', profileAddAndLogin: true }, { id: 'claude', profileAddAndLogin: false }] } };
+  const render = Function('AccountSettingsView', 'state', 'el', 'profileAction', 'runProfileAction', 'id', `${fragment}\nreturn renderEngineProfiles;`)(
+    View, state, el, null, (...args) => actions.push(args), 'settings');
+  const flatten = node => node?.tag ? [node, ...node.children.flatMap(flatten)] : [];
+  const all = flatten(render('codex'));
+  const form = all.find(node => node.tag === 'form');
+  const input = all.find(node => node.tag === 'input');
+  const alert = all.find(node => node.props.role === 'alert');
+  assert.equal(input.props['aria-label'], '새 ChatGPT 계정 이름');
+  assert.equal(input.props['aria-describedby'], alert.props.id);
+  assert.equal(input.props['aria-required'], 'true');
+  assert.equal(all.find(node => node.props.type === 'submit').children[0], '계정 추가 후 로그인');
+  input.value = '  ';
+  let prevented = false;
+  form.props.onsubmit({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(input.focused, true);
+  assert.equal(input.attrs['aria-invalid'], 'true');
+  assert.equal(alert.textContent, View.ENGINE_PROFILE_LABEL_ERROR);
+  assert.equal(actions.length, 0);
+  input.value = '  사내   계정  ';
+  input.props.oninput();
+  assert.equal(input.attrs['aria-invalid'], undefined);
+  assert.equal(alert.textContent, '');
+  form.props.onsubmit({ preventDefault() {} });
+  assert.deepEqual(actions, [['codex', 'add', null, '사내 계정']]);
+  const unsupported = flatten(render('claude'));
+  assert.ok(!unsupported.some(node => node.tag === 'form' || node.tag === 'input'));
+  assert.ok(unsupported.some(node => node.children.some(text => typeof text === 'string' && text.includes('추가해 로그인할 수 없습니다'))));
+});
+
+test('a spend or usage limit is told apart from a missing balance and from a rate limit', () => {
+  assert.match(View.decisionVerificationText('spend_limit_reached'), /^지출·사용 한도에 도달/);
+  assert.doesNotMatch(View.decisionVerificationText('spend_limit_reached'), /잠시 뒤 다시 시도/);
+});
+
+test('every verify outcome has its own line; a kept old key is said plainly', () => {
+  for (const status of ['not_verified', 'server_error', 'bad_response', 'budget_exceeded']) {
+    assert.notEqual(View.decisionVerificationText(status), View.decisionVerificationText('unreachable'), status);
+  }
+  for (const verification of ['no_credit', 'spend_limit_reached', 'rate_limited']) {
+    const out = View.decisionCredentialOutcome({ error: { status: 422, code: 'DECISION_KEY_NOT_REPLACED', verification } });
+    assert.equal(out.phase, 'error');
+    assert.match(out.text, /지금 쓰는 키는 그대로입니다/);
+    assert.doesNotMatch(out.text, /키는 저장했습니다/);
+  }
+});
+
+test('the budget line labels estimated sent-without-usage requests and the cap counts them', () => {
+  const view = View.decisionSettingsView({ configured: true, mode: 'on', budget: { month: '2026-11', inputTokens: 600, cap: 1000, estimatedInputTokens: 400, unmeteredRequests: 3 } }, { connected: true });
+  assert.match(view.budgetLine, /600 토큰 \+ 응답 없이 보낸 요청 3건 추정 400 \/ 상한 1,000/);
+  assert.match(view.modeNote, /한도에 도달/);
+});
+
+// c35 (UX-3): the login line is typed only after the shell has printed its prompt and been quiet for a moment (typed earlier it was echoed twice).
+test('c35: the Terminal login waits for the shell to print and settle before typing; without output timing it types at once; a stuck shell is typed to after the bound; a changed account types nothing', async () => {
+  const run = async ({ idles, readyTimeoutMs = 8000, isCurrent = () => true, noTiming = false }) => {
+    let clock = 0, i = 0; const typed = [], writes = []
+    const api = { isConnected: () => true, write: data => { typed.push(data); writes.push(clock) }, ...(noTiming ? {} : { outputIdleMs: () => (i < idles.length ? idles[i++] : idles.at(-1)) }) }
+    const card = { isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api } } }
+    const out = await View.runClaudeLoginInTerminal({ requestCommand: async method => ({ method, line: `claude auth login --${method}` }), openTerminal: () => card, sleep: async ms => { clock += ms }, now: () => clock, readyTimeoutMs, isCurrent })
+    return { out, typed, at: writes[0] ?? null, polls: i }
+  }
+  const ready = await run({ idles: [null, null, 50, 120, 410] })
+  assert.equal(ready.out.phase, 'started'); assert.deepEqual(ready.typed, ['claude auth login --claudeai\r']); assert.ok(ready.polls >= 5, 'it polled until the shell had been quiet for 400 ms')
+  const immediate = await run({ idles: [], noTiming: true }); assert.equal(immediate.out.phase, 'started'); assert.equal(immediate.at, 0, 'an API without output timing: as before, no wait')
+  const stuck = await run({ idles: [null], readyTimeoutMs: 1000 }); assert.equal(stuck.out.phase, 'started'); assert.ok(stuck.at >= 1000 && stuck.at < 2000, `typed after the bound (${stuck.at})`)
+  let current = true
+  const changed = await run({ idles: [null], isCurrent: () => { const was = current; current = false; return was } }); assert.equal(changed.out.phase, 'error'); assert.deepEqual(changed.typed, [])
+})
+
+// c36: fast visible progress and failure of the Claude login (flag: capability terminal-open-url)
+const fakeClock = () => { let t = 0; return { now: () => t, sleep: async ms => { t += ms; }, at: () => t }; };
+
+test('c36: the login watch checks every 3 s for at most 5 min; signed in, ended, changed and timeout are told apart; a failed check is tried again', async () => {
+  assert.deepEqual({ ...View.CLAUDE_LOGIN_WATCH }, { pollMs: 3000, boundMs: 300000, terminalReadyMs: 5000, signinCardMs: 10000 });
+  let c = fakeClock(), checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; if (checks === 2) throw new Error('bridge busy'); }, isSignedIn: () => checks >= 4, sessionEnded: () => false, wait: c.sleep, now: c.now }), 'signedIn');
+  assert.equal(checks, 4); assert.equal(c.at(), 9000, 'a check every 3 s; the failed check did not stop the watch');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => false, sessionEnded: () => checks >= 3, wait: c.sleep, now: c.now }), 'ended'); assert.equal(c.at(), 6000);
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => checks >= 2, sessionEnded: () => true, wait: c.sleep, now: c.now }), 'ended', 'ended before the first check that sees the login is not hidden...');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => true, sessionEnded: () => true, wait: c.sleep, now: c.now }), 'signedIn', '...but a session that ends right after a successful login is a success');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => false, sessionEnded: () => false, isCurrent: () => checks < 2, wait: c.sleep, now: c.now }), 'changed');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => false, sessionEnded: () => false, wait: c.sleep, now: c.now }), 'timeout');
+  assert.equal(checks, 100, '5 min / 3 s'); assert.equal(c.at(), 300000);
+});
+
+test('c36: after the typed line a sign-in card must be there within the bound, else the existing "run it yourself" error shows; without the option nothing waits', async () => {
+  const mk = (count) => { const typed = [], card = { isConnected: true, _linkedSigninCount: () => count(), _termBrowser: { contentWindow: { terminalAPI: { isConnected: () => true, write: data => typed.push(data) } } } }; return { typed, card }; };
+  const run = async (card, extra = {}) => { const c = fakeClock(); const out = await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => card, sleep: c.sleep, now: c.now, ...extra }); return { out, at: c.at() }; };
+  let t = mk(() => 0); let r = await run(t.card, { signinCardMs: 10000 });
+  assert.equal(r.out.phase, 'error'); assert.match(r.out.text, /^터미널 준비를 확인하지 못했습니다\. 터미널에서 claude auth login --claudeai 을 직접 실행해 주세요\.$/); assert.ok(r.at >= 10000 && r.at < 10200, `waited ${r.at} ms`); assert.equal(t.typed.length, 1, 'the line was typed once');
+  let polls = 0; t = mk(() => (++polls > 30 ? 1 : 0)); r = await run(t.card, { signinCardMs: 10000 });
+  assert.equal(r.out.phase, 'started'); assert.ok(r.at < 10000);
+  t = mk(() => 0); r = await run(t.card); assert.equal(r.out.phase, 'started', 'option off: as before'); assert.equal(r.at < 1000, true);
+  t = mk(() => 0); delete t.card._linkedSigninCount; r = await run(t.card, { signinCardMs: 10000 }); assert.equal(r.out.phase, 'started', 'a terminal without the link count is not judged');
+  t = mk(() => 0); r = await run(t.card, { signinCardMs: 10000, isCurrent: (() => { let n = 0; return () => ++n < 12; })() }); assert.equal(r.out.phase, 'error'); assert.match(r.out.text, /바뀌어 명령을 입력하지 않았습니다|계정이나 연결 상태/);
+});
+
+// u1 item 3: the login line is typed when the shell's line editor is up, not after a quiet moment (a start-up file's warning, then silence, proved the quiet moment wrong in a real shell)
+test('u1: shellReadyToType: the editor decides when it reports; silence alone decides only for shells that cannot report', () => {
+  const ready = View.shellReadyToType;
+  assert.equal(ready({ idleMs: 900, editorReady: false }), false, 'a start-up warning and 900 ms of silence is not a prompt');
+  assert.equal(ready({ idleMs: 2499, editorReady: false }), false); assert.equal(ready({ idleMs: 2500, editorReady: false }), true, 'a shell without bracketed paste: long silence');
+  assert.equal(ready({ idleMs: null, editorReady: false }), false);
+  assert.equal(ready({ idleMs: 0, editorReady: true }), false, 'the prompt is still being painted'); assert.equal(ready({ idleMs: 120, editorReady: true }), true); assert.equal(ready({ idleMs: null, editorReady: true }), true);
+  assert.equal(ready({ idleMs: 399, editorReady: null }), false); assert.equal(ready({ idleMs: 400, editorReady: null }), true, 'c35 rule for a terminal that cannot tell'); assert.equal(ready({ idleMs: null, editorReady: null }), false);
+  assert.equal(ready({ idleMs: 600 }), true, 'defaults'); assert.equal(ready(), false);
+  assert.deepEqual([View.PROMPT_SETTLE_MS, View.NO_EDITOR_IDLE_MS], [120, 2500]);
+});
+
+test('u1: the real-shell timeline: a warning at 0.02 s, silence, the editor up at 1.53 s: the line is typed at 1.53 s + settle, once, not at 0.4 s', async () => {
+  const c = fakeClock(), typed = [];
+  const out = { at: 0.02 * 1000 };
+  const api = { isConnected: () => true, write: data => typed.push({ at: c.at(), data }),
+    outputIdleMs: () => (c.at() < 20 ? null : c.at() < 1530 ? c.at() - 20 : c.at() - 1530), lineEditorReady: () => c.at() >= 1530 };
+  const card = { isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api } } };
+  const res = await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => card, sleep: c.sleep, now: c.now });
+  assert.equal(res.phase, 'started'); assert.equal(typed.length, 1); assert.equal(typed[0].data, 'claude auth login --claudeai\r');
+  assert.ok(typed[0].at >= 1650 && typed[0].at < 1750, `typed at ${typed[0].at} ms (editor at 1530 + 120)`);
+  // a shell that never reports the editor (bash 3.2): long silence, never later than the bound
+  const c2 = fakeClock(), typed2 = []; const api2 = { isConnected: () => true, write: data => typed2.push(c2.at()), outputIdleMs: () => (c2.at() < 20 ? null : c2.at() - 20), lineEditorReady: () => false };
+  await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => ({ isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api2 } } }), sleep: c2.sleep, now: c2.now });
+  assert.ok(typed2[0] >= 2520 && typed2[0] < 2650, `bash 3.2 typed at ${typed2[0]} ms`);
+  // an editor that never comes up and a shell that keeps printing: the bound (8 s) ends the wait, the line is typed once
+  const c3 = fakeClock(), typed3 = []; const api3 = { isConnected: () => true, write: () => typed3.push(c3.at()), outputIdleMs: () => 10, lineEditorReady: () => false };
+  await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => ({ isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api3 } } }), sleep: c3.sleep, now: c3.now });
+  assert.equal(typed3.length, 1); assert.ok(typed3[0] >= 8000 && typed3[0] < 8200, `bound: ${typed3[0]}`);
 });

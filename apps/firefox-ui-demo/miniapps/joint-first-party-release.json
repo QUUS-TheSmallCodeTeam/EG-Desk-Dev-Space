@@ -1,0 +1,8 @@
+{
+  "name": "egdesk-team-apps",
+  "version": "1.0.0",
+  "bin": "egdesk-team-apps",
+  "tarball": "egdesk-team-apps-1.0.0.tgz",
+  "sha256": "609d2faab83b74f4f2d77ce7607ffdd8ba61de2b8d2b4fb2ffcecd3e9d68562e",
+  "entrySha256": "0ef1292f475bb769640071ebc80526a0a2c108077e78f36f901a6b564f88e621"
+}

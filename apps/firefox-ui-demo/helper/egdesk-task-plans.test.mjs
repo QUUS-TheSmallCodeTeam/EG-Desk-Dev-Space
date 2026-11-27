@@ -495,9 +495,12 @@ test('a gate whose wait runs out is marked expired, journaled and kept waiting; 
   const started = native.starts.find(context => context.binding.taskId === 'before')
   const receipt = { receiptId: 'native-before', outcome: 'completed', binding: structuredClone(started.binding), evidenceRefs: [] }
   native.valid.add(receipt.receiptId)
+  // a1: the reference is the moment just before the completion is recorded (not the moment this line runs, which a loaded machine
+  // delays past the 40 ms): a clock counted from activation (70+ ms earlier) would end before it, one counted from the completion after it
+  const completing = Date.now()
   await graph.recordOutcome(receipt)
   gate = graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit')
-  assert.ok(Date.parse(gate.expiresAt) >= Date.now() + 20, 'counted from the upstream completion')
+  assert.ok(Date.parse(gate.expiresAt) >= completing + 40, 'counted from the upstream completion')
 
   await until(() => graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait').gates.find(entry => entry.gateId === 'exit').status === 'expired')
   const waiting = graph.getGraph('graph-chain').tasks.find(task => task.taskId === 'wait')

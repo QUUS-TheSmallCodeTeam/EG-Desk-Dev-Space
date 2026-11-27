@@ -1,3 +1,7 @@
+// u4 (U19): the send plan for Browser Cards on a Claude conversation lives in its own lane module; re-exported here because the surface reaches the chat modules through ChatState
+export { claudeBrowserCapable, claudeBrowserSendPlan, claudeKeptInputs } from './EGDeskClaudeBrowserSend.sys.mjs'
+// a1 (L1): a run keeps the steps of its Browser tasks (who did what); the surface draws them (EGDeskBrowserStepsView.sys.mjs)
+import { addBrowserStep, BROWSER_STEP_CHAT_EVENT } from './EGDeskBrowserStepsView.sys.mjs'
 // Pure reducer for the additive Codex chat protocol v2.
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 // Provider commentary is a public work note, not a statement to the people in a chat.
@@ -24,6 +28,10 @@ export function separateChatWork(run) {
   }
   return { ...run, messages, activities };
 }
+// An early question the working run asked (bridge events reply.opened / reply.closed): while it is open, one message sent
+// in that DM goes into the same run. Never open on a stored, finished, stopping or blocked run, or while a reply is on its way.
+export const runReplyOpen = run => isRunBusy(run) && !!run.replyOpen && run.replyPending !== true && !run.stopRequested && !run.stopPending
+  && run.status !== 'stopping' && !(run.pendingApprovals?.length) && !(run.pendingUserInputs?.length);
 export const isRunBusy = run => !!run && run.localHistory !== true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status);
 export const runKey = (conversationId, runId) => `${conversationId}/${runId}`;
 // A Board displays several native conversations. Never use the turn ID alone
@@ -52,6 +60,19 @@ export function canAdmitChatEvent(state, threads, event) {
 export const clientThreadBinding = thread => thread?.clientBindingId || thread?.id || null;
 export const freshClientThreadBinding = (thread, nonce) => `${thread.id}-binding-${nonce}`;
 export const requestBelongsToThread = (request, thread) => !!thread && (request.localThreadId === thread.id || request.clientThreadId === clientThreadBinding(thread));
+
+// The conversation that is open on the screen, as the bridge names it (clientThreadId), for the live-session close signal
+// (POST /chat/session/close). Chat shown with a conversation: that room. Chat shown with the room list: none. Chat not shown
+// (hidden or minimised): unchanged, because hiding the chat is not leaving the conversation.
+// openConversationChange(previous, { chatOpen, hudView, thread }) -> { open, left }
+//   previous: the value this returned as `open` last time (null at start); thread: the active room.
+//   left: the conversation that was closed or left since then (the caller sends the close once), or null.
+export function openConversationChange(previous, { chatOpen = false, hudView = 'conversation', thread = null } = {}) {
+  const before = typeof previous === 'string' && previous ? previous : null;
+  if (chatOpen !== true) return { open: before, left: null };
+  const open = hudView === 'conversation' ? clientThreadBinding(thread) || null : null;
+  return { open, left: before && before !== open ? before : null };
+}
 
 // The durable local key is the UI room ID. Native client bindings may rotate on
 // restore or account change, and must never become the history lookup key.
@@ -552,6 +573,83 @@ export function codexAccountChanged(previousKey, status) {
   if (isProviderIdentity(identity.join(':'), mode)) return false;
   return nextKey !== previousKey;
 }
+// U11 (L1 c18): profile, subscription account, folder and screen combine independently. A room that runs on a non-default Codex engine
+// profile is bound to THAT profile's account, never to this window's default Codex sign-in (Contract §14.1: a Run keeps its
+// engineProfileId; changing the default does not move it). The key is a UI fence like codexAccountKey, never an ownership grant: the
+// helper still checks the profile's owner on every resume. Built from the profile row the bridge reports (signed in, its account email).
+const CODEX_DEFAULT_PROFILE = 'codex-default';
+const codexSlotId = id => (typeof id === 'string' && id.trim() && id !== CODEX_DEFAULT_PROFILE ? id : null);
+// The non-default Codex profile row the bridge lists for this id (every added profile is listed), else null: a profile this window does
+// not know keeps today's default-account check.
+function codexSlotProfile(engineProfileId, context = {}) {
+  const slot = codexSlotId(engineProfileId);
+  if (!slot) return null;
+  const row = engineRows(context.engines).find(entry => entry.id === 'codex');
+  return (Array.isArray(row?.profiles) ? row.profiles : []).find(entry => entry?.id === slot) ?? null;
+}
+export function codexSlotAccountKey(engineProfileId, context = {}) {
+  const profile = codexSlotProfile(engineProfileId, context), slot = profile ? engineProfileId : null;
+  if (!slot) return null;
+  const email = identityText(profile?.auth?.account).toLowerCase();
+  return profile?.auth?.status === 'signedIn' && /^[^\s@]+@[^\s@]+$/.test(email) ? `codex:slot:${slot}:${email}` : null;
+}
+/** The account a Codex room is checked against: its own engine profile's (a non-default profile), else the default sign-in. */
+export function codexRoomAccountKey(thread, authStatus, context = {}) {
+  return codexSlotProfile(thread?.engineProfileId, context) ? codexSlotAccountKey(thread.engineProfileId, context) : codexAccountKey(authStatus);
+}
+// L1 c19 (Contract §14.1: a Run keeps its engineProfileId). A Codex room on another engine profile this window knows: its account is
+// that profile's, so the DEFAULT sign-in changing or signing out leaves the room, its requests, runs and binding alone.
+export function codexRoomOnOtherProfile(thread, context = {}) {
+  return !!thread && thread.engineId !== 'claude' && !!codexSlotProfile(thread.engineProfileId, context);
+}
+/** The rooms a default sign-in change keeps (ids): every Codex room on another known engine profile. */
+export function codexDefaultSwitchKeeps(threads, context = {}) {
+  return new Set((Array.isArray(threads) ? threads : []).filter(thread => codexRoomOnOtherProfile(thread, context)).map(thread => thread.id));
+}
+/** A room's account fence: its account key while it is current (the default room also needs the window's cached default to name it), else null. */
+export function codexRoomAccountCurrent(thread, authStatus, cachedDefaultKey, context = {}) {
+  const key = codexRoomAccountKey(thread, authStatus, context);
+  return key && (codexRoomOnOtherProfile(thread, context) || cachedDefaultKey === key) ? key : null;
+}
+// L1 c21, owner decision (2): the same room continues on another account of its engine. Its messages, draft and selections stay (they
+// are kept elsewhere by room id); the engine thread does not: no native conversation until the next send, a fresh binding for the new
+// account, the same local room binding (the bridge's store keys the room by it).
+export function continueRoomOnAccount(thread, engineProfileId) {
+  if (!thread || typeof engineProfileId !== 'string' || !engineProfileId) return thread;
+  return { ...thread, engineProfileId, conversationId: null, bindingAccountKey: null, bindingState: 'fresh', retainedNativeBinding: null,
+    resuming: false, sendError: null, clientBindingId: clientThreadBinding(thread) };
+}
+// L1 c21, owner decision (3): with the pref "on" a default-account change keeps the task list (each task's own account is checked when it
+// resumes, by the bridge); returns what to put back after the reset, or null (pref off: as before).
+export function keptTasksOnDefaultSwitch(codex, pref) {
+  if (pref !== 'on' || !codex) return null;
+  return { taskBoard: codex.taskBoard, taskContinue: codex.taskContinue ?? null, taskApproval: codex.taskApproval ?? null,
+    taskResume: codex.taskResume ?? null, planProposals: codex.planProposals };
+}
+// ---- L1 c24 (U11, owner decision: a room's checks use the ROOM's account). Behind the room-account flag: codex.roomAccountMode === 'on' (the window
+// mirrors pref egdesk.roomAccount; a plain object without it is "off"), default off, and then every function below answers exactly as the default
+// sign-in did before. A room on another Codex engine profile that the window knows is keyed to THAT profile's account.
+export const roomAccountModeOn = codex => codex?.roomAccountMode === 'on';
+const roomOnSlot = (thread, codex) => roomAccountModeOn(codex) && codexRoomOnOtherProfile(thread, codex);
+/**
+ * roomAccountScope(thread, codex) -> { accountKey, cachedAccountKey, access, slot }
+ *   accountKey        the key the room's input/receipt/evidence checks compare against (null: not signed in on that room's account)
+ *   cachedAccountKey  what the window cached for that account (the default's cache, or the profile's own key: it has no separate cache)
+ *   access            the default account's access state, or null for a profile room (the default's quota state is not its own)
+ */
+export function roomAccountScope(thread, codex) {
+  if (roomOnSlot(thread, codex)) {
+    const key = codexSlotAccountKey(thread.engineProfileId, codex);
+    return Object.freeze({ accountKey: key, cachedAccountKey: key, access: null, slot: true });
+  }
+  return Object.freeze({ accountKey: codexAccountKey(codex?.authStatus), cachedAccountKey: codex?.codexAccountKey ?? null, access: codex?.authStatus?.access?.state, slot: false });
+}
+/** The account part of a change signature: the default sign-in's parts, or (a profile room) that profile's own key and sign-in state. */
+export function roomAccountParts(thread, codex, defaultParts) {
+  if (!roomOnSlot(thread, codex)) return defaultParts;
+  const profile = codexSlotProfile(thread.engineProfileId, codex);
+  return ['room-slot', thread.engineProfileId, codexSlotAccountKey(thread.engineProfileId, codex), profile?.auth?.status ?? null];
+}
 export function knownCodexAccountKey(key) {
   if (typeof key !== 'string' || !key.startsWith('codex:')) return false;
   const [, mode, ...identity] = key.split(':');
@@ -589,10 +687,10 @@ export function detachNativeThread(thread, savedAccountKey, nonce) {
     resuming: false, preparingInput: false, sendError: null,
   };
 }
-export function reconcileNativeThread(thread, authStatus) {
+export function reconcileNativeThread(thread, authStatus, context = {}) {
   if (thread.engineId === 'claude') return thread.retainedNativeBinding?.conversationId
     ? detachNativeThread(thread, null, null) : thread;
-  const key = codexAccountKey(authStatus);
+  const key = codexRoomAccountKey(thread, authStatus, context); // L1 c18: the room's own engine profile's account
   const retained = thread.retainedNativeBinding;
   if (!key || !retained || thread.conversationId) return thread;
   if (typeof retained.conversationId === 'string' && retained.conversationId.trim()
@@ -607,20 +705,31 @@ export function reconcileNativeThread(thread, authStatus) {
     reason: knownCodexAccountKey(retained.accountKey) && retained.accountKey !== key ? 'identity-mismatch' : 'ownership-unverified' } };
 }
 export const nativeBindingHeld = thread => !!thread?.retainedNativeBinding && !thread.conversationId;
+export function nativeBindingHoldText(thread) {
+  if (!nativeBindingHeld(thread)) return null;
+  const reason = thread.retainedNativeBinding.reason;
+  const why = reason === 'identity-mismatch' ? '이 방을 시작한 계정과 현재 계정이 달라 이어서 보낼 수 없습니다.'
+    : '이 방을 시작한 계정을 확인하지 못해 이어서 보낼 수 없습니다.';
+  return why + ' 기존 기록은 이 방에 남고, 새 방에는 대화나 초안을 가져가지 않습니다.';
+}
 export function canResumeNativeThread(thread, authStatus, context = {}) {
   // This permits the server check, never grants native ownership locally.
   if (thread?.engineId === 'claude') return !!thread.conversationId && chatThreadReadiness(thread, context).ready;
   return !!thread?.conversationId && thread.bindingState === 'verified'
     && knownCodexAccountKey(thread.bindingAccountKey)
-    && thread.bindingAccountKey === codexAccountKey(authStatus);
+    && thread.bindingAccountKey === codexRoomAccountKey(thread, authStatus, context); // L1 c18: the room's own profile's account
 }
-export function nativeBindingForRun(thread, run) {
+export function nativeBindingForRun(thread, run, context = {}) {
   if (thread.engineId === 'claude') return { bindingAccountKey: null,
     bindingState: run.accountIdentity?.status === 'verified' ? 'server-verified' : 'server-check-required' };
   const established = !!thread.conversationId && thread.conversationId === run.conversationId
     && thread.bindingState === 'verified' && knownCodexAccountKey(thread.bindingAccountKey);
   // Preserve proof for the same native conversation, never borrow it for a new CID.
-  const accountKey = established ? thread.bindingAccountKey : run.accountKey ?? null;
+  // L1 c18: a run on a non-default Codex engine profile binds the room to that profile's account (run.accountKey is the window's
+  // default sign-in, which did not run it); unknown profile account -> unverified, never the default's.
+  const slot = codexSlotProfile(run.engineProfileId || run.engine?.engineProfileId, context) ? (run.engineProfileId || run.engine?.engineProfileId) : null;
+  const accountKey = slot ? (established && thread.bindingAccountKey === codexSlotAccountKey(slot, context) ? thread.bindingAccountKey : codexSlotAccountKey(slot, context))
+    : established ? thread.bindingAccountKey : run.accountKey ?? null;
   return { bindingAccountKey: accountKey, bindingState: knownCodexAccountKey(accountKey) ? 'verified' : 'live-unverified' };
 }
 export function submissionFailureStatus(error) {
@@ -645,9 +754,10 @@ export function settleReconciledRequests(state, clientThreadId, snapshot) {
 function ensureStream(state, id) {
   return state.streams[id] ||= { seen: {}, checkpoints: {}, seq: -1, generation: ++state.streamGeneration };
 }
-export function registerChatRequest(state, request, authStatus, engineId = 'codex') {
+export function registerChatRequest(state, request, authStatus, engineId = 'codex', accountKey) {
+  // L1 c24: accountKey (when given) is the room's own account key (roomAccountScope); without it, the default sign-in's, as before
   state.requests[request.requestId] = { ...request, ...(engineId === 'claude' ? { engineId } : {}),
-    accountKey: engineId === 'claude' ? null : codexAccountKey(authStatus), status: 'submitting' };
+    accountKey: engineId === 'claude' ? null : accountKey !== undefined ? accountKey : codexAccountKey(authStatus), status: 'submitting' };
 }
 const REQUEST_PROJECT_TARGET_IDS = ['boardId', 'projectId', 'rootId'];
 const REQUEST_PROJECT_TARGET_PRESENTATION = ['title', 'displayPath'];
@@ -760,10 +870,12 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   }
   return body;
 }
-export function contextCapabilitiesForRequest(thread, auth, sourceIds = []) {
+export function contextCapabilitiesForRequest(thread, auth, sourceIds = [], codex = null) {
   // Plain legacy conversations must not require tools never registered on that
   // native thread. An explicit context request never silently replaces it.
-  return sourceIds.length || (codexAccountKey(auth) && (!thread.conversationId || thread.contextToolsAvailable === true))
+  // L1 c24: with the room-account flag the sign-in that counts is the room's own (codex given), else the default's as before
+  const signedIn = codex ? roomAccountScope(thread, codex).accountKey : codexAccountKey(auth);
+  return sourceIds.length || (signedIn && (!thread.conversationId || thread.contextToolsAvailable === true))
     ? { read: true, reader: true, publishBriefing: true } : null;
 }
 
@@ -993,6 +1105,39 @@ function recordRunToolCeiling(run, value) {
 function recordRunComputerControl(run, value) {
   if (run && COMPUTER_CONTROL_POLICIES.includes(value?.policy)) run.computerControl = { policy: value.policy };
 }
+// Per-run evidence only: a request override is not a provider-observed value,
+// and the thread default does not prove which settings a specific turn used.
+function recordRunSettings(run, { configuration, profileBinding } = {}) {
+  if (!run) return;
+  const value = (field) => {
+    const text = configuration?.[field];
+    return configuration?.[field + 'Source'] === 'native-turn' && typeof text === 'string' && text.trim()
+      ? text.trim().slice(0, 120) : null;
+  };
+  for (const field of ['model', 'effort']) {
+    const observed = value(field);
+    if (observed) (run.observedTurnSettings ||= {})[field] ??= observed;
+  }
+  if (isProfileId(profileBinding?.profileId) && Number.isSafeInteger(profileBinding.revision) && profileBinding.revision > 0
+      && typeof profileBinding.hash === 'string' && profileBinding.hash) {
+    run.pinnedProfile ??= { id: profileBinding.profileId, revision: profileBinding.revision };
+  }
+}
+export function chatRunningSettingsView(run) {
+  if (!isRunBusy(run)) return null;
+  const unknown = '확인할 수 없음';
+  const profile = run.pinnedProfile;
+  const ceiling = run.toolCeiling ? toolCeilingSummary(run.toolCeiling) : null;
+  const policy = run.computerControl?.policy;
+  return [
+    ['엔진', run.engineId === 'codex' ? 'Codex' : run.engineId === 'claude' ? 'Claude' : unknown],
+    ['모델', run.observedTurnSettings?.model || unknown],
+    ['추론 강도', EFFORT_LABELS.find(([id]) => id === run.observedTurnSettings?.effort)?.[1] || run.observedTurnSettings?.effort || unknown],
+    ['Agent 버전', profile ? `${profile.id} · 버전 ${profile.revision}` : unknown],
+    ['도구 제한', ceiling || unknown],
+    ...(run.engineId === 'codex' ? [['컴퓨터 조작 정책', policy === 'off' ? '끔' : policy === 'inherit' ? 'Codex 설정 따름' : unknown]] : []),
+  ];
+}
 // SSE computer.used: the bridge's count and time; server names come from snapshots only.
 function computerUseWithEvent(current, details) {
   const before = publicComputerUse(current) || { calls: 0, lastAt: null, servers: [], active: false };
@@ -1020,6 +1165,7 @@ export function acceptChatRequest(state, response, requestId) {
   if (!response?.accepted) return null;
   const run = ensureRun(state, { ...response, requestId: response.requestId || requestId });
   recordRunToolCeiling(run, response.toolCeiling);
+  recordRunSettings(run, { profileBinding: response.profileBinding });
   return run;
 }
 function upsert(items, item, key = 'id') {
@@ -1055,7 +1201,9 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
   if (event.event === 'run.started') {
     recordRunToolCeiling(run, details.toolCeiling);
     recordRunComputerControl(run, details.computerControl);
+    recordRunSettings(run, { profileBinding: details.profileBinding });
   }
+  if (event.event === 'run.configuration') recordRunSettings(run, { configuration: details.configuration });
   if (event.event.startsWith('message.')) {
     const id = details.messageId || event.itemId;
     if (!id) return run;
@@ -1069,12 +1217,25 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
       if (!knownNote || event.event === 'message.completed') upsert(run.activities, note);
       return run;
     }
-    if (!message) { message = { id, role: 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
+    // The person's reply to an early question arrives as a completed user message of the same run; everything else is the Agent's.
+    const userRow = details.role === 'user' && event.event === 'message.completed';
+    if (!message) { message = { id, role: userRow ? 'user' : 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
+    if (userRow) {
+      if (typeof details.clientId === 'string' && details.clientId) message.clientId = details.clientId;
+      if (typeof details.localMessageId === 'string' && details.localMessageId) message.localMessageId = details.localMessageId;
+    }
     // CHAT-03: the store's name for this bubble rides on the event, so a live answer can be moved without a reload.
     if (typeof event.localMessageId === 'string' && event.localMessageId && !message.localMessageId) message.localMessageId = event.localMessageId;
-    if (event.event === 'message.started' && !message.content && typeof details.text === 'string') message.content = details.text;
+    if (event.event === 'message.started' && !message.content && typeof details.text === 'string') {
+      message.content = details.text;
+      // A message first seen already complete (a held answer, an intermediate message, a late-classified item) arrives whole in
+      // this event; the delta that follows repeats the same text and must not be added to it. It is never shown as streaming.
+      if (details.status === 'complete') { message.status = 'complete'; message.arrivedWhole = true; }
+    }
     if (details.phase) message.phase = details.phase;
-    if (event.event === 'message.delta' && message.completionConfirmed !== true) {
+    if (details.presentation === 'notice') message.presentation = 'notice';
+    // (A hydrated 'complete' status alone is no proof of completion: only this start-as-complete marker skips the repeat.)
+    if (event.event === 'message.delta' && message.completionConfirmed !== true && message.arrivedWhole !== true) {
       message.content += details.delta || '';
       message.status = 'streaming';
     }
@@ -1089,6 +1250,9 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     const activity = details.activity || details;
     const id = activity.id || event.itemId;
     if (id) upsert(run.activities, { ...activity, id });
+  } else if (event.event === BROWSER_STEP_CHAT_EVENT) {
+    // a1 (L1): one step of a Browser task on this run, placed by the event's time; display only
+    run.browserSteps = addBrowserStep(run.browserSteps, details, { ts: event.ts, clientThreadId: event.clientThreadId });
   } else if (event.event === 'plan.updated') {
     run.plan = copy(details.plan || details);
   } else if (event.event === 'summary.delta') {
@@ -1120,6 +1284,10 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     // A malformed or late question is dropped; it never becomes answerable.
     const input = publicUserInput(details.userInput || details);
     if (input && isRunBusy(run)) upsert(run.pendingUserInputs ||= [], input, 'userInputId');
+  } else if (event.event === 'reply.opened' || event.event === 'reply.closed') {
+    const messageId = typeof details.messageId === 'string' && details.messageId ? details.messageId : null;
+    run.replyOpen = event.event === 'reply.opened' && messageId && isRunBusy(run) ? { messageId } : null;
+    if (!run.replyOpen) run.replyPending = false;
   } else if (event.event === 'userInput.resolved') {
     run.pendingUserInputs = (run.pendingUserInputs || []).filter(item => item.userInputId !== details.userInputId);
   } else if (event.event === 'subagent.updated') {
@@ -1143,6 +1311,7 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     endComputerUse(run);
     run.pendingApprovals = [];
     run.pendingUserInputs = [];
+    run.replyOpen = null;
     for (const message of run.messages) {
       if (message.status === 'streaming') message.status = run.status === 'completed' ? 'complete' : 'partial';
     }
@@ -1216,9 +1385,11 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
     }
     run.messages = run.messages.map(message => ({ ...message, content: message.content ?? message.text ?? '', status: message.status === 'completed' ? 'complete' : message.status, role: message.role || 'assistant', runId: run.runId, answerId: run.answerId }));
     recordRunToolCeiling(run, incoming.toolCeiling);
+    recordRunComputerControl(run, incoming.computerControl);
+    recordRunSettings(run, { configuration: incoming.parentTurnConfiguration, profileBinding: incoming.profileBinding });
     if (!preserve) {
       const localInputs = run.pendingUserInputs || [];
-      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);
+      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing', 'replyOpen']) if (key in incoming) run[key] = copy(incoming[key]);
       if ('rateLimit' in incoming && (stream || !run.streamId)) run.rateLimit = rateLimit;
       const quotaError = quotaErrorForRateLimit(publicRunRateLimit(run.rateLimit, run), run.error);
       if (quotaError) run.error = quotaError;
@@ -1261,6 +1432,28 @@ export function runsForThread(state, thread) {
   return [...stored, ...live];
 }
 
+// D1: the one busy state a message can still be sent into. This DM's only working run asked an early question and nothing
+// else is on its way (no resume, no attachment capture, no request still being submitted). The reply goes into that same run.
+export function replyRunForThread(state, thread) {
+  if (!state || !thread || thread.type !== 'dm' || thread.resuming || thread.preparingInput) return null;
+  if (Object.values(state.requests || {}).some(request => requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status))) return null;
+  const busy = runsForThread(state, thread).filter(isRunBusy);
+  return busy.length === 1 && runReplyOpen(busy[0]) ? busy[0] : null;
+}
+
+// The bridge's developer flag EGDESK_INRUN_MESSAGES=on (capability 'in-run-messages'): a text message typed while the DM's one run works goes
+// into that run (the bridge stores it, tells the session heartbeat, and keeps it for the next turn if the run ends without acting on it).
+// An open early question takes precedence (replyRunForThread). Without the capability: null, the composer waits for the turn as before.
+export const IN_RUN_MESSAGES_CAPABILITY = 'in-run-messages';
+export function inRunMessageRunForThread(state, thread, capabilities) {
+  if (!Array.isArray(capabilities) || !capabilities.includes(IN_RUN_MESSAGES_CAPABILITY)) return null;
+  if (!state || !thread || thread.type !== 'dm' || thread.resuming || thread.preparingInput) return null;
+  if (Object.values(state.requests || {}).some(request => requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status))) return null;
+  const busy = runsForThread(state, thread).filter(isRunBusy);
+  const run = busy.length === 1 ? busy[0] : null;
+  return run && run.status !== 'stopping' && !run.stopRequested && !run.stopPending && !runReplyOpen(run) ? run : null;
+}
+
 export function approvalRequestFor(run, approvalId, decision) {
   if (run?.localHistory === true || !['accept', 'acceptForSession', 'decline', 'cancel'].includes(decision)) return null;
   const approval = run?.pendingApprovals?.find(item => (item.approvalId || item.id) === approvalId);
@@ -1270,7 +1463,23 @@ export function approvalRequestFor(run, approvalId, decision) {
   return { approvalId, conversationId: run.conversationId, runId: run.runId, decision };
 }
 
+// A computer permission card ('computerElicitation': Codex Computer Use's question, or EG-Desk's own first look at an app) is a one-off
+// question about one request (scope 'request'; the helper never offers a session or permanent choice). It can be allowed from the screen when
+// every field it asks is already answered the way the helper would send it without the person's input (a boolean always has a value; a
+// required choice needs a preselected, listed option), because this screen sends no answers. Anything else stays refuse-only.
+function computerCardScopeKnown(approval) {
+  if (approval.scope !== 'request' || approval.acceptDisabledReason || !Array.isArray(approval.fields) || approval.fields.length > 16) return false;
+  return approval.fields.every(field => {
+    if (!field || typeof field !== 'object') return false;
+    if (field.type === 'boolean') return typeof field.value === 'boolean';
+    if (field.type !== 'enum' || !Array.isArray(field.options)) return false;
+    const chosen = Number.isInteger(field.choice) && field.choice >= 0 && field.choice < field.options.length;
+    return field.choice == null ? field.required !== true : chosen;
+  });
+}
+
 export function approvalScopeKnown(approval) {
+  if (approval?.kind === 'computerElicitation') return computerCardScopeKnown(approval);
   if (!['commandExecution', 'fileChange'].includes(approval?.kind)) return false;
   if (approval.acceptDisabledReason) return false;
   if (approval.networkApprovalContext != null) {
@@ -1429,7 +1638,9 @@ export function projectRunMessages(existing, run, now = Date.now()) {
     ordinal[role] = order + 1;
     const sameTurn = message => message.runId === run.runId && (!message.conversationId || message.conversationId === run.conversationId);
     let index = messages.findIndex(message => sameTurn(message) && (message.providerItemId === incoming.id || message.id === incoming.id));
-    if (index < 0 && role === 'user') {
+    // A reply sent into the working run names its own request: it joins the bubble the person already sees, never the first prompt.
+    if (index < 0 && role === 'user' && incoming.clientId) index = messages.findIndex(message => message.role === 'user' && message.requestId === incoming.clientId);
+    if (index < 0 && role === 'user' && !(incoming.clientId && incoming.clientId !== run.requestId)) {
       const candidates = messages.map((message, i) => ({ message, i })).filter(({ message }) => sameTurn(message) && message.role === 'user');
       const candidate = candidates[order];
       if (candidate && !candidate.message.providerItemId) index = candidate.i;
@@ -2232,6 +2443,10 @@ export function changedClaudeEngineProfiles(previous, next) {
 export function chatThreadReadiness(thread, context = {}) {
   const engineId = chatThreadEngineId(thread, context);
   const auth = context.authStatus || context.auth;
+  // L1 c18: a room on a non-default Codex engine profile is ready when that profile is signed in (the default sign-in is another account)
+  const slotProfile = engineId === 'codex' ? codexSlotProfile(thread?.engineProfileId, context) : null;
+  if (slotProfile) { const signedIn = slotProfile.auth?.status === 'signedIn';
+    return { engineId, ready: signedIn && context.connected === true, reason: !signedIn ? 'Codex 연결 후 전송할 수 있습니다' : !context.connected ? 'Codex 연결을 확인해 주세요' : null }; }
   if (engineId === 'codex') return { engineId, ready: !!auth?.isLoggedIn && context.connected === true,
     reason: !auth?.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !context.connected ? 'Codex 연결을 확인해 주세요' : null };
   const row = engineRows(context.engines).find(entry => entry.id === engineId);
@@ -2493,11 +2708,16 @@ function quotaErrorForRateLimit(rateLimit, error) {
     retryAt: rateLimit.resetsAt };
 }
 
+// u1: the Claude CLI reports status "allowed_warning" early (recorded events: 42.5% of the 5-hour window, 44% of the week), long before a limit is near; "가까워졌습니다" at 44% was wrong. The warning
+// level (and its wording) now needs the reported percent to reach this bar (the same 70 % the real-engine usage guard stops at); below it the same report reads as the plain "사용량을 확인했습니다" with the
+// same window and percent. A warning with no reported percent stays a warning (nothing says it is far from the limit).
+export const RATE_LIMIT_WARN_FROM_PERCENT = 70;
 /** A reported quota observation, never availability proof or a resend action. */
 export function runRateLimitNotice(run, now = Date.now()) {
   const rateLimit = publicRunRateLimit(run?.rateLimit, run);
   if (!rateLimit) return null;
-  const level = rateLimit.status === 'rejected' || rateLimit.creditsRequired ? 'limit' : rateLimit.status === 'allowed_warning' ? 'warn' : 'ok';
+  const level = rateLimit.status === 'rejected' || rateLimit.creditsRequired ? 'limit'
+    : rateLimit.status === 'allowed_warning' && (rateLimit.usedPercent === null || rateLimit.usedPercent >= RATE_LIMIT_WARN_FROM_PERCENT) ? 'warn' : 'ok';
   const windowLabel = RUN_RATE_LIMIT_WINDOWS.find(([name]) => name === rateLimit.window)?.[1] || null;
   const at = Number.isFinite(now) && Number.isFinite(new Date(now).getTime()) ? now : Date.now();
   const clock = formatResetClock(rateLimit.resetsAt, at);
@@ -2555,12 +2775,52 @@ export function chatSessionKind(thread) {
   return null;
 }
 
+// u1: a new DM room is named "Codex N" (peer "Codex") whatever engine will answer. Choosing another engine before the first send renames a room that still has that default name ("Claude N",
+// peer "Claude"); a name the person changed is never touched. Returns { title, from, to } (the peer's old and new name) or null. `engineLabel` is the chosen engine's own label.
+// u3 (D11): the number of a default room name ("Codex N", "Claude N") comes from one counter for every engine, but the counter is not saved: after a restart it starts again at 1 and a new room
+// was named like an existing one ("Claude 1" twice), and a room renamed for another engine could take a name another room already had. The number is now one above the highest number any
+// default-named room already has (never below the counter), so default names stay unique across engines and restarts. Names the person chose never count.
+const DEFAULT_ROOM_NAME = /^(?:Codex|Claude) (\d{1,6})$/;
+export function nextDefaultRoomNumber(threads, counter = 0) {
+  let highest = Number.isFinite(counter) ? Math.max(0, Math.floor(counter)) : 0;
+  for (const thread of Array.isArray(threads) ? threads : []) {
+    const match = DEFAULT_ROOM_NAME.exec(typeof thread?.title === 'string' ? thread.title : '');
+    if (match) highest = Math.max(highest, Number(match[1]));
+  }
+  return highest + 1;
+}
+export function relabelDefaultRoom(thread, engineLabel, selfName = '나', { threads = null } = {}) {
+  const label = typeof engineLabel === 'string' ? engineLabel.trim().slice(0, 40) : '';
+  const match = /^(Codex|Claude)(?: (\d{1,6}))?$/.exec(typeof thread?.title === 'string' ? thread.title : '');
+  if (!label || !match || thread.type !== 'dm' || chatThreadEngineLocked(thread)) return null;
+  let title = match[2] ? `${label} ${match[2]}` : label;
+  if (title === thread.title) return null;
+  // u3: a name another room already has is not taken a second time
+  if (match[2] && Array.isArray(threads) && threads.some(other => other && other.id !== thread.id && other.title === title)) title = `${label} ${nextDefaultRoomNumber(threads)}`;
+  const peers = Array.isArray(thread.participants) ? thread.participants.filter(name => name !== selfName) : [];
+  const from = peers.length === 1 && (peers[0] === match[1] || peers[0] === thread.title) ? peers[0] : null;
+  return { title, from, to: from ? label : null };
+}
+
 /** The '기록 없이 시작' switch on a new room: shown until the first send; on only when the bridge supports it. */
-export function chatStatelessStartView(thread, capabilities) {
-  const supported = capabilityListed(capabilities, 'stateless');
+// u1: the switch is a Codex thing (its words name Codex) and an engine without the ephemeralThreads capability (Claude: the CLI keeps its own sessions) cannot start one: the send would be refused
+// (STATELESS_UNSUPPORTED). With `codex` (the window's codex state) the room's engine is read from the engines list; an engine that lists capabilities without ephemeralThreads gets no switch
+// (available/on false) and the note below, which is the first sentence of the existing STATELESS_UNSUPPORTED text (a proposal awaiting approval, see the report). Unknown engine or no
+// capability list: as before.
+export const STATELESS_ENGINE_UNSUPPORTED_NOTE = '이 AI 엔진은 기록 없이 시작을 지원하지 않습니다.';
+export function chatStatelessStartView(thread, capabilities, codex = null) {
+  let engineUnsupported = false;
+  if (thread && codex && typeof codex === 'object') {
+    try {
+      const engineId = chatThreadEngineId(thread, codex);
+      const choice = chatEngineChoices(codex.engines, codex.authStatus).find(row => row.id === engineId);
+      engineUnsupported = !!choice && choice.capabilities.length > 0 && !choice.capabilities.includes('ephemeralThreads');
+    } catch { engineUnsupported = false; }
+  }
+  const supported = capabilityListed(capabilities, 'stateless') && !engineUnsupported;
   const open = !!thread && !chatThreadEngineLocked(thread);
   const on = supported && open && thread.startStateless === true;
-  const note = !Array.isArray(capabilities) ? '코덱스 연결을 확인한 뒤 고를 수 있습니다.'
+  const note = engineUnsupported ? STATELESS_ENGINE_UNSUPPORTED_NOTE : !Array.isArray(capabilities) ? '코덱스 연결을 확인한 뒤 고를 수 있습니다.'
     : !supported ? '지금 연결된 브리지는 기록 없이 시작을 지원하지 않습니다.'
       : on ? '코덱스에 대화 기록을 남기지 않습니다. 나중에 이어서 대화하지 못할 수 있고, 분기할 수 없습니다. 이 화면의 대화 내용은 이 기기에 남습니다.'
         : '켜면 코덱스에 기록을 남기지 않는 일회성 대화로 시작합니다.';
@@ -2597,15 +2857,18 @@ export function chatMessageForkPoint(thread, message) {
  * when it cannot. A one-time or bounded room never can; others wait for the
  * connection, the account and any running turn.
  */
-export function chatForkAvailability(thread, { connected = false, auth = null, capabilities = null, busy = false, runs = [], fromTurnId = null } = {}) {
+export function chatForkAvailability(thread, { connected = false, auth = null, capabilities = null, busy = false, runs = [], fromTurnId = null, engines = null } = {}) {
   const no = reason => ({ available: false, reason });
+  // L1 c19: a room on another engine profile is checked against that profile's sign-in and account, not the default sign-in
+  const context = { engines };
+  const signedIn = codexRoomOnOtherProfile(thread, context) ? !!codexSlotAccountKey(thread.engineProfileId, context) : !!auth?.isLoggedIn;
   if (!thread) return no('대화방을 찾지 못했습니다.');
   if (chatSessionKind(thread) === 'stateless') return no('일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.');
   if (chatThreadBounded(thread, runs)) return no('점검이나 Browser 조작으로 제한해 실행한 대화는 분기할 수 없습니다.');
   if (!thread.conversationId) return no(nativeBindingHeld(thread) ? '이전 대화의 계정 소유를 확인한 뒤 분기할 수 있습니다.' : '아직 시작하지 않은 대화는 분기할 수 없습니다.');
-  if (!connected || !auth?.isLoggedIn) return no('코덱스에 연결해 로그인하면 분기할 수 있습니다.');
+  if (!connected || !signedIn) return no('코덱스에 연결해 로그인하면 분기할 수 있습니다.');
   if (!capabilityListed(capabilities, 'fork')) return no('지금 연결된 브리지는 대화 분기를 지원하지 않습니다.');
-  if (!canResumeNativeThread(thread, auth)) return no('지금 로그인한 계정의 대화인지 확인한 뒤 분기할 수 있습니다.');
+  if (!canResumeNativeThread(thread, auth, context)) return no('지금 로그인한 계정의 대화인지 확인한 뒤 분기할 수 있습니다.');
   const from = fromTurnId ? (Array.isArray(runs) ? runs : []).find(run => run?.runId === fromTurnId && run.conversationId === thread.conversationId) : null;
   if (from && isRunBusy(from)) return no('이 응답이 끝난 뒤 이 지점에서 분기할 수 있습니다.');
   if (busy) return no('진행 중인 실행이 끝난 뒤 분기할 수 있습니다.');
@@ -2844,7 +3107,7 @@ export function computerUseRunLine(run, { formatTime = clockText } = {}) {
       use.active && isRunBusy(run) ? '지금 조작 중' : null, use.servers.length ? use.servers.join(', ') : null].filter(Boolean).join(' · ');
   }
   if (run?.computerControl?.policy === 'off') return '컴퓨터 조작 끈 채로 실행';
-  if (run?.computerControl?.policy === 'inherit') return '컴퓨터 조작 켜 둠 · 이 실행에서는 조작 안 함';
+  if (run?.computerControl?.policy === 'inherit') return '컴퓨터 조작은 Codex 설정 따름 · 이 실행에 기록된 조작 없음';
   return null;
 }
 const byteText = bytes => bytes < 1024 ? `${bytes}바이트`
@@ -2900,6 +3163,9 @@ const taskTime = value => {
 /** Korean word for a task status; an unknown value never shows as the raw token. */
 export const taskStatusText = status => lookup(TASK_STATUS_TEXT, status) || '상태 확인 중';
 
+const TASK_QUEUE_TEXT = Object.freeze([['local-host-pressure', '대기 중 · 이 컴퓨터의 CPU 사용량이 높음'],
+  ['task-concurrency-limit', '대기 중 · 동시 실행 한도']]);
+
 // Only the fields the list shows are kept from a frame or state read.
 function taskGraphShape(graph) {
   if (!graph || typeof graph !== 'object' || !taskRef(graph.graphId) || !Array.isArray(graph.tasks) || graph.tasks.length > 256) return null;
@@ -2913,7 +3179,8 @@ function taskGraphShape(graph) {
         // explicit null sentinel; dropping them would turn a question into a
         // legacy no-answer gate. Never retain an answer or a private textRef.
         .map(key => [key, key === 'response' ? taskGateView(gate).response : gate[key]])));
-    tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, approvalRequested: raw.approvalRequested === true, gates });
+    tasks.push({ taskId: raw.taskId, status: typeof raw.status === 'string' ? raw.status : null, approvalRequested: raw.approvalRequested === true, gates,
+      ...(raw.status === 'ready' && lookup(TASK_QUEUE_TEXT, raw.queueReason) ? { queueReason: raw.queueReason } : {}) });
   }
   return {
     ...Object.fromEntries(TASK_SCOPE_KEYS.map(key => [key, graph[key] ?? null])),
@@ -3262,7 +3529,7 @@ export function taskBoardView(board, { folderName = null, continuing = null, app
     const graph = entry.graph;
     const taskNames = Object.fromEntries(graph.tasks.map((task, index) => [task.taskId, entry.titles?.[task.taskId] || `작업 ${index + 1}`]));
     const tasks = graph.tasks.map(task => ({
-      taskId: task.taskId, name: taskNames[task.taskId], status: task.status, statusText: taskStatusText(task.status),
+      taskId: task.taskId, name: taskNames[task.taskId], status: task.status, statusText: lookup(TASK_QUEUE_TEXT, task.queueReason) || taskStatusText(task.status),
       conditions: task.gates.map(gate => {
         const condition = taskGateView(gate, { taskNames, folderName, now });
         const here = continuing && continuing.graphId === entry.graphId && continuing.taskId === task.taskId && continuing.gateId === gate.gateId
@@ -3512,6 +3779,16 @@ const AWAIT_CONDITION_TEXT = [['task', ['앞 단계 완료']], ['approval', ['�
 const xmlText = value => String(value).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
 
+/**
+ * A completed line the system wrote itself (message.presentation === 'notice'), drawn as one quiet system row instead of an
+ * Agent bubble; null for every other message. The field is the only switch: without it the same text stays an Agent bubble.
+ */
+export function systemNoticeMessageView(message) {
+  if (message?.role !== 'assistant' || message.presentation !== 'notice' || message.status === 'streaming') return null;
+  const line = (typeof message.content === 'string' && message.content ? message.content : typeof message.text === 'string' ? message.text : '').trim();
+  return line ? { line } : null;
+}
+
 /** The system line for a plan step resumed in place, or null for any other message. */
 export function awaitResumeMessageView(message) {
   if (message?.role !== 'user') return null;
@@ -3647,6 +3924,37 @@ function resultCardTitle(text, author) {
 }
 
 /** A stored card record, checked and capped (also for one read back from the Desk or a Board), or null. */
+// Canvas provenance (cycle 8): who made a canvas component and for which answer, recorded when the card is created, content-free (ids, kind words and times only),
+// and kept with the card exactly like its position. The card is created by the user's own action (a chip, the keep-as-card button) from something an Agent
+// wrote, so the creator is 'agent'. Anything that has none (older cards, user notes, browsers...) is 'unknown' to the briefing flow and is never retrievable.
+// supersededBy is set when a newer version of the same outputKey arrives in the same room while this card still shows an older one.
+export const PROVENANCE_CREATORS = Object.freeze(['agent', 'user', 'shared']);
+const engineWord = value => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(value) ? value : null;
+export function resultProvenance(value) {
+  if (!value || typeof value !== 'object' || value.version !== 1 || !PROVENANCE_CREATORS.includes(value.creator)) return null;
+  const published = outputId(value.outputId) && typeof value.outputKey === 'string' && OUTPUT_KEY_PATTERN.test(value.outputKey)
+    && Number.isSafeInteger(value.outputVersion) && value.outputVersion >= 1 ? { outputId: value.outputId, outputKey: value.outputKey, outputVersion: value.outputVersion } : {};
+  const by = value.supersededBy && typeof value.supersededBy === 'object' && outputId(value.supersededBy.outputId) && Number.isSafeInteger(value.supersededBy.version) && value.supersededBy.version >= 1
+    ? { outputId: value.supersededBy.outputId, version: value.supersededBy.version, at: Number.isFinite(value.supersededBy.at) ? value.supersededBy.at : null } : null;
+  return { version: 1, creator: value.creator, agentId: resultRef(value.agentId), engineId: engineWord(value.engineId), runId: resultRef(value.runId), answerId: resultRef(value.answerId),
+    ...published, createdAt: Number.isFinite(value.createdAt) ? value.createdAt : null, supersededBy: by };
+}
+/** The provenance a result card gets when it is created from one answer or one published output of this room's Agent. */
+export function resultCardProvenance(thread, { runId = null, answerId = null, output = null, now = Date.now() } = {}) {
+  const agentId = thread?.profileEnabled === true && isProfileId(thread.agentProfileId) ? thread.agentProfileId : roomAgentRecord(thread?.agent)?.profileId ?? null;
+  return resultProvenance({ version: 1, creator: 'agent', agentId, engineId: thread?.engineId ?? null, runId, answerId,
+    ...(output ? { outputId: output.id, outputKey: output.outputKey, outputVersion: output.version } : {}), createdAt: now, supersededBy: null });
+}
+/** supersedeResultRecord(record, newerOutput) -> the record with supersededBy set, or null when nothing changes (not the same output key and room, not older, already marked at least this new). */
+export function supersedeResultRecord(record, value, { now = Date.now() } = {}) {
+  const newer = publishedOutputRecord(value), p = record?.provenance;
+  if (!newer || !p?.outputKey || p.outputKey !== newer.outputKey || newer.version <= p.outputVersion) return null;
+  const room = record.source?.conversationId || record.source?.threadId;
+  if (room && newer.conversationId && room !== newer.conversationId && room !== record.source?.threadId) return null;
+  if (p.supersededBy && p.supersededBy.version >= newer.version) return null;
+  return { ...record, provenance: { ...p, supersededBy: { outputId: newer.id, version: newer.version, at: now } } };
+}
+
 export function restoreResultCardRecord(value) {
   if (!value || typeof value !== 'object' || value.version !== 1) return null;
   const source = value.source && typeof value.source === 'object' ? value.source : {};
@@ -3673,6 +3981,7 @@ export function restoreResultCardRecord(value) {
       ...published,
     },
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : null,
+    ...(resultProvenance(value.provenance) ? { provenance: resultProvenance(value.provenance) } : {}),
   };
 }
 
@@ -3695,6 +4004,7 @@ export function publishedOutputCardRecord(thread, message, output, markdown, { a
       outputId: published.id, outputKey: published.outputKey, outputVersion: published.version,
     },
     createdAt: now,
+    provenance: resultCardProvenance(thread, { runId: published.runId || message?.runId || null, answerId: published.answerId || message?.answerId || null, output: published, now }),
   });
 }
 
@@ -3712,6 +4022,7 @@ export function resultCardRecord(thread, message, { author = 'Codex', now = Date
       answeredAt: message.createdAt,
     },
     createdAt: now,
+    provenance: resultCardProvenance(thread, { runId: message.runId || null, answerId: message.answerId || null, now }),
   });
 }
 

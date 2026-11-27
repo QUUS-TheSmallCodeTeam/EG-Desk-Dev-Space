@@ -15,6 +15,8 @@ import { CodexChatRuntime } from '../helper/codex-chat-runtime.mjs';
 import { createCodexEngineAdapter } from '../helper/codex-engine-adapter.mjs';
 import { createClaudeEngineAdapter } from '../helper/claude-engine-adapter.mjs';
 import { openChatStore } from '../helper/egdesk-chat-store.mjs';
+import { createHostLease } from '../helper/egdesk-host-lease.mjs';
+import { createComputerObserveProvider } from '../helper/egdesk-computer-observe.mjs';
 import { describeClaudeEngine, publicEngineRow } from '../helper/engine-registry.mjs';
 import { ContextRuntime } from '../helper/egdesk-context-runtime.mjs';
 import { estimateClaudeReaderInput } from '../helper/egdesk-claude-reader.mjs';
@@ -22,6 +24,7 @@ import { ImmutableContextStore, hashContent } from '../helper/egdesk-context-sto
 import { createContextHttpHandler } from '../helper/egdesk-context-http.mjs';
 import { createChatEngineAuth } from '../helper/codex-bridge-engine-auth.mjs';
 import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs';
+import * as CanvasLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import * as BoardThread from '../overlay/resources/EGDeskBoardThread.sys.mjs';
 
 // Execute the current production functions, including el() and the bridge
@@ -148,7 +151,7 @@ function surface({ run = null, thread = {}, auth = {}, fetchJson = async () => (
   const effects = { emits: 0, capture: [], requests: [], projectRequests: [], ready: 0, timers: 0, synced: [], logs: [], revoked: [] };
   const epochScope = ChatState.createChatEpochScope();
   const userInputDrafts = new Map();
-  const globals = { ChatState, BoardThread, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects, realProjection,
+  const globals = { ChatState, BoardThread, CanvasLayout, ChatRunResult, ChatChangeReview, InputContext, document, state, protocol, userInputDrafts, epochScope, effects, realProjection,
     window: { AbortController, crypto: webcrypto, setTimeout: () => 1, clearTimeout() {} }, queueMicrotask,
     captureChatInputs, captureManagedFileInput, boardNotice: text => effects.logs.push(text),
     SELF_MEMBER: 'self', cloneJson: clone, formatMessageTime: String, contextBoardTitle: () => '',
@@ -227,6 +230,8 @@ function composer(ui) {
     document: ui.document, body: {}, el: ui.el, ChatState, BoardThread, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
     chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,
+    // The production choice composer has its own tests; here it contributes no nodes and no draft effect.
+    choice: { panel: null, trigger: null, questionHint: null, attach() {}, sync() {}, reset() {} },
   });
   controls.resizeComposer();
   return { ...controls, viewport };
@@ -1306,8 +1311,8 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
     const ui = surface(), clicked = {isConnected:true,getBoundingClientRect:()=>scene.anchor};
     const bridge = compile(`return {${toggleSource.slice(0,-1)}};`, {state:ui.state, emit:()=>{clicked.isConnected=false;},resolveFloatingMenuPlacement:geometry.place});
     bridge.toggleEngineMenu('ui', clicked);
-    const renderers = compile(`${renderSource}\nreturn {chip:renderEngineChip,panel:renderEnginePanel};`, {
-      ChatState, BoardThread, codex:ui.state.codex, codexBridge:bridge, el:ui.el, deskIcon:()=>ui.el('span'),
+    const renderers = compile(`${functionSource('codexRuns')}\n${functionSource('codexCurrentRun')}\n${renderSource}\nreturn {chip:renderEngineChip,panel:renderEnginePanel};`, {
+      ChatState, BoardThread, state:ui.state, codex:ui.state.codex, codexBridge:bridge, el:ui.el, deskIcon:()=>ui.el('span'),
     });
     const menu = renderers.panel(ui.thread()), freshChip = renderers.chip(ui.thread());
     const anchorRect = {...scene.anchor};
@@ -1323,7 +1328,8 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
     const taskReveal = productionController('createChatTaskAnswerReveal', body);
     assert.equal(body.events.wheel.length, 1); assert.equal(body.events.click.length, 1, 'real Task helper owns its scoped listeners');
     const attach = () => compile(attachmentSource, {body,el:ui.el,shellClasses:'egd-codex-chat-shell',
-      contentChildren:[freshChip,menu],positionChatEngineMenu:geometry.position,taskAnswerReveal:taskReveal.instance});
+      contentChildren:[freshChip,menu],positionChatEngineMenu:geometry.position,taskAnswerReveal:taskReveal.instance,
+      choice:{sync(){}}}); // the choice composer is tested on its own; the render only re-syncs it after appending
     if (scene.name === 'translated Canvas at 96%') assert.ok(menu.getBoundingClientRect().left < 10, 'reproduce detached left-edge position before correction');
     attach();
     const check = () => {
@@ -1347,7 +1353,7 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
 
 // Real adapter, runtime and SQLite public projections, with only the native
 // stdio transport replaced. No provider, credential, CLI or OS calls.
-async function runtime(t, { store = false, initialSend = true, contexts = null } = {}) {
+async function runtime(t, { store = false, initialSend = true, contexts = null, toolProviders = [], hostLease = null, allowTimers = false } = {}) {
   let chatStore = store && typeof store === 'object' ? store : null;
   if (store === true) {
     const dir = mkdtempSync(join(tmpdir(), 'egdesk-surface-claude-'));
@@ -1372,12 +1378,12 @@ async function runtime(t, { store = false, initialSend = true, contexts = null }
   });
   const codex = createCodexEngineAdapter({ request: async (...args) => { codexCalls.push(args); assert.fail('Codex fallback'); },
     respond: () => assert.fail('Claude response routed to Codex') });
-  const chat = new CodexChatRuntime({ engines: [codex, claude], store: chatStore, requireStore: !!chatStore, contexts,
+  const chat = new CodexChatRuntime({ engines: [codex, claude], store: chatStore, requireStore: !!chatStore, contexts, toolProviders, hostLease,
     // This fixture's room-default DTO explicitly reports none. Keep the real
     // runtime comparison enabled without inventing an attached workspace.
     resolveProjectWorkspace: async () => null,
     now: () => NOW, emit: event => events.push(event), verifyFile: async () => null,
-    setTimer: () => assert.fail('runtime retry timer'), clearTimer() {} });
+    setTimer: allowTimers ? () => ({ unref() {} }) : () => assert.fail('runtime retry timer'), clearTimer() {} });
   const unsubscribe = claude.subscribe({ notification: (_, message) => chat.handleNotification(message),
     serverRequest: (_, message) => chat.handleServerRequest(message),
     connection: (id, connection) => chat.setConnection(id, connection.ready, connection) });
@@ -2234,4 +2240,96 @@ test('D-X3 Claude cwd refusal preserves the original draft and explicit target w
     assert.deepEqual(ui.thread().requestProjectTarget, target);
     assert.match(ui.thread().sendError, /시작 폴더.*새 대화 열기.*기존 초안과 선택은 유지/);
   });
+});
+
+// U2: the first-look card of EG-Desk's own computer tools (egdesk_computer_*), replayed through the real Claude MCP path, the real runtime, the
+// real ChatState reducer and the production surface code. D2 (screen check 2026-11-26): the card said '요청 범위를 확인하지 못해 허용할 수 없습니다'
+// and [이번만 허용] was disabled, because ChatState.approvalScopeKnown only knew commandExecution and fileChange.
+function computerHarness(t) {
+  const hostCalls = [];
+  const host = {
+    async ready() {},
+    async listApps() { return { apps: [{ bundleId: 'com.apple.calculator', pid: 701, name: 'Calculator', active: true, policy: 'regular' }] } },
+    async listWindows() { return { windows: [{ windowId: 11, pid: 701, layer: 0, onScreen: true, bounds: { x: 0, y: 0, width: 300, height: 400 }, title: 'Calculator' }] } },
+    async capture() { hostCalls.push('capture'); const error = new Error('refused'); error.code = 'HOST_AGENT_REFUSED'; error.helperCode = 'permission_missing'; throw error },
+    async readElements(query) {
+      hostCalls.push(`readElements:${query.windowId}:${query.pid}`);
+      return { window: { windowId: 11, pid: 701, bounds: { x: 0, y: 0, width: 300, height: 400 } }, geometryRevision: 5, truncated: false, complete: true, sensitiveOmitted: 0,
+        elements: [{ index: 'e1', depth: 1, role: 'AXButton', label: '7', rect: { x: 1, y: 2, width: 3, height: 4 } }] };
+    },
+  };
+  const holder = {};
+  const provider = createComputerObserveProvider({ host, ask: (run, card) => holder.h.chat.askComputerApp(run, card) });
+  return runtime(t, { toolProviders: [provider], hostLease: createHostLease({ requireMonitor: false }), allowTimers: true }).then(h => { holder.h = h; return { h, hostCalls }; });
+}
+const mcpCall = (name, args) => ({ subtype: 'mcp_message', server_name: 'egdesk', message: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } });
+
+test('U2: the computer first-look card can be allowed once from the real screen and runs the read; declining refuses; Claude path', async t => {
+  const { h, hostCalls } = await computerHarness(t);
+  const handlers = h.transports[0].options.controlHandlers;
+  handlers.mcp_message(mcpCall('egdesk_computer_read_elements', { app: 'Calculator' }), { requestId: 'cu-1' });
+  await h.drain();
+  const run = uiRun(h);
+  assert.equal(run.pendingApprovals.length, 1);
+  const approval = run.pendingApprovals[0];
+  assert.deepEqual([approval.kind, approval.scope, approval.choices, approval.appName], ['computerElicitation', 'request', ['accept', 'decline'], 'Calculator']);
+  // the state builder allows exactly the one-off accept and the decline
+  assert.deepEqual(ChatState.approvalRequestFor(run, approval.approvalId, 'accept'), { approvalId: approval.approvalId, conversationId: run.conversationId, runId: run.runId, decision: 'accept' });
+  assert.equal(ChatState.approvalRequestFor(run, approval.approvalId, 'acceptForSession'), null);
+  assert.equal(ChatState.approvalRequestFor(run, approval.approvalId, 'decline').decision, 'decline');
+  // the production screen: the card text, no 'cannot allow' line, an enabled one-off button
+  const ui = surface({ run, fetchJson: async (_path, options) => h.chat.replyApproval(JSON.parse(options.body)) }); ui.render();
+  const text = ui.panel().textContent;
+  assert.match(text, /Calculator/);
+  assert.match(text, /승인 범위: 이번 요청/);
+  assert.doesNotMatch(text, /요청 범위를 확인하지 못해/);
+  const buttons = nodes(ui.panel(), 'chat-approval-choice');
+  assert.deepEqual(buttons.map(button => [button.dataset.decision, button.textContent, button.disabled]), [['accept', '이번만 허용', false], ['decline', '거절', false]]);
+  assert.equal(hostCalls.length, 0, 'nothing is read before the person answers');
+  // allow once: the screen's own request reaches the runtime, the tool runs, and the result goes back to Claude
+  const result = await ui.replyApproval(ChatState.approvalRequestFor(run, approval.approvalId, 'accept'));
+  assert.equal(result.accepted, true);
+  await h.drain();
+  assert.deepEqual(hostCalls, ['readElements:11:701']);
+  const answer = h.transports[0].replies.at(-1).write.response.response.mcp_response.result;
+  assert.notEqual(answer.isError, true);
+  assert.match(JSON.stringify(answer.content), /AXButton/);
+  // the same app is not asked again in this run
+  handlers.mcp_message(mcpCall('egdesk_computer_read_elements', { app: 'Calculator' }), { requestId: 'cu-2' });
+  await h.drain();
+  assert.equal(uiRun(h).pendingApprovals.filter(item => item.status === 'pending').length, 0);
+  assert.deepEqual(hostCalls, ['readElements:11:701', 'readElements:11:701']);
+  // capture: the person's allowance holds, and the missing Screen Recording permission comes back as the closed refusal
+  handlers.mcp_message(mcpCall('egdesk_computer_capture', { app: 'Calculator' }), { requestId: 'cu-3' });
+  await h.drain();
+  const refused = JSON.parse(h.transports[0].replies.at(-1).write.response.response.mcp_response.result.content[0].text);
+  assert.deepEqual([refused.effect, refused.error.code], ['refused', 'permission_missing']);
+});
+
+test('U2: declining the computer card refuses the tool and the card is gone; an incomplete required choice stays disabled', async t => {
+  const { h, hostCalls } = await computerHarness(t);
+  h.transports[0].options.controlHandlers.mcp_message(mcpCall('egdesk_computer_read_elements', { app: 'Calculator' }), { requestId: 'cu-d' });
+  await h.drain();
+  const run = uiRun(h), approval = run.pendingApprovals[0];
+  const ui = surface({ run, fetchJson: async (_path, options) => h.chat.replyApproval(JSON.parse(options.body)) }); ui.render();
+  await ui.replyApproval(ChatState.approvalRequestFor(run, approval.approvalId, 'decline'));
+  await h.drain();
+  assert.equal(hostCalls.length, 0);
+  assert.equal(JSON.parse(h.transports[0].replies.at(-1).write.response.response.mcp_response.result.content[0].text).error.code, 'app_not_approved');
+  assert.equal(uiRun(h).pendingApprovals.length, 0, 'the answered card is gone from the screen state');
+  // a card from another computer server whose required choice has no preselected answer cannot be allowed from the screen (the helper would refuse it)
+  const open = (fields, extra = {}) => ({ approvalId: 'x', kind: 'computerElicitation', status: 'pending', choices: ['accept', 'decline'], scope: 'request', fields, ...extra });
+  const forRun = approval => ({ localHistory: false, conversationId: 'c', runId: 'r', pendingApprovals: [approval] });
+  const accepts = approval => ChatState.approvalRequestFor(forRun(approval), 'x', 'accept') !== null;
+  assert.equal(accepts(open([])), true);
+  assert.equal(accepts(open([{ type: 'boolean', value: false, required: true }])), true);
+  assert.equal(accepts(open([{ type: 'enum', options: [{ label: 'a' }, { label: 'b' }], choice: 0, required: true }])), true);
+  assert.equal(accepts(open([{ type: 'enum', options: [{ label: 'a' }], choice: null, required: true }])), false);
+  assert.equal(accepts(open([{ type: 'enum', options: [{ label: 'a' }], choice: null, required: false }])), true);
+  assert.equal(accepts(open([{ type: 'enum', options: [{ label: 'a' }], choice: 3, required: true }])), false);
+  assert.equal(accepts(open([{ type: 'text', required: true }])), false);
+  assert.equal(accepts(open([], { scope: 'session' })), false);
+  assert.equal(accepts(open([], { acceptDisabledReason: 'x' })), false);
+  assert.equal(accepts(open('nope')), false);
+  assert.equal(accepts(open([], { kind: 'other' })), false);
 });

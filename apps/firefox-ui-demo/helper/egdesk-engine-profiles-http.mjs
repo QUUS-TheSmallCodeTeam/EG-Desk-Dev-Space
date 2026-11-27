@@ -11,7 +11,7 @@ import { publicText } from './codex-chat-values.mjs'
 // which the person runs in a Terminal card (the official CLI login).
 const ROUTE = '/settings/engine-profiles'
 
-export function createEngineProfilesHttpHandler({ profiles, busy = () => false, inUse = () => false, refresh = null, onChange = () => {}, port = 39218 } = {}) {
+export function createEngineProfilesHttpHandler({ profiles, busy = () => false, inUse = () => false, refresh = null, canAddAndLogin = null, onChange = () => {}, port = 39218 } = {}) {
   const store = () => (typeof profiles === 'function' ? profiles() : profiles)
   const list = () => ({ profiles: store().list(), persisted: store().writable === true })
   const changed = () => { try { onChange() } catch {} }
@@ -25,7 +25,12 @@ export function createEngineProfilesHttpHandler({ profiles, busy = () => false, 
       if (url.pathname === ROUTE && req.method === 'GET') { sendJson(res, 200, list()); return true }
       if (url.pathname === ROUTE && req.method === 'POST') {
         const body = await readJsonBody(req, { maxBytes: 2048 })
-        const profile = store().add({ engine: body.engine, label: body.label })
+        const requireRunnable = body.intent === 'add-and-login'
+        if (canAddAndLogin && (!requireRunnable || !canAddAndLogin(body.engine))) {
+          sendJson(res, 409, { code: 'ENGINE_PROFILE_NOT_YET', error: 'A private login is not supported for this engine' })
+          return true
+        }
+        const profile = store().add({ engine: body.engine, label: body.label, requireRunnable })
         changed()
         const login = profile.runnable ? store().loginCommand(profile.id) : null
         sendJson(res, 200, { profile, login: login && { line: login.line, env: login.env, engine: login.engine, profileId: login.profileId }, ...list() })

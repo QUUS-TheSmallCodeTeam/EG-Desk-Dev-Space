@@ -1,0 +1,51 @@
+{
+  "set": "real-engine-conditional-yes-v1",
+  "description": "Pattern: a conditional approval (\"응 근데 테스트는 빼고\"). The assistant is asked to say which steps it would run and to ask whether to run them (not to run them yet); the person answers its question with a condition and the assistant must run exactly the approved steps. The folder's three steps each write a marker file (synthetic), so the skipped step is checked by files, not by how the model batches its commands. (v1 first version, measured on the real engine 2026-11-25: with no question to answer, \"응 근데 …\" was read as a revision of the plan and nothing ran; the first turn now asks for the question.) Pattern taken from the person's real turns (masked, re-worded); expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "conditional-yes",
+      "folder": {
+        "notes/steps.md": "1. printf ok > build.done\n2. printf ok > test.done\n3. printf ok > deploy.done\n"
+      },
+      "turns": [
+        {
+          "say": "notes/steps.md 에 적힌 명령을 순서대로 실행하려고 해. 아직 실행하지 말고, 어떤 단계들인지 알려 주고 실행해도 되는지 나에게 물어봐 줘.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "answerIncludes": [
+              "build.done",
+              "test.done",
+              "deploy.done"
+            ],
+            "files": {
+              "build.done": null,
+              "test.done": null,
+              "deploy.done": null
+            },
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "응 근데 테스트는 빼고",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "files": {
+              "build.done": "ok",
+              "test.done": null,
+              "deploy.done": "ok"
+            },
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

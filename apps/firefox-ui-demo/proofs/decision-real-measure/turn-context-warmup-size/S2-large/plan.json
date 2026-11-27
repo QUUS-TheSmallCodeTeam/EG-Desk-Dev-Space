@@ -1,0 +1,25 @@
+{
+  "set": "turn-context-warmup-size-v1/S2-large",
+  "tokenCeiling": 1640,
+  "transport": "product",
+  "passRule": "Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine (the point runner checks the shared send stamp). Run order S1-small, S2-large. Read with scripts/egdesk-turn-context-warmup-run.mjs --set size --analyze.",
+  "requests": [
+    {
+      "id": "warmup",
+      "file": "requests/warmup.json",
+      "sha256": "53645b7c59e651b98b42022b193bd0427dfaf936d2d944d17f975783665ca864",
+      "estInputTokens": 649,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "measured",
+      "file": "requests/measured.json",
+      "sha256": "bca5a7a0d2339c57bf81f2593d7afdddc19eeeb5b5f0abbe168fd9ee21b5e1f1",
+      "estInputTokens": 836,
+      "waitBeforeMs": 1000,
+      "expect": [],
+      "recordOnly": true
+    }
+  ]
+}

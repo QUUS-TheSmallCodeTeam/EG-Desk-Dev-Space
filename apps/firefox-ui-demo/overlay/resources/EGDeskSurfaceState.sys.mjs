@@ -420,6 +420,15 @@ export function canvasViewSize(kind, room = null) {
   };
 }
 
+// c35 (UX-1): a View whose minimum height is larger than the room above the dock would end partly under it (the Settings card at 600 px in a 720 px window hid its lower controls and a
+// Terminal's last lines). It gives up the overflow when it can stay at least `floor` px high; a View that cannot (a Chat at its minimum) keeps its size, as before.
+export function trimToSafeBottom(placed, safe, { floor = 320 } = {}) {
+  if (!placed || !safe || ![placed.y, placed.height, safe.bottom].every(Number.isFinite)) return placed;
+  const overflow = placed.y + placed.height - safe.bottom;
+  if (overflow <= 0 || placed.height - overflow < floor) return placed;
+  return { ...placed, height: Math.floor(placed.height - overflow) };
+}
+
 const worldBox = rect => !!rect && [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
   && rect.width > 0 && rect.height > 0;
 
@@ -477,6 +486,31 @@ export function placeCanvasView({ size, safe, occupied = [], anchor = null, gap 
   if (inside) return { x: Math.round(inside.x), y: Math.round(inside.y), width, height, inView: fits };
   const outside = nearestFreeCanvasSpot({ width, height, target, occupied, gap, reach: { width: safe.right - safe.left, height: safe.bottom - safe.top } });
   return { x: Math.round(outside.x), y: Math.round(outside.y), width, height, inView: false };
+}
+
+// u1: a View a program asked for (the sign-in page the Claude CLI opens) opens beside the View it came from, not in "the closest empty spot of the visible area", which with a large Terminal
+// is off screen. Order: right of the opener, left, below, above (aligned with its top or left edge, slid along the edge to stay inside `safe` when the room allows), the first spot that
+// is free of every `occupied` rect by `gap` and fully inside `safe` (inView true). When no such spot exists (the opener fills the view) the first FREE one is returned with inView false:
+// the caller then frames both. Occupied rects never move. Null for unusable input.
+export function placeBesideOpener({ size, opener, safe, occupied = [], gap = 24 } = {}) {
+  const width = size?.width, height = size?.height;
+  if (!(width > 0 && height > 0) || !worldBox(opener) || !safe || ![safe.left, safe.top, safe.right, safe.bottom].every(Number.isFinite)) return null;
+  const clamp = (value, low, high) => Math.round(high < low ? low : Math.min(high, Math.max(low, value)));
+  const rects = (Array.isArray(occupied) ? occupied : []).filter(worldBox);
+  const free = (x, y) => rects.every(r => x + width + gap <= r.x || x >= r.x + r.width + gap || y + height + gap <= r.y || y >= r.y + r.height + gap);
+  const inside = (x, y) => x >= safe.left && y >= safe.top && x + width <= safe.right && y + height <= safe.bottom;
+  const spots = [
+    { x: opener.x + opener.width + gap, y: clamp(opener.y, safe.top, safe.bottom - height) },
+    { x: opener.x - gap - width, y: clamp(opener.y, safe.top, safe.bottom - height) },
+    { x: clamp(opener.x, safe.left, safe.right - width), y: opener.y + opener.height + gap },
+    { x: clamp(opener.x, safe.left, safe.right - width), y: opener.y - gap - height },
+  ].map(spot => ({ x: Math.round(spot.x), y: Math.round(spot.y) }));
+  const visible = spots.find(spot => free(spot.x, spot.y) && inside(spot.x, spot.y));
+  if (visible) return { ...visible, width, height, inView: true };
+  const first = spots.find(spot => free(spot.x, spot.y));
+  if (first) return { ...first, width, height, inView: false };
+  const near = nearestFreeCanvasSpot({ width, height, target: spots[0], occupied: rects, gap, reach: { width: safe.right - safe.left, height: safe.bottom - safe.top } });
+  return near ? { x: Math.round(near.x), y: Math.round(near.y), width, height, inView: false } : null;
 }
 
 // The smallest camera pan that shows a world rect inside the safe area
@@ -1080,4 +1114,68 @@ export function snapshotBoardProjection(projection, records, now = Date.now()) {
   const project = boardProjectReference(projection.project);
   if (project) snapshot.agenda.project = project; else delete snapshot.agenda.project;
   return snapshot;
+}
+
+// ---- c36: stale sign-in cards (flag EGDESK_TERMINAL_OPEN_URL; capability 'terminal-open-url') ----
+// A Browser Card left over from an earlier CLI login can finish the sign-in after its CLI is gone: the provider redirects to the CLI's loopback listener (http://localhost:<port>/callback?code=...),
+// Firefox shows "can't connect" and the AUTHORIZATION CODE sits in the address bar, the history and the saved session. None of that may be kept.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+const CREDENTIAL_PARAMS = ['code', 'state', 'access_token', 'id_token', 'token', 'refresh_token'];
+// the AI providers' sign-in domains (the same list as helper/egdesk-auth-opaque.mjs AUTH_OPAQUE_HOSTS; a test keeps them equal)
+export const SIGNIN_HOSTS = Object.freeze(['claude.ai', 'claude.com', 'anthropic.com', 'auth.openai.com', 'auth0.openai.com', 'platform.openai.com', 'chatgpt.com']);
+
+/** true for a loopback http(s) address whose query or fragment carries an authorization code, state or token. */
+export function loopbackCredentialUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (!['http:', 'https:'].includes(url.protocol) || !LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) return false;
+    const names = [...url.searchParams.keys(), ...new URLSearchParams(url.hash.replace(/^#/, '')).keys()].map(name => name.toLowerCase());
+    return CREDENTIAL_PARAMS.some(name => names.includes(name));
+  } catch { return false; }
+}
+/** Firefox's error page for a failed load keeps the original address in its u= parameter (about:neterror?e=connectionFailure&u=http%3A//localhost...): that address, or null. */
+export function errorPageOriginalUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'about:' || !/^(neterror|certerror|blocked)$/.test(url.pathname)) return null;
+    return url.searchParams.get('u');
+  } catch { return null; }
+}
+/** the address, or the address an error page stands for, carries a credential to a loopback callback */
+export const credentialBearingUrl = value => loopbackCredentialUrl(value) || loopbackCredentialUrl(errorPageOriginalUrl(value));
+/** an AI provider's sign-in or authorization page (host and subdomains, an /oauth/ path) */
+export function signinPageUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (!['http:', 'https:'].includes(url.protocol)) return false;
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    return SIGNIN_HOSTS.some(h => host === h || host.endsWith(`.${h}`)) && /\/(oauth|login|log-in|signin|sign-in|authorize)\b/i.test(url.pathname);
+  } catch { return false; }
+}
+/** u1: the sign-in page of Claude (not OpenAI's): the login card whose success is read from the Claude engine's state. */
+export function claudeSigninPageUrl(value) {
+  try {
+    if (!signinPageUrl(value)) return false;
+    const host = new URL(String(value)).hostname.toLowerCase().replace(/\.$/, '');
+    return ['claude.ai', 'claude.com', 'anthropic.com'].some(h => host === h || host.endsWith(`.${h}`));
+  } catch { return false; }
+}
+/** What a restored Browser Card may load: never a sign-in page left from an earlier login (guard on) and never an address carrying a loopback credential: those restore blank. */
+export function restorableBrowserUri(uri, { guard = false } = {}) {
+  if (credentialBearingUrl(uri)) return 'about:blank';
+  if (guard && signinPageUrl(uri)) return 'about:blank';
+  return uri;
+}
+/** A saved Browser Card record without such an address (blank instead), the same record object when nothing needed changing. */
+export function scrubBrowserRecord(record, { guard = false } = {}) {
+  if (!record || record.type !== 'browser') return record;
+  const bad = value => typeof value === 'string' && restorableBrowserUri(value, { guard }) !== value;
+  const runtime = record.runtimeState, source = record.sourceRef;
+  const urlFields = [runtime?.uri, runtime?.homeUrl, source?.uri, ...(Array.isArray(runtime?.history) ? runtime.history : [])];
+  if (!urlFields.some(bad)) return record;
+  const clean = value => (bad(value) ? 'about:blank' : value);
+  return { ...record,
+    ...(runtime ? { runtimeState: { ...runtime, ...(runtime.uri !== undefined ? { uri: clean(runtime.uri) } : {}), ...(runtime.homeUrl !== undefined ? { homeUrl: clean(runtime.homeUrl) } : {}),
+      ...(Array.isArray(runtime.history) ? { history: runtime.history.map(clean) } : {}), ...(runtime.title !== undefined && urlFields.some(bad) ? { title: '' } : {}) } } : {}),
+    ...(source ? { sourceRef: { ...source, ...(source.uri !== undefined ? { uri: clean(source.uri) } : {}) } } : {}) };
 }

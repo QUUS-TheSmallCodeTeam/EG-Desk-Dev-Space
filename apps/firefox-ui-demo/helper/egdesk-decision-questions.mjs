@@ -87,6 +87,7 @@ export function readPredicate(answers, name, threshold) {
  * readChoice(answers, name, { minConfidence, minMargin? }) →
  *   { state: 'accepted'|'uncertain'|'unknown', value, confidence, margin, ranked }
  * ranked: the top probabilities (at most 3) for escalation messages.
+ * An exact tie between the top two options is uncertain even at zero margin.
  */
 export function readChoice(answers, name, { minConfidence, minMargin = 0 } = {}) {
   const answer = answers?.[name]
@@ -95,6 +96,9 @@ export function readChoice(answers, name, { minConfidence, minMargin = 0 } = {})
   const top = answer.probabilities[0]?.probability ?? answer.confidence
   const second = answer.probabilities[1]?.probability ?? 0
   const margin = Math.max(0, top - second)
-  const accepted = answer.confidence >= minConfidence && margin >= minMargin
+  const [first, runnerUp] = ranked
+  const tiedAtTop = Number.isFinite(runnerUp?.probability) && first?.probability === runnerUp.probability &&
+    first.value !== runnerUp.value
+  const accepted = !tiedAtTop && answer.confidence >= minConfidence && margin >= minMargin
   return { state: accepted ? 'accepted' : 'uncertain', value: answer.choice, confidence: answer.confidence, margin, ranked }
 }

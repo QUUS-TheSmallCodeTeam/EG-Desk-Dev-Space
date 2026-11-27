@@ -1,0 +1,52 @@
+{
+  "set": "real-engine-why-stopped-v1",
+  "description": "Pattern: \"왜 멈췄니?\" typed while a long command runs. Needs the decision composition (--decisions with a key): EGDESK_INRUN_MESSAGES (a message while the run works), EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on (held, checked messages). The second turn carries whileRunning: it is sent while the first turn still works (afterMs after that turn started). The command is not interrupted and finishes; a short reply is posted for the question. c26: the second turn expects the reply as a message of its own, after the question was sent: postedMin 2 (the reply and the final answer) and engine.flowMessages min 1 (the system's own short message); posted:true alone passed on the final answer in Main's check-2, check-6 and check-7w although the reply was dropped by the draft check. Expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "why-stopped",
+      "flags": {
+        "EGDESK_INRUN_MESSAGES": "on",
+        "EGDESK_CONVERSATION_FLOW": "on",
+        "EGDESK_DRAFT_CHECK": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "다음 명령을 실행하고, 끝나면 결과를 알려 줘: sleep 15 && echo build-finished",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [
+              "sleep 15 && echo build-finished"
+            ],
+            "answerIncludes": [
+              "build-finished"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "아니 지금 왜 멈췄니?",
+          "whileRunning": {
+            "afterMs": 4000
+          },
+          "expect": {
+            "noNativeTools": true,
+            "posted": true,
+            "postedMin": 2,
+            "engine": {
+              "flowMessages": {
+                "min": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

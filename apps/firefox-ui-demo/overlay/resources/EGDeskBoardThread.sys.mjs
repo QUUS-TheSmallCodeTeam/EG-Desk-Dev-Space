@@ -422,6 +422,7 @@ export function boardMemberState(profileId, { runs = [], routes = {}, connectedR
   }
   if (!route) return null;
   if (route.status === 'unknown') return { kind: 'waiting', label: '접수 미확인' };
+  if (route.status === 'deferred' && route.code === 'local-host-pressure') return { kind: 'waiting', label: 'CPU 포화로 미실행' };
   if (route.status === 'deferred') return { kind: 'waiting', label: '차례 대기' };
   if (route.status === 'failed') return { kind: 'blocked', label: '막힘' };
   if (route.status === 'started') return { kind: 'active', label: '작업 중' };
@@ -442,6 +443,7 @@ const SEND_ERROR_TEXT = Object.freeze({
   INVALID_BOARD_MEMBERS: '이 Board Thread의 참여자 정보가 올바르지 않습니다. 참여자를 확인해 주세요.',
   INVALID_BOARD_MESSAGES: '최근 대화를 함께 보내지 못했습니다. 다시 보내 주세요.',
   INVALID_BOARD_SEND: '이 Board Thread 메시지를 보낼 수 없습니다. 다시 보내 주세요.',
+  'local-host-pressure': '이 컴퓨터의 CPU 사용량이 높아 시작하지 않았습니다. 사용량이 줄면 보류된 Agent만 다시 @로 불러 주세요.',
   BOARD_CONCURRENCY_LIMIT: '이 Board Thread에서는 Agent 2명까지 동시에 일합니다. 앞 작업이 끝난 뒤 다시 보내 주세요.',
   BOARD_BROWSER_BOUNDED: 'Browser 조작을 맡긴 메시지는 Board Thread의 한 Agent에게만 보낼 수 있습니다. @부름을 빼고 보내 주세요.',
 });

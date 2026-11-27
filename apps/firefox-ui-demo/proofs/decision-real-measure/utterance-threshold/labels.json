@@ -1,0 +1,1217 @@
+{
+  "set": "utterance-threshold-v1",
+  "fixedBefore": "any request of this set was sent",
+  "rules": [
+    "L1 A label is judged against the option descriptions the product sends (helper/egdesk-speech-grounding.mjs axes), for the one sentence alone, with the request clock 2026-11-27 10:00 KST.",
+    "L2 Each sentence has, per axis, a set of ALLOWED labels: every label the option descriptions admit for that sentence. When two labels both fit, both are allowed. \"unknown\" is always tolerated: the product never installs it.",
+    "L3 An axis whose allowed set is only [\"unknown\"] is deliberately ambiguous (mixed basis, conflicting times, mixed form): installing ANY label there is a wrong install.",
+    "L4 source: own seeing, hearing or doing = self_reported_observation; credited to a named or implied other person/team = attributed_report; a conclusion (\"~것 같아\", \"~걸 보니\", \"아마\") = inference; a cited record, log, mail, memo, notice or document = record_based; a bare claim, a plan or a question with no basis given = unspecified.",
+    "L5 form: claim = assertion; intention, proposal, commitment or instruction = plan; \"~면\" contingency = conditional (and plan when the conditional itself proposes an action); request for information = question.",
+    "L6 time: a stated absolute or relative anchor (어제, 방금, 지난주 화요일, 다음 달) = *_anchored; an approximate anchor (\"내일쯤\", \"어제인가 그저께인가\") also allows *_unspecified; \"지금\" = at_utterance; explicitly ongoing (\"요즘 계속\", \"3년째 ~고 있어\") = ongoing_no_end; a sentence that places two events at different times is ambiguous (L3).",
+    "L7 tw_status (soft only, not part of the threshold question): done / plan / corrected as the sentence states; unknown when it states no state.",
+    "L8 The labels were written by one analyst (lane L6) before any request was built or sent. The owner may change them BEFORE the first chunk is sent (the hash then changes and the plans are rebuilt); after the first send they are frozen.",
+    "L9 Unit of independence: the sentence. Axes of one sentence are not independent of each other; rates are reported per install AND per sentence (a sentence counts once if any of its installs is wrong)."
+  ],
+  "productBar": {
+    "confidence": 0.85,
+    "margin": 0.2
+  },
+  "candidateBars": [
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.85,
+    0.9,
+    0.95
+  ],
+  "sentences": [
+    {
+      "id": "c01",
+      "text": "어제 오후에 3층 회의실 프로젝터가 꺼져 있는 걸 내가 봤어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c02",
+      "text": "민지 씨가 그러는데 어제 배포는 문제없이 끝났대.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "attributed_report"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c03",
+      "text": "로그에 오늘 새벽 2시에 백업이 끝났다고 찍혀 있어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c04",
+      "text": "다음 주 화요일에 고객사에 견적서를 보낼게.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "plan"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "plan"
+        ]
+      }
+    },
+    {
+      "id": "c05",
+      "text": "비가 오면 금요일 행사는 실내에서 할 거야.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "conditional",
+          "plan"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "plan",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c06",
+      "text": "어제 회의에서 예산 얘기 나왔어?",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "question"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c07",
+      "text": "요즘 계속 빌드가 느려.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation",
+          "unspecified"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "ongoing_no_end"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c08",
+      "text": "지금 사내 위키에 접속이 안 돼.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation",
+          "unspecified"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "at_utterance"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c09",
+      "text": "언젠가 문서 정리를 한 번 해야겠어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "plan"
+        ],
+        "time": [
+          "future_unspecified"
+        ],
+        "status": [
+          "plan"
+        ]
+      }
+    },
+    {
+      "id": "c10",
+      "text": "주문 내역을 보니 지난달 15일에 결제가 두 번 됐어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "unknown",
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c11",
+      "text": "팀장님 말로는 지난주 금요일에 계약서에 서명했대.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "attributed_report"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c12",
+      "text": "서버 응답이 느린 걸 보니 트래픽이 몰린 것 같아.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "inference"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "at_utterance",
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c13",
+      "text": "내일 오전 10시에 점검 회의를 하자.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "plan"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "plan"
+        ]
+      }
+    },
+    {
+      "id": "c14",
+      "text": "보고서 초안은 내가 방금 다 썼어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c15",
+      "text": "택배가 언제 도착해?",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "question"
+        ],
+        "time": [
+          "future_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c16",
+      "text": "회의록에 따르면 지난 회의에서 출시일을 정했어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored",
+          "past_unspecified"
+        ],
+        "status": [
+          "done",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c17",
+      "text": "그 버그는 내가 고쳤어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_unspecified"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c18",
+      "text": "수빈 씨한테 들었는데 프린터가 또 고장 났대.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "attributed_report"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c19",
+      "text": "만약 오늘 안에 승인이 안 나면 출시를 미루자.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "conditional",
+          "plan"
+        ],
+        "time": [
+          "future_anchored",
+          "future_unspecified"
+        ],
+        "status": [
+          "plan",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c20",
+      "text": "다음 달부터 매주 월요일에 주간 보고를 올릴게.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "plan"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "plan"
+        ]
+      }
+    },
+    {
+      "id": "c21",
+      "text": "지난주 화요일에 고객 문의가 평소의 두 배였어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c22",
+      "text": "메일 보니까 견적 회신이 이미 와 있어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_unspecified",
+          "at_utterance"
+        ],
+        "status": [
+          "done",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c23",
+      "text": "아마 내일쯤 비가 올 것 같아.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "inference"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "future_anchored",
+          "future_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c24",
+      "text": "이번 주 안에 계약서 검토를 끝낼 계획이야.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "plan"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "plan"
+        ]
+      }
+    },
+    {
+      "id": "c25",
+      "text": "점심 먹으러 갈래?",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "question",
+          "plan"
+        ],
+        "time": [
+          "future_unspecified",
+          "at_utterance"
+        ],
+        "status": [
+          "unknown",
+          "plan"
+        ]
+      }
+    },
+    {
+      "id": "c26",
+      "text": "작년 이맘때도 서버가 한 번 크게 멈췄었어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c27",
+      "text": "센서 기록을 확인했는데 창고 온도가 밤새 30도를 넘었어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based",
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c28",
+      "text": "재고가 줄어드는 속도를 보면 다음 주면 다 떨어지겠어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "inference"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c29",
+      "text": "고객센터 운영 시간을 바꾸는 건 어때?",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "question",
+          "plan"
+        ],
+        "time": [
+          "future_unspecified"
+        ],
+        "status": [
+          "unknown",
+          "plan"
+        ]
+      }
+    },
+    {
+      "id": "c30",
+      "text": "우리 팀은 3년째 같은 배포 도구를 쓰고 있어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "ongoing_no_end"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c31",
+      "text": "공지 게시판에 어제 정전이 있었다고 올라와 있어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c32",
+      "text": "방금 고객한테 전화해서 일정을 확인했어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c33",
+      "text": "다음 주에 휴가 쓸 수 있을까?",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "question"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c34",
+      "text": "내가 보기엔 이 디자인이 더 읽기 쉬워.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "inference",
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "at_utterance"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c35",
+      "text": "협력사 담당자가 납품을 어제 마쳤다고 전해 왔어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "attributed_report"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c36",
+      "text": "시험 결과가 좋으면 다음 달에 정식으로 출시하자.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "conditional",
+          "plan"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "plan",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c37",
+      "text": "오늘 아침부터 메신저 알림이 안 와.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation",
+          "unspecified"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "ongoing_no_end",
+          "at_utterance"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c38",
+      "text": "회의실 예약은 내가 아까 해 뒀어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored"
+        ],
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "id": "c39",
+      "text": "이번 달 매출이 지난달보다 줄었다는 보고서를 읽었어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_unspecified",
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c40",
+      "text": "혹시 그 파일 어디에 저장했는지 알아?",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "question"
+        ],
+        "time": [
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c41",
+      "text": "예전에 이 방식으로 해 봤는데 잘 안 됐어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_unspecified",
+          "past_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c42",
+      "text": "출입 기록상으로는 그날 밤 아무도 사무실에 없었어.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "record_based"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored",
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c43",
+      "text": "다들 바쁘면 이번 회식은 다음으로 미루자.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "conditional",
+          "plan"
+        ],
+        "time": [
+          "future_unspecified"
+        ],
+        "status": [
+          "plan",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "c44",
+      "text": "인사팀에서 연말 정산 서류를 이번 주 금요일까지 내래.",
+      "ambiguous": false,
+      "allowed": {
+        "source": [
+          "attributed_report"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a01",
+      "text": "회의가 취소됐다고 들은 것 같기도 하고 메일에서 본 것 같기도 해.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unknown"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a02",
+      "text": "그거 끝냈나 아니 끝냈을 거야.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "inference"
+        ],
+        "form": [
+          "unknown"
+        ],
+        "time": [
+          "past_unspecified"
+        ],
+        "status": [
+          "done",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a03",
+      "text": "금요일에 배포해.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "plan",
+          "assertion"
+        ],
+        "time": [
+          "future_anchored"
+        ],
+        "status": [
+          "plan",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a04",
+      "text": "어제인가 그저께인가 서버가 한 번 멈췄어.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified",
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_anchored",
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a05",
+      "text": "그 건은 처리된 걸로 알고 있어.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified",
+          "inference"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "past_unspecified"
+        ],
+        "status": [
+          "done",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a06",
+      "text": "비가 왔으면 행사를 미뤘을 텐데 안 미뤘네.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "inference",
+          "unspecified"
+        ],
+        "form": [
+          "unknown"
+        ],
+        "time": [
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a07",
+      "text": "지금쯤이면 도착했겠지.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "inference"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "at_utterance",
+          "past_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a08",
+      "text": "계속 이렇게 하면 되나.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "question"
+        ],
+        "time": [
+          "unknown"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a09",
+      "text": "민수 씨가 한다고 했는데 결국 내가 하기로 했어.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unknown"
+        ],
+        "form": [
+          "assertion",
+          "plan"
+        ],
+        "time": [
+          "unknown"
+        ],
+        "status": [
+          "plan",
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a10",
+      "text": "다음 주였나 이번 주였나 점검이 있대.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "attributed_report"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "future_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a11",
+      "text": "그때 말한 대로 해 줘.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "unknown",
+          "plan"
+        ],
+        "time": [
+          "unknown",
+          "future_unspecified"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a12",
+      "text": "그 회의 오늘이야, 아니 내일이었나.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "unknown"
+        ],
+        "time": [
+          "unknown"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a13",
+      "text": "요즘은 괜찮은데 어제는 또 느렸어.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified",
+          "self_reported_observation"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "unknown"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a14",
+      "text": "다 됐다고 하던데 내가 보기엔 아직이야.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unknown"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "at_utterance",
+          "unknown"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a15",
+      "text": "보고서를 보냈다는 건지 보낸다는 건지 모르겠어.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified"
+        ],
+        "form": [
+          "assertion"
+        ],
+        "time": [
+          "unknown"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "a16",
+      "text": "내일 비 오면 오늘 했어야 했나 싶어.",
+      "ambiguous": true,
+      "allowed": {
+        "source": [
+          "unspecified",
+          "inference"
+        ],
+        "form": [
+          "unknown"
+        ],
+        "time": [
+          "unknown"
+        ],
+        "status": [
+          "unknown"
+        ]
+      }
+    }
+  ]
+}

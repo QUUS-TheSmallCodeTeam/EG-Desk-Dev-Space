@@ -1,0 +1,27 @@
+{
+  "set": "turn-context-warmup-sep-v1/Y1",
+  "tokenCeiling": 900,
+  "transport": "product",
+  "transportIdleMs": 660000,
+  "waitLimitMs": 660000,
+  "passRule": "Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine (the point runner checks the shared send stamp), and send nothing else to Decisions from this machine during the 10-minute wait inside the run (the point runner marks an interleaved send). Run order N1, N2, Y1. Read with scripts/egdesk-turn-context-warmup-run.mjs --set sep --analyze.",
+  "requests": [
+    {
+      "id": "first",
+      "file": "requests/first.json",
+      "sha256": "1d71669e74bb5101c85daf8671f4920d1816850607e30862109caa5095059ad4",
+      "estInputTokens": 159,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "after",
+      "file": "requests/after.json",
+      "sha256": "9089a249d4e8192e5f22aa56e1917b5f2520e59b164fc98b6a9e2f25f85c3491",
+      "estInputTokens": 651,
+      "waitBeforeMs": 600000,
+      "expect": [],
+      "recordOnly": true
+    }
+  ]
+}

@@ -1,0 +1,358 @@
+{
+  "set": "l4-briefing-layer-replay",
+  "tokenCeiling": 15000,
+  "productBars": {
+    "combines": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "about_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "same_M#_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "happened_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "before_P#_P#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "slot_P#_r#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "step_P#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "onboard_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "stated_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    }
+  },
+  "passRule": "PASS when every hard check passes at the product bar (every fact of the check-25br table whose key figure is on the recorded board is judged shown) AND replayLayers() on the results finds what the code builds from the records: all twelve entries kept (about_ answers through the product rule, c41 linked / c44 voted included), two topics each one sequence card in date order, the card kind result_lines for both, and the twelve facts on the cards. The place and fit answers (about_, same_, happened_) are soft one by one: the product rules decide what they mean, and replayLayers() judges the result. Soft checks and the timings are recorded.",
+  "requests": [
+    {
+      "id": "layer-place",
+      "file": "requests/layer-place.json",
+      "sha256": "94fe1cba4204c233a50d966cf43bc02a1ca905479ca8dc6cda46a76d39e4796c",
+      "estInputTokens": 7880,
+      "expect": [
+        {
+          "name": "combines",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "recorded: check-29br's answer is one sentence that says the result is attached; the real judge said .97"
+        },
+        {
+          "name": "about_M1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M7",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M10",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M6",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M8",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M9",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M11",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "about_M12",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks"
+        },
+        {
+          "name": "same_M2_M10",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "a title shared by two entries is not a version pair (they are different records of one log): real .03 to .32"
+        },
+        {
+          "name": "same_M10_M12",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "a title shared by two entries is not a version pair (they are different records of one log): real .03 to .32"
+        },
+        {
+          "name": "same_M4_M10",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "a title shared by two entries is not a version pair (they are different records of one log): real .03 to .32"
+        }
+      ]
+    },
+    {
+      "id": "layer-fit",
+      "file": "requests/layer-fit.json",
+      "sha256": "9c561d8fd3cc306aa7b39854fcb383f08d8dbe27bf3c5956df3e1050487708bd",
+      "estInputTokens": 3690,
+      "expect": [
+        {
+          "name": "happened_M1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M7",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M10",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M6",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M8",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M9",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M11",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        },
+        {
+          "name": "happened_M12",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99"
+        }
+      ]
+    },
+    {
+      "id": "layer-coverage",
+      "file": "requests/layer-coverage.json",
+      "sha256": "e06dcf024223526897a63fa095daae0b93e9f9d4bb33fbe3a427ff8f8423acf7",
+      "estInputTokens": 2469,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the key figure \"9aeed73\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
+        },
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the key figure \"5752건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the key figure \"5930건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the key figure \"5990건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the key figure \"6085건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the key figure \"218c711\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        }
+      ]
+    }
+  ]
+}

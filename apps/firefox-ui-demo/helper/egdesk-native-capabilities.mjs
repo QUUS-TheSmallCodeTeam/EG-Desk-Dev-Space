@@ -1,8 +1,8 @@
-import { accessSync, constants, realpathSync } from 'node:fs'
+import { accessSync, constants, realpathSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { fingerprintNativeExecutable, probeGeneratedNativeSchema } from './codex-native-schema-probe.mjs'
+import { fingerprintNativeExecutable, probeGeneratedNativeSchema, probeThreadDeleteSchema, probeTurnSteerSchema } from './codex-native-schema-probe.mjs'
 
 // These exact versions were checked against their generated experimental
 // schemas and the public App Server contract. Each selected binary must still
@@ -10,9 +10,17 @@ import { fingerprintNativeExecutable, probeGeneratedNativeSchema } from './codex
 export const NATIVE_SCHEMA_VERSION = '0.160.1'
 // This exact Windows app build was checked against its generated experimental
 // schema as well. Prerelease banners never authorize an unverified build.
-const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1', '0.162.1', '0.163.0-alpha.10.2'])
+// 0.171.0-alpha.13 (the ChatGPT.app Codex CLI, L4 a1 2026-11-26): its generated
+// experimental schema passes the context and QA shape checks (fixture
+// scripts/real-engine/fixtures/native-schema-0.171.0-alpha.13), its launcher and
+// native binary are fingerprinted, the real engine ran EG-Desk's dynamic tools and
+// additionalContext on it (11-25 real-engine checks), and effective isolation was
+// measured on it (scripts/real-engine/codex-qa-isolation-check.mjs: the bounded
+// thread proofs held; read-only + offline refused writes inside and outside the
+// folder and the network, with working write and network controls).
+const CONTEXT_CONTRACT_VERSIONS = new Set(['0.157.1', '0.160.1', '0.162.1', '0.163.0-alpha.10.2', '0.171.0-alpha.13'])
 // Generated schema shape alone does not verify effective isolation for QA.
-const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1', '0.163.0-alpha.10.2'])
+const QA_POLICY_CONTRACT_VERSIONS = new Set(['0.160.1', '0.163.0-alpha.10.2', '0.171.0-alpha.13'])
 
 // SUB-13: ordinary Chat follows a version range instead of the exact sets
 // above, so an automatic CLI update keeps Chat running and the screen says
@@ -65,6 +73,19 @@ const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', '
 // envOverrides.CODEX_HOME for the spawn. The bridge passes none today: Codex
 // runs one app-server on the shared ~/.codex login until per-profile
 // app-servers (own port, own process) are added.
+/**
+ * c23: EG-Desk's own model and effort for an own-tools thread (the same EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT the launch builder reads, same
+ * validation). null when neither is set; { model?, effort? } otherwise. Throws the launch builder's coded errors on a bad value.
+ */
+export function egdeskCodexSelectionFromEnv(env = process.env) {
+  const hasModel = Object.hasOwn(env, 'EGDESK_CODEX_MODEL'), hasEffort = Object.hasOwn(env, 'EGDESK_CODEX_EFFORT')
+  if (!hasModel && !hasEffort) return null
+  const model = hasModel ? env.EGDESK_CODEX_MODEL : null, effort = hasEffort ? env.EGDESK_CODEX_EFFORT : null
+  if (hasModel && (typeof model !== 'string' || !MODEL_ID.test(model))) throw Object.assign(new Error('EGDESK_CODEX_MODEL must be a bounded model identifier'), { code: 'INVALID_CODEX_MODEL_OVERRIDE' })
+  if (hasEffort && (typeof effort !== 'string' || !REASONING_EFFORTS.has(effort))) throw Object.assign(new Error('EGDESK_CODEX_EFFORT must be a supported reasoning effort'), { code: 'INVALID_CODEX_EFFORT_OVERRIDE' })
+  return { ...(hasModel ? { model } : {}), ...(hasEffort ? { effort } : {}) }
+}
+
 export function buildCodexAppServerLaunch({ env = process.env, listen, codexHome = null } = {}) {
   if (typeof listen !== 'string' || !listen) throw new TypeError('An app-server listen URL is required')
   if (codexHome != null && (typeof codexHome !== 'string' || !path.isAbsolute(codexHome) || codexHome.includes('\0') || codexHome.length > 4096)) {
@@ -166,7 +187,7 @@ export function resolveCodexExecutable(env = process.env, { platform = process.p
   throw new Error('Configured Codex executable is unavailable; set EGDESK_CODEX_BIN to an existing absolute executable path')
 }
 
-export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync, probe = probeGeneratedNativeSchema, fingerprint = fingerprintNativeExecutable }) {
+export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync, probe = probeGeneratedNativeSchema, fingerprint = fingerprintNativeExecutable, deleteProbe = probeThreadDeleteSchema, steerProbe = probeTurnSteerSchema }) {
   const result = run(executable, ['--version'], { env, cwd, encoding: 'utf8', timeout: 5000, maxBuffer: 4096, stdio: ['ignore', 'pipe', 'pipe'] })
   const version = result.status === 0 ? String(result.stdout || '').trim().match(/^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/)?.[1] || null : null
   let proof = null, binaryFingerprint = null
@@ -176,6 +197,23 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
       if (proof?.contextContract && /^[a-f0-9]{64}$/.test(proof.schemaFingerprint || '')) binaryFingerprint = fingerprint(executable)
     } catch { proof = null; binaryFingerprint = null }
   }
+  // thread/delete (L2 c18): an optional contract of the generated schema. A contract version reads it from the same probe; any other identified
+  // version is checked for it alone (deleteProbe), which grants nothing else.
+  let deleteFingerprint = null, deleteBinary = binaryFingerprint
+  try {
+    deleteFingerprint = CONTEXT_CONTRACT_VERSIONS.has(version) ? proof?.threadDeleteSchemaFingerprint ?? null : version ? deleteProbe({ executable, env, cwd, run }) : null
+    if (/^[a-f0-9]{64}$/.test(deleteFingerprint || '') && !deleteBinary) deleteBinary = fingerprint(executable)
+  } catch { deleteFingerprint = null }
+  const threadDelete = /^[a-f0-9]{64}$/.test(deleteFingerprint || '') && /^[a-f0-9]{64}$/.test(deleteBinary || '')
+  // turn/steer (c23): a capability of this binary's own generated schema, for any identified version (no version pin); it covers a plain message
+  // steered into a working turn only, never additional context (that stays the board peer contract).
+  let steerFingerprint = null, steerBinary = deleteBinary || binaryFingerprint
+  try {
+    steerFingerprint = CONTEXT_CONTRACT_VERSIONS.has(version) ? proof?.turnSteerSchemaFingerprint ?? null : version ? steerProbe({ executable, env, cwd, run }) : null
+    if (/^[a-f0-9]{64}$/.test(steerFingerprint || '') && !steerBinary) steerBinary = fingerprint(executable)
+  } catch { steerFingerprint = null }
+  const steerContract = /^[a-f0-9]{64}$/.test(steerFingerprint || '') && /^[a-f0-9]{64}$/.test(steerBinary || '')
+    ? createHash('sha256').update(`steer\0${version}\0${steerBinary}\0${steerFingerprint}`).digest('hex') : null
   const contextContract = CONTEXT_CONTRACT_VERSIONS.has(version) && proof?.contextContract === true && /^[a-f0-9]{64}$/.test(binaryFingerprint || '')
   const qaContract = contextContract && QA_POLICY_CONTRACT_VERSIONS.has(version) && proof.qaContract === true
   const contractFingerprint = contextContract ? createHash('sha256').update(`${version}\0${binaryFingerprint}\0${proof.schemaFingerprint}`).digest('hex') : null
@@ -190,8 +228,43 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
     // untrusted additional context. Never infer either fact from ordinary chat.
     boardPeerContract: contextContract && version === '0.162.1' && /^[a-f0-9]{64}$/.test(proof?.boardPeerSchemaFingerprint || '')
       ? createHash('sha256').update(contractFingerprint + '\0' + proof.boardPeerSchemaFingerprint).digest('hex') : null,
+    // The generated schema of this binary lists thread/delete with { threadId }: deleting a conversation also deletes its native thread.
+    threadDelete,
+    // A plain message may be steered into a working turn: the schema of this binary has turn/steer in the shape verifyTurnSteerSchema reads.
+    steerContract,
     binaryFingerprint: contextContract ? binaryFingerprint : null,
     schemaFingerprint: contextContract ? proof.schemaFingerprint : null,
     contractFingerprint,
+  }
+}
+
+/**
+ * What one Codex binary can do, as the generated schema of THAT binary says (L1 c22): dynamicTools (the Context contract), ephemeral (thread/start's
+ * `ephemeral`, part of the same contract), turnSteer (the verified peer-input contract of turn/steer) and threadDelete. Each binary is probed on its
+ * own (a profile's app-server may run another build than the shared one) and remembered by path, size and modification time, so a replaced binary is
+ * probed again. A probe that fails is not remembered. Nothing here is inherited from another binary.
+ */
+export function capabilitiesOf(native) {
+  if (!native || typeof native !== 'object') return null
+  return Object.freeze({
+    version: typeof native.version === 'string' ? native.version : null,
+    dynamicTools: native.dynamicTools === true, qaReadOnly: native.qaReadOnly === true, ephemeral: native.schemaMatch === true,
+    turnSteer: typeof native.boardPeerContract === 'string' && native.boardPeerContract.length > 0, threadDelete: native.threadDelete === true,
+    boardPeerContract: typeof native.boardPeerContract === 'string' ? native.boardPeerContract : null,
+    steer: typeof native.steerContract === 'string' && native.steerContract.length > 0, steerContract: typeof native.steerContract === 'string' ? native.steerContract : null,
+    executable: native.executable ?? null,
+  })
+}
+export function createNativeCapabilityCache({ inspect = inspectNativeCapabilities, stat = statSync, env = process.env, cwd = process.cwd() } = {}) {
+  const seen = new Map()
+  return function forExecutable(executable) {
+    if (typeof executable !== 'string' || !executable) return null
+    let key = null
+    try { const s = stat(executable); key = `${executable}\0${s.size}\0${Math.round(s.mtimeMs)}` } catch { return null }
+    if (seen.has(key)) return seen.get(key)
+    let caps = null
+    try { caps = capabilitiesOf(inspect({ executable, env, cwd })) } catch { caps = null }
+    if (caps) { seen.set(key, caps); while (seen.size > 16) seen.delete(seen.keys().next().value) }
+    return caps
   }
 }

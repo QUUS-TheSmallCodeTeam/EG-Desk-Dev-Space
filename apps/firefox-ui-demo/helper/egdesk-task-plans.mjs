@@ -218,18 +218,30 @@ function sameThreadTarget(plan, task) {
  *   view(planId) (with instructions) / list()
  *   resolveTaskInput(context) -> INPUT for a plan step, or null for other graphs
  *   canStart({ graphId, taskId }) -> false while a same-thread step's conversation is busy
- * getOwnerKey returns the already hashed owner key (or null when signed out).
+ * getOwnerKey(slot?) returns the already hashed owner key (or null when signed out). L1 c25 (U11, flag-gated by the caller): `slot` is the Agent profile the
+ * plan's room runs on; a plan belongs to the account of ITS room, proposed, approved, resolved and listed under that account while the default sign-in is
+ * signed out or someone else. `slotOf(plan)` names that slot from the plan's origin conversation (the chat store pins one profile per conversation, so no
+ * stored field changes); undefined = the default sign-in, as before. A plan whose room later moved to another account is no longer found.
  */
 export function createTaskPlanService({ store, sources, graph, adapter, chat = null, getOwnerKey, broadcast = () => {},
+  slotOf = () => undefined, roomKeyed = () => false,
   onBlocked = () => {}, now = () => new Date().toISOString(), makeId = randomUUID }) {
-  const owner = () => {
-    const key = getOwnerKey()
+  const slotOfOrigin = origin => { try { return origin ? slotOf(origin) : undefined } catch { return undefined } }
+  const slotOfPlan = plan => slotOfOrigin(plan?.origin)
+  const hintsFor = plan => {
+    const slot = slotOfPlan(plan)
+    return slot && plan.origin.conversationId && plan.origin.clientThreadId ? { conversationId: plan.origin.conversationId, clientThreadId: plan.origin.clientThreadId } : undefined
+  }
+  // a Board's instructions are registered before its plan is stored: until then the proposing room's slot is kept here
+  const proposing = new Map()
+  const owner = slot => {
+    const key = getOwnerKey(slot)
     if (typeof key !== 'string' || !key) throw nativeTaskError('TASK_AUTHORITY', 'Sign in to plan Agent tasks', 403)
     return key
   }
   function owned(planId) {
-    const key = getOwnerKey()
     const plan = typeof planId === 'string' && PLAN_ID.test(planId) ? store.find(planId) : null
+    const key = plan ? getOwnerKey(slotOfPlan(plan)) : null
     if (!plan || !key || plan.owner !== key) throw planError('PLAN_NOT_FOUND', 'No such plan for this account', 404)
     return plan
   }
@@ -275,7 +287,7 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
   async function propose({ run, args } = {}) {
     if (!plainObject(run)) throw planError('PLAN_FORBIDDEN', 'Plans are proposed from an Agent run', 403)
     if (run.executionPolicy) throw planError('PLAN_FORBIDDEN', 'Plans are not offered in bounded or QA conversations', 403)
-    const ownerKey = owner()
+    const ownerKey = owner(slotOfOrigin({ conversationId: isRef(run.conversationId) ? run.conversationId : null, clientThreadId: isRef(run.clientThreadId) ? run.clientThreadId : null, engineProfileId: run.engine?.engineProfileId }))
     const input = normalizePlanArgs(args)
     const planId = `plan-${makeId()}`
     const boardId = `board-${planId}`
@@ -295,6 +307,8 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
       engineId: isRef(run.engine?.id) ? run.engine.id : 'codex',
     }
     const cwd = origin.conversationId ? cwdOf(origin.conversationId) : null
+    proposing.set(boardId, slotOfOrigin({ ...origin, engineProfileId: run.engine?.engineProfileId }))
+    try {
     const record = { planId, owner: ownerKey, boardId, scope, title: input.title, status: 'proposed', createdAt: now(), decidedAt: null,
       origin, cwd, tasks: [] }
     // A step asks for the same conversation only when that conversation can be named exactly.
@@ -313,6 +327,7 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
     }
     notify(record, 'proposed')
     return view(record)
+    } finally { proposing.delete(boardId) }
   }
 
   async function approve(planId) {
@@ -345,7 +360,7 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
   function resolveTaskInput(context) {
     const plan = store.byGraph(context?.binding?.graphId)
     if (!plan) return null
-    const key = getOwnerKey()
+    const key = getOwnerKey(slotOfPlan(plan))
     const task = plan.tasks.find(entry => entry.taskId === context.binding.taskId)
     if (!key || plan.owner !== key || plan.boardId !== context.boardId || !task) {
       throw nativeTaskError('TASK_INPUT_UNRESOLVED', 'Plan step is unavailable for this Board or account', 403)
@@ -360,8 +375,10 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
       return { message: composeAwaitResume({ graphId: plan.scope.graphId, planId: plan.planId, planTitle: plan.title, task,
         instructions: base.message, gates, taskTitles, answers }), ...target }
     }
+    // L1 c26 (U11, "the room keeps its account"): a new room opened by this step starts on the account of the room that proposed the plan (slot undefined: as before)
+    const slot = slotOfPlan(plan)
     return { message: composePlanStep({ planTitle: plan.title, task, instructions: base.message, gates, taskTitles, answers }),
-      ...(base.cwd === undefined ? {} : { cwd: base.cwd }) }
+      ...(base.cwd === undefined ? {} : { cwd: base.cwd }), ...(slot ? { engineProfileId: slot } : {}) }
   }
 
   // Never throws: a hold is only a delay, and an unknown graph is not held.
@@ -386,10 +403,20 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
     propose, approve, reject, resolveTaskInput, canStart,
     view: planId => view(owned(planId), { detail: true }),
     list() {
-      const key = owner()
-      return store.all().filter(plan => plan.owner === key).slice(-50).reverse().map(plan => view(plan))
+      // Signed-out default is an error as before, unless the room-account flag is on: profile rooms' plans are then listed under their own accounts.
+      try { owner() } catch (error) { if (!roomKeyed()) throw error }
+      return store.all().filter(plan => { const key = getOwnerKey(slotOfPlan(plan)); return typeof key === 'string' && key && plan.owner === key })
+        .slice(-50).reverse().map(plan => view(plan))
     },
     byGraph: graphId => store.byGraph(graphId),
+    // the slot of a plan's room (undefined: default), by graph or by Board; and the room's own route (conversation pair), which the HTTP layer authenticates: the room's account must be signed in, not the default's
+    slotOfGraph: graphId => slotOfPlan(store.byGraph(graphId)),
+    slotOfBoard: boardId => (proposing.has(boardId) ? proposing.get(boardId) : slotOfPlan(typeof boardId === 'string' ? store.all().find(plan => plan.boardId === boardId) : null)),
+    roomKeyed,
+    hintsOf(planId) { return hintsFor(typeof planId === 'string' && PLAN_ID.test(planId) ? store.find(planId) : null) },
+    // L1 c26: the same for the task graph and source routes, which name a graph or a Board, not a plan (any other graph or Board: undefined = the default sign-in)
+    hintsOfGraph(graphId) { return hintsFor(typeof graphId === 'string' ? store.byGraph(graphId) : null) },
+    hintsOfBoard(boardId) { return hintsFor(typeof boardId === 'string' ? store.all().find(plan => plan.boardId === boardId) : null) },
   }
 }
 
@@ -414,8 +441,10 @@ export function createTaskPlanHttpHandler({ plans, ensureAuth, port = 39218 }) {
     try {
       if (req.method === 'GET' && url.pathname === '/tasks/plans') {
         if ([...url.searchParams.keys()].some(key => key !== 'planId')) throw planError('TASK_HTTP_INPUT', 'Only planId may be given', 400)
-        await ensureAuth()
         const planId = url.searchParams.get('planId')
+        // L1 c25: a plan of a room on an Agent profile needs THAT account signed in (hints), not the default's; the list (flag on) also works signed out
+        // of the default, then showing the plans of the signed-in profile accounts
+        try { await ensureAuth(planId ? plans.hintsOf?.(planId) : undefined) } catch (error) { if (planId || plans.roomKeyed?.() !== true) throw error }
         sendJson(res, 200, planId ? { plan: plans.view(planId) } : { plans: plans.list() })
         return true
       }
@@ -426,7 +455,7 @@ export function createTaskPlanHttpHandler({ plans, ensureAuth, port = 39218 }) {
       }
       const body = await readJsonBody(req, { maxBytes: 1024 })
       if (Object.keys(body).length) throw planError('TASK_HTTP_INPUT', 'Plan decisions take an empty body', 400)
-      await ensureAuth()
+      await ensureAuth(plans.hintsOf?.(match[1]))
       sendJson(res, 200, match[2] === 'approve' ? await plans.approve(match[1]) : await plans.reject(match[1]))
     } catch (error) {
       const fallback = error?.code === 'E_TASK_INPUT' ? 400

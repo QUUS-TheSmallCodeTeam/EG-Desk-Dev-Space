@@ -54,7 +54,10 @@ const hashed = (prefix, value) => `${prefix}-${createHash('sha256').update(Strin
  */
 export async function openWorkflowRuntime({
   dataDir, chat, port = 39218, broadcast = () => {}, ensureAuth, getOwnerKey,
-  maxConcurrency = 2, owner = WORKFLOW_OWNER, watch, openStores = null,
+  maxConcurrency = 2, owner = WORKFLOW_OWNER, watch, openStores = null, localCapacity = null,
+  // L1 c25 (U11, only passed with the room-account flag on): ownerKeyFor(slot) = the raw account key of an Agent profile slot; roomSlotOf(origin) = the slot a
+  // plan's room runs on; roomKeyed() = flag on. Without them every plan, source and step uses the default sign-in, as before.
+  ownerKeyFor = null, roomSlotOf = null, roomKeyed = () => false,
 } = {}) {
   if (typeof ensureAuth !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('ensureAuth and getOwnerKey are required')
   const bus = createWorkflowEventBus()
@@ -73,15 +76,21 @@ export async function openWorkflowRuntime({
     try { bus.publish({ topic: 'auth.changed', owner, payload: { signedIn: signedIn === true } }) } catch {}
   }
 
-  const ownerKey = () => {
-    const key = getOwnerKey()
+  const rawOwnerKey = slot => (slot && typeof ownerKeyFor === 'function' ? ownerKeyFor(slot) : getOwnerKey())
+  const ownerKey = slot => {
+    const key = rawOwnerKey(slot)
     return typeof key === 'string' && key ? hashed('owner', key) : null
   }
+  // a plan's Board/graph belongs to the room's slot (undefined = default)
+  const slotOfGraph = graphId => { try { return plans?.slotOfGraph?.(graphId) } catch { return undefined } }
+  const slotOfBoard = boardId => { try { return plans?.slotOfBoard?.(boardId) } catch { return undefined } }
   function captureScope(context) {
-    const key = ownerKey()
+    const slot = slotOfGraph(context?.binding?.graphId ?? context?.scope?.graphId)
+    const key = ownerKey(slot)
     if (!key) throw nativeTaskError('TASK_AUTHORITY', 'Sign in to run Agent tasks', 403)
     const scope = context?.scope ?? {}
-    return { ownerKey: key, generation: authGeneration,
+    // a profile slot's scope does not move with the default sign-in: the account key in the scope already ends it when THAT account changes
+    return { ownerKey: key, generation: slot ? 0 : authGeneration,
       delegationKey: hashed('delegation', nativeHash({ boardId: context?.boardId ?? null, runId: scope.runId ?? null,
         parentTaskId: scope.parentTaskId ?? null, requestedBy: scope.requestedBy ?? null })) }
   }
@@ -109,16 +118,18 @@ export async function openWorkflowRuntime({
   // retried on chat turn endings and, as a fallback, once a second.
   let heldTimer = null
   let kickQueued = false
+  let closed = false
   function holdRetry() {
-    if (heldTimer || !graph) return
+    if (closed || heldTimer || !graph) return
     heldTimer = setTimeout(() => { heldTimer = null; void graph?.reschedule().catch(() => {}) }, 1000)
     heldTimer.unref?.()
   }
   function kick() {
-    if (kickQueued) return
+    if (closed || kickQueued) return
     kickQueued = true
     setImmediate(() => {
       kickQueued = false
+      if (closed) return
       taskChat?.pump?.()
       if (heldTimer && graph) void graph.reschedule().catch(() => {})
     })
@@ -127,7 +138,7 @@ export async function openWorkflowRuntime({
     // openStores (tests) returns { store, ledger, sourceOptions?, planOptions?, close? };
     // without sourceOptions/planOptions those stay in memory.
     stores = openStores ? await openStores() : await openDurableStores(dataDir)
-    sources = await openTaskSourceRegistry({ ...(stores.sourceOptions ?? {}), getOwnerKey: ownerKey })
+    sources = await openTaskSourceRegistry({ ...(stores.sourceOptions ?? {}), getOwnerKey: boardId => ownerKey(slotOfBoard(boardId)) })
     const planStore = await openTaskPlanStore(stores.planOptions ?? {})
     taskChat = sameThreadChat(chat, { wanted: body => {
       try {
@@ -142,8 +153,14 @@ export async function openWorkflowRuntime({
       captureScope, assertDelegationCurrent })
     graph = await openTaskGraph({ store: stores.store, maxConcurrency, execute: adapter.execute, interrupt: adapter.interrupt,
       requestApproval: adapter.requestApproval, verifyReceipt: adapter.verifyReceipt,
-      canStart: context => plans ? plans.canStart(context) : true })
-    plans = createTaskPlanService({ store: planStore, sources, graph, adapter, chat, getOwnerKey: ownerKey,
+      canStart: context => plans ? plans.canStart(context) : true,
+      additionalLaunchReason: () => localCapacity?.additionalLaunchReason(),
+      onQueueChange: (graphId, pressure) => {
+        if (pressure) holdRetry()
+        if (graphId) broadcast({ type: 'task.graph', v: 1, graphId, change: 'task-queue-changed', graph: publicGraph(graph.getGraph(graphId)), ts: Date.now() })
+      } })
+    plans = createTaskPlanService({ store: planStore, sources, graph, adapter, chat, getOwnerKey: ownerKey, roomKeyed,
+      ...(typeof roomSlotOf === 'function' ? { slotOf: roomSlotOf } : {}),
       broadcast: frame => broadcast(frame), onBlocked: holdRetry })
     unsubscribeGraph = graph.subscribe(journalEvent => {
       const graphId = journalEvent.graphId ?? journalEvent.graph?.graphId
@@ -161,8 +178,8 @@ export async function openWorkflowRuntime({
     const unsubscribeJournal = unsubscribeGraph
     unsubscribeGraph = () => { unsubscribeJournal(); unsubscribeNative(); if (hintTimer) clearTimeout(hintTimer); hintTimer = null }
     router = createAwaitGateRouter({ graph, bus, owner })
-    handleTasks = createTaskHttpHandler({ graph, adapter, ensureAuth, port, continueGate })
-    handleSources = createTaskSourceHttpHandler({ sources, ensureAuth, port })
+    handleTasks = createTaskHttpHandler({ graph, adapter, ensureAuth, port, continueGate, hintsOfGraph: graphId => plans?.hintsOfGraph?.(graphId) })
+    handleSources = createTaskSourceHttpHandler({ sources, ensureAuth, port, hintsOfBoard: boardId => plans?.hintsOfBoard?.(boardId) })
     handlePlans = createTaskPlanHttpHandler({ plans, ensureAuth, port })
   } catch (error) {
     tasksError = publicText(error?.message || 'Local task storage failed to open', 1000)
@@ -218,6 +235,13 @@ export async function openWorkflowRuntime({
 
   return {
     bus, files,
+    // The public workflow event omits query and fragment. Never use it to prove a destination that requires either.
+    watchPopupLoad(opener, href) {
+      const url = new URL(href), cursor = bus.stats().seq
+      if (url.search || url.hash) return null
+      return () => bus.recent({ owner, since: cursor }).events.some(({ topic, payload }) => topic === 'browser.loaded' &&
+        payload.openerCardId === opener && payload.cardId !== opener && payload.origin === url.origin && payload.path === url.pathname)
+    },
     get sources() { return sources },
     get graph() { return graph },
     get adapter() { return adapter },
@@ -241,6 +265,7 @@ export async function openWorkflowRuntime({
       return { tasks: graph ? 'ready' : 'unavailable', taskError: tasksError, maxConcurrency, eventSeq: seq, droppedEvents: dropped, ...files.snapshot() }
     },
     async close() {
+      closed = true
       router?.close()
       graph?.close?.()
       taskChat?.close?.()
@@ -295,7 +320,7 @@ function sameThreadChat(chat, { wanted }) {
       if (busy(entry.body.conversationId)) { index += 1; continue }
       waiting.splice(index, 1)
       if (!wanted(entry.body)) { entry.reject(nativeTaskError('TASK_FENCED', 'The task stopped before its conversation was free')); continue }
-      try { entry.resolve(chat.send(entry.body)) } catch (error) { entry.reject(error) }
+      try { entry.resolve(chat.send(entry.body, entry.internal)) } catch (error) { entry.reject(error) }
     }
     if (waiting.length && !timer) {
       timer = setTimeout(() => { timer = null; pump() }, 250)
@@ -303,12 +328,12 @@ function sameThreadChat(chat, { wanted }) {
     }
   }
   return {
-    send(body) {
+    send(body, internal) {
       const conversationId = body?.conversationId
       if (typeof conversationId !== 'string' || (!busy(conversationId) && !waiting.some(entry => entry.body.conversationId === conversationId))) {
-        return chat.send(body)
+        return internal === undefined ? chat.send(body) : chat.send(body, internal)
       }
-      return new Promise((resolve, reject) => { waiting.push({ body, resolve, reject }); pump() })
+      return new Promise((resolve, reject) => { waiting.push({ body, internal, resolve, reject }); pump() })
     },
     interrupt: (...args) => chat.interrupt(...args),
     resume: (...args) => chat.resume(...args),

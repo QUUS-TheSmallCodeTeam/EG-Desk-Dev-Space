@@ -1,0 +1,229 @@
+{
+ "set": "entry-placeless-v1",
+ "description": "LIVE, c43 (Decisions only, no page, no engine): L2's side question from V2 (c60): should a message that names no place but matches the open page (\"이번 달 세금계산서 받아줘\" while the tax portal card is open) count as a page task? The request is the PRODUCT'S OWN entry request (decideBrowserEntry, built with a capturing stand-in and then sent unchanged): browser_entry, browser_entry_answer and the card predicate. Three levels of evidence about the open card (E1 the V2 fixture's title and host only, E2 a title that says what the page is, E3 the neutral title plus the lines the page shows) x three placeless messages, and unrelated controls. Outcome by code from readBrowserEntry: enter (kind browser) or not. wrong = a control enters a page task; a placeless message that does not enter is a safe_miss. Nothing is changed by this plan: if E2 and E3 enter, L2's V2 failure is the fixture's evidence (the neutral title), not the product. Written BEFORE any code of the measurement. Sent once.",
+ "evidence": {
+  "E1": {
+   "id": "E1",
+   "description": "title and host only (the V2 fixture: \"합성 포털\")",
+   "card": {
+    "cardId": "card",
+    "host": "portal.example.test",
+    "title": "합성 포털"
+   }
+  },
+  "E2": {
+   "id": "E2",
+   "description": "a title that says what the page is",
+   "card": {
+    "cardId": "card",
+    "host": "hometax.example.test",
+    "title": "세금계산서 조회 | 홈택스"
+   }
+  },
+  "E3": {
+   "id": "E3",
+   "description": "the neutral title plus the first lines the page shows (the run may receive page text)",
+   "card": {
+    "cardId": "card",
+    "host": "portal.example.test",
+    "title": "합성 포털",
+    "shows": [
+     "세금계산서 조회",
+     "이번 달 매출 3건, 매입 5건",
+     "조회 기간: 2026-11"
+    ]
+   }
+  }
+ },
+ "maxRequests": 13,
+ "tokenCeiling": 7500,
+ "passRule": "No control enters a page task (hard). Counts per verdict are reported; a safe miss never fails the plan.",
+ "dropOrder": [
+  "c2-e3",
+  "c1-e1",
+  "m2-e1"
+ ],
+ "replies": [
+  {
+   "id": "m1-e1",
+   "message": "이번 달 세금계산서 받아줘",
+   "evidence": "E1",
+   "want": "enter",
+   "acceptable": [
+    "enter"
+   ],
+   "predicted": {
+    "enter": 0.15,
+    "not": 0.85
+   },
+   "note": "L2's V2 message with the V2 fixture's evidence: browser_entry was 0.08 there; expected to repeat."
+  },
+  {
+   "id": "m1-e2",
+   "message": "이번 달 세금계산서 받아줘",
+   "evidence": "E2",
+   "want": "enter",
+   "acceptable": [
+    "enter"
+   ],
+   "predicted": {
+    "enter": 0.8,
+    "not": 0.2
+   },
+   "note": "a title that says what the page is."
+  },
+  {
+   "id": "m1-e3",
+   "message": "이번 달 세금계산서 받아줘",
+   "evidence": "E3",
+   "want": "enter",
+   "acceptable": [
+    "enter"
+   ],
+   "predicted": {
+    "enter": 0.9,
+    "not": 0.1
+   },
+   "note": "the first lines show 세금계산서."
+  },
+  {
+   "id": "m2-e1",
+   "message": "세금계산서 받아줘",
+   "evidence": "E1",
+   "want": "enter",
+   "acceptable": [
+    "enter"
+   ],
+   "predicted": {
+    "enter": 0.15,
+    "not": 0.85
+   },
+   "note": "shorter, no month."
+  },
+  {
+   "id": "m2-e2",
+   "message": "세금계산서 받아줘",
+   "evidence": "E2",
+   "want": "enter",
+   "acceptable": [
+    "enter"
+   ],
+   "predicted": {
+    "enter": 0.85,
+    "not": 0.15
+   },
+   "note": ""
+  },
+  {
+   "id": "m2-e3",
+   "message": "세금계산서 받아줘",
+   "evidence": "E3",
+   "want": "enter",
+   "acceptable": [
+    "enter"
+   ],
+   "predicted": {
+    "enter": 0.9,
+    "not": 0.1
+   },
+   "note": ""
+  },
+  {
+   "id": "m3-e2",
+   "message": "이번 달 거 받아줘",
+   "evidence": "E2",
+   "want": "enter",
+   "acceptable": [
+    "enter",
+    "not"
+   ],
+   "predicted": {
+    "enter": 0.45,
+    "not": 0.55
+   },
+   "note": "\"이번 달 거 받아줘\" names no document at all: either outcome is tolerated."
+  },
+  {
+   "id": "m3-e3",
+   "message": "이번 달 거 받아줘",
+   "evidence": "E3",
+   "want": "enter",
+   "acceptable": [
+    "enter",
+    "not"
+   ],
+   "predicted": {
+    "enter": 0.6,
+    "not": 0.4
+   },
+   "note": "same, with the lines."
+  },
+  {
+   "id": "c1-e1",
+   "message": "오늘 날씨 어때?",
+   "evidence": "E1",
+   "want": "not",
+   "acceptable": [],
+   "predicted": {
+    "enter": 0.02,
+    "not": 0.98
+   },
+   "note": "unrelated control."
+  },
+  {
+   "id": "c1-e2",
+   "message": "오늘 날씨 어때?",
+   "evidence": "E2",
+   "want": "not",
+   "acceptable": [],
+   "predicted": {
+    "enter": 0.02,
+    "not": 0.98
+   },
+   "note": "unrelated control against an informative title: a page task must not start."
+  },
+  {
+   "id": "c1-e3",
+   "message": "오늘 날씨 어때?",
+   "evidence": "E3",
+   "want": "not",
+   "acceptable": [],
+   "predicted": {
+    "enter": 0.02,
+    "not": 0.98
+   },
+   "note": "unrelated control against lines."
+  },
+  {
+   "id": "c2-e2",
+   "message": "파이썬 리스트 정렬 어떻게 해?",
+   "evidence": "E2",
+   "want": "not",
+   "acceptable": [],
+   "predicted": {
+    "enter": 0.02,
+    "not": 0.98
+   },
+   "note": "a general-knowledge question."
+  },
+  {
+   "id": "c2-e3",
+   "message": "파이썬 리스트 정렬 어떻게 해?",
+   "evidence": "E3",
+   "want": "not",
+   "acceptable": [],
+   "predicted": {
+    "enter": 0.02,
+    "not": 0.98
+   },
+   "note": "a general-knowledge question against lines."
+  }
+ ],
+ "prediction": {
+  "enterRate": "E1 0.15, E2 0.80, E3 0.90 for the placeless messages (M3 lower: 0.45 and 0.60)",
+  "wrong": "0 controls enter with probability 0.90",
+  "decision": "if E2 and E3 enter (>= 0.75), no product change: the V2 message needs a card whose title or lines say what the page is; if E2 or E3 do not enter, the entry question (\"holds or shows\") is weak for placeless requests and a wording change is proposed with this evidence"
+ },
+ "preRegistrationNote": "dropOrder is filled in after the estimate and before any send, from the ceiling.",
+ "dropOrderNote": "Filled in after the estimate and before any send. The typed estimate is about 625 to 667 tokens per request (three predicates + the card evidence): all 13 are 8,353, over the 8,000 ceiling, and the combined measures ran at +3% of the estimate. The default ceiling is 7,500: it drops c2-e3 (a general-knowledge control against the lines; c1-e3 already is a control against the lines) and c1-e1 (a control against the neutral title; the placeless messages on E1 are expected not to enter anyway), keeps 11 requests at about 7,070 estimated (about 7.3k real). m2-e1 (a shorter wording on E1, redundant with m1-e1) goes third if the ceiling is lowered further."
+}

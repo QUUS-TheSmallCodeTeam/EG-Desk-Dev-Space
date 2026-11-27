@@ -88,13 +88,13 @@ export function createContextHttpHandler(context, ensureAuth, { port = 39218 } =
       if (url.pathname === '/context/outputs') {
         if (req.method !== 'GET') { sendJson(res, 405, { error: 'Use GET for published results', code: 'METHOD_NOT_ALLOWED' }); return true }
         const outputKey = url.searchParams.has('outputKey') ? url.searchParams.get('outputKey') : undefined
-        sendJson(res, 200, await context.listOutputVersions({ conversationId: url.searchParams.get('conversationId') ?? undefined, outputKey }))
+        sendJson(res, 200, await context.listOutputVersions({ conversationId: url.searchParams.get('conversationId') ?? undefined, outputKey }, authority))
         return true
       }
       const output = url.pathname.match(/^\/context\/outputs\/([\da-f-]{36})$/i)
       if (output) {
         if (req.method !== 'GET') { sendJson(res, 405, { error: 'Use GET for a published result', code: 'METHOD_NOT_ALLOWED' }); return true }
-        sendJson(res, 200, await context.readOutput(output[1]))
+        sendJson(res, 200, await context.readOutput(output[1], authority))
         return true
       }
       // CHAT-05: step comments kept as records (list, add, resolve).

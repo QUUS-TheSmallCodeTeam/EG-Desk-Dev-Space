@@ -271,6 +271,7 @@ export function createSystemResourceMonitor({
   if (!Number.isSafeInteger(diskTimeoutMs) || diskTimeoutMs < 1 || diskTimeoutMs > 10_000) throw new TypeError('diskTimeoutMs must be between 1 and 10000')
 
   let previousCpu = null, previousNetwork = null, previousDiskIo = null
+  let cpuReading = null
   let cached = null, cachedAt = -Infinity, inFlight = null, closed = false
   let cachedDisk = null, cachedDiskAt = -Infinity
   let pendingDiskReads = 0
@@ -336,11 +337,15 @@ export function createSystemResourceMonitor({
     })
   }
 
-  async function collect() {
+  // CPU-only in-process consumer: same counters/windows and cache as the
+  // diagnostics sample, without polling disk, network or memory.
+  function sampleCpu() {
+    if (closed) return null
+    const at = monotonicNow()
+    if (cpuReading && at >= cpuReading.at && at - cpuReading.at < minIntervalMs) return cpuReading
     let cpu = emptyCpu('unavailable')
     try {
       const counters = cpuTotals(readCpus())
-      const at = monotonicNow()
       if (counters) {
         if (previousCpu && previousCpu.cores === counters.cores) {
           const intervalMs = at - previousCpu.at
@@ -356,6 +361,12 @@ export function createSystemResourceMonitor({
       } else previousCpu = null
     } catch { previousCpu = null }
 
+    cpuReading = Object.freeze({ host: 'local-computer', scope: 'host', at, cpu: Object.freeze(cpu) })
+    return cpuReading
+  }
+
+  async function collect() {
+    const { cpu } = sampleCpu()
     let memory = emptyMemory('unavailable')
     try { memory = memorySnapshot(readTotalMemory(), readFreeMemory()) } catch {}
 
@@ -435,6 +446,7 @@ export function createSystemResourceMonitor({
   }
 
   return {
+    sampleCpu,
     sample() {
       if (closed) return Promise.reject(new Error('System resource monitor is closed'))
       if (cached && monotonicNow() - cachedAt < minIntervalMs) return Promise.resolve(cached)
@@ -450,6 +462,7 @@ export function createSystemResourceMonitor({
       abort.abort()
       cached = null
       cachedDisk = null
+      cpuReading = null
       previousCpu = null
       previousNetwork = null
       previousDiskIo = null

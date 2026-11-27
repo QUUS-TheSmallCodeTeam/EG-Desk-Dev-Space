@@ -215,7 +215,7 @@ class Element {
   querySelector(selector) { return selector === '.xterm-helper-textarea' ? this.textarea : null; }
 }
 
-async function uiFixture({ search = '', platform = 'win32', transport = 'conpty', respond = null, timeouts = null } = {}) {
+async function uiFixture({ search = '', platform = 'win32', transport = 'conpty', respond = null, timeouts = null, webLinks = null } = {}) {
   const ids = ['status-overlay', 'terminal-container', 'terminal-shell-select', 'terminal-shell-start', 'terminal-shell-label', 'terminal-operation-status'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
   elements['terminal-shell-select'].disabled = true;
@@ -230,7 +230,7 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
     attachCustomKeyEventHandler(fn) { this.keyHandler = fn; }
     onKey(fn) { this.keyListener = fn; }
     onData(fn) { this.send = fn; }
-    write(data) { this.output.push(data); }
+    write(data, callback) { this.output.push(data); if (callback) { this.send('synthetic device reply'); callback(); } }
     focus() { this.focusCalls++; }
     paste(data) { this.send(data); }
   }
@@ -267,12 +267,12 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
   assert.notEqual(source, initializer);
   const run = compileFunction(source, ['TerminalState', 'Terminal', 'FitAddon', 'WebLinksAddon', 'document', 'window', 'fetch',
     'requestAnimationFrame', 'ResizeObserver', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'AbortController', 'URLSearchParams', 'console']);
-  await run(TerminalState, FakeTerminal, { FitAddon: class { fit() {} } }, undefined, document, window, fetch,
+  await run(TerminalState, FakeTerminal, { FitAddon: class { fit() {} } }, webLinks ? { WebLinksAddon: class { constructor(handler) { webLinks.handler = handler; } } } : undefined, document, window, fetch,
     fn => frames.push(fn), class { constructor(fn) { observer = this; this.callback = fn; } observe() {} disconnect() { this.disconnected = true; } },
     timeouts?.set || setTimeout, timeouts?.clear || clearTimeout, fn => { intervals.set(++intervalId, fn); return intervalId; }, id => intervals.delete(id),
     AbortController, URLSearchParams, { warn: (...args) => warnings.push(args) });
-  const h = { elements, requests, messages, term, window, intervals, warnings, observer, hostEventKey,
-    api: window.terminalAPI, boot: async () => { await frames.shift()(); await settle(); },
+  const h = { elements, requests, messages, get term() { return term; }, window, intervals, warnings, observer, hostEventKey,
+    api: window.terminalAPI, fetch, boot: async () => { await frames.shift()(); await settle(); },
     event: (type, event = {}) => windowListeners.get(type)?.(event) };
   return h;
 }
@@ -466,10 +466,10 @@ test('production Card routes a shell request to a separate Card and rejects othe
   ownFrame.terminalAPI.hostEventKey = 'document-key';
   const handler = compileFunction('let everConnected = false; return ev => {' + body + '\n};',
     ['termBrowser', 'spawnTerminalCard', 'sessionText', 'dismissCloseConfirm', 'focusTerminal', 'boardCloseRequests', 'card', 'completeAgendaClose', 'activate',
-      'state', 'activateCard', 'routeTerminalFrameWheel', 'TAG', 'terminalHostMessageMatches', 'terminalUrl', 'terminalDisposed'])(
+      'state', 'activateCard', 'routeTerminalFrameWheel', 'TAG', 'terminalHostMessageMatches', 'terminalUrl', 'terminalDisposed', 'heldPanel'])(
     { contentWindow: ownFrame, contentDocument: { documentURI: terminalUrl }, isConnected: true }, options => opened.push(options), sessionText, () => dismissed++,
     () => focused++, new Set(), card, () => assert.fail('no Board close is pending'), true,
-    state, () => { if (!state.panModifier) state.activeEntityId = card.id; }, routeTerminalFrameWheel, 'test', matches, terminalUrl, false);
+    state, () => { if (!state.panModifier) state.activeEntityId = card.id; }, routeTerminalFrameWheel, 'test', matches, terminalUrl, false, null);
   const deliver = event => handler({ origin: 'chrome://userchrome', ...event, data: { hostEventKey: 'document-key', ...event.data } });
   deliver({ source: {}, data: { type: 'terminal-new-session', shellId: 'cmd' } });
   deliver({ source: ownFrame, data: { type: 'terminal-new-session', shellId: '/bin/zsh' } });
@@ -636,7 +636,8 @@ test('project run verifies the attached Board and only PTY output completes its 
   request.boardId = 'later-selected-board'; request.script.command = 'other command';
   let completed = false; void pending.then(() => { completed = true; });
   await settle(); await settle();
-  assert.deepEqual(h.requests.find(item => item.route === '/v1/files/projects/open').body, { boardId: 'board-a' });
+  assert.deepEqual(h.requests.filter(item => item.route === '/v1/files/projects/open').map(item => item.body),
+    Array.from({ length: 2 }, () => ({ boardId: 'board-a', expectedProjectId: 'project-a', expectedRootId: 'root-a' })));
   const line = h.scriptWrites()[0].body.data, nonce = runNonce(line);
   assert.equal(h.api.inputRevision(), 0, 'owned script dispatch is distinct from human input');
   assert.ok(nonce); assert.match(line, /cd -- '\/verified\/project'/); assert.match(line, /eval 'npm test'/);
@@ -880,3 +881,121 @@ test('each terminal document publishes its own key before its first host event a
   assert.notEqual(second.api.hostEventKey, first.api.hostEventKey, 'a reload cannot reuse the previous document key');
   assert.match(second.api.hostEventKey, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 });
+
+test('managed idle Terminal neither spawns nor attaches until the user chooses; attach does not send device replies', async () => {
+  const bridgeInstance = crypto.randomUUID();
+  const ref = { sessionId: 'held-pty', bridgeInstance };
+  const h = await uiFixture({ search: '?managed=1', respond(route, body, defaults) {
+    if (route === '/terminal/attach') return { ...ref, ok: true, status: 'RUNNING', usePty: true, transport: 'conpty', detachSupported: true };
+    if (route === '/terminal/read') return { ...defaults(route, body), data: 'synthetic PTY output' };
+    return defaults(route, body);
+  } });
+  await h.boot();
+  assert.equal(h.requests.length, 0);
+  h.api.configureLocal(h.fetch, true); await settle();
+  assert.deepEqual(h.requests.map(r => r.route), ['/terminal/shells']);
+  assert.equal(h.elements['terminal-shell-start'].textContent, '새 터미널 열기');
+  assert.deepEqual(await h.api.attachLocal(ref), { ok: true }); await settle();
+  assert.equal(h.api.ptyId, ref.sessionId);
+  assert.equal(h.api.isConnected(), true);
+  assert.deepEqual(h.requests.map(r => r.route), ['/terminal/shells', '/terminal/attach', '/terminal/read']);
+  assert.deepEqual(h.term.output, ['synthetic PTY output']);
+  assert.equal(h.messages.find(m => m.type === 'terminal-ready').resumed, true);
+  await h.api.write('explicit input');
+  assert.deepEqual(h.requests.at(-1).body, { sessionId: ref.sessionId, data: 'explicit input' });
+});
+
+test('managed idle Terminal never starts a shell on failed re-entry; only the separate new action does', async () => {
+  const ref = { sessionId: 'held-pty', bridgeInstance: crypto.randomUUID() };
+  const h = await uiFixture({ search: '?managed=1', respond(route, body, defaults) {
+    if (route === '/terminal/attach') return { ok: false, code: 'TERMINAL_BRIDGE_RESTARTED', httpStatus: 400 };
+    return defaults(route, body);
+  } });
+  await h.boot(); h.api.configureLocal(h.fetch, true); await settle();
+  assert.equal((await h.api.attachLocal(ref)).code, 'TERMINAL_BRIDGE_RESTARTED');
+  assert.equal(h.requests.filter(r => r.route === '/terminal/spawn').length, 0);
+  h.elements['terminal-shell-start'].dispatch('click'); await settle();
+  assert.equal(h.requests.filter(r => r.route === '/terminal/spawn').length, 1);
+  assert.equal(h.api.ptyId, 'owned-pty');
+});
+
+test('managed detach waits for a matching hold ACK and unload never kills a held PTY', async () => {
+  const bridgeInstance = crypto.randomUUID();
+  const ack = deferred();
+  const h = await uiFixture({ search: '?managed=1', respond(route, body, defaults) {
+    if (route === '/terminal/spawn') return { ...defaults(route, body), bridgeInstance, detachSupported: true };
+    if (route === '/terminal/detach') return ack.promise;
+    return defaults(route, body);
+  } });
+  await h.boot(); h.api.configureLocal(h.fetch, false); await settle();
+  assert.equal(h.api.canDetach(), true);
+  const pending = h.api.detachLocal();
+  assert.equal(h.api.ptyId, 'owned-pty');
+  assert.equal((await h.api.write('stale input')).skipped, true);
+  ack.resolve({ ok: true, status: 'HELD', sessionId: 'owned-pty', bridgeInstance, expiresAt: 12345 });
+  assert.equal((await pending).ok, true);
+  assert.equal(h.api.ptyId, null);
+  h.event('unload'); await settle();
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.observer.disconnected, true);
+  assert.equal(h.requests.some(r => r.route === '/terminal/kill' || r.route === '/terminal/write'), false);
+});
+
+test('c34: a read that carries openUrls tells the host once (terminal-open-url), a read without them says nothing', async () => {
+  let reads = 0;
+  const h = await uiFixture({ search: '?managed=1', respond(route, body, defaults) {
+    if (route === '/terminal/attach') return { sessionId: 'held-pty', bridgeInstance: body.bridgeInstance, ok: true, status: 'RUNNING', usePty: true, transport: 'conpty', detachSupported: true };
+    if (route === '/terminal/read') return { ...defaults(route, body), data: 'x', ...(++reads === 1 ? { openUrls: ['https://claude.com/cai/oauth/authorize?state=s', 'https://a.example/2', 'https://a.example/3', 'https://a.example/4', 'https://a.example/5'] } : {}) };
+    return defaults(route, body);
+  } });
+  await h.boot(); h.api.configureLocal(h.fetch, true); await settle();
+  await h.api.attachLocal({ sessionId: 'held-pty', bridgeInstance: crypto.randomUUID() }); await settle();
+  const posted = h.messages.filter(m => m.type === 'terminal-open-url');
+  assert.equal(posted.length, 1); assert.equal(posted[0].sessionId, 'held-pty'); assert.equal(posted[0].urls.length, 4, 'at most four');
+  assert.equal(posted[0].urls[0], 'https://claude.com/cai/oauth/authorize?state=s');
+});
+
+// ---- c35 desk UX fixes ----
+const darwinFixture = (extra = {}) => uiFixture({ platform: 'darwin', transport: 'pty', ...extra });
+test('c35: a pipe session is never asked to resize and shows no resize error (logged once); a PTY session still resizes', async () => {
+  const pipe = await darwinFixture({ respond: (route, body, defaults) => (route === '/terminal/spawn' ? { ...defaults(route, body), usePty: false, transport: 'pipe' } : defaults(route, body)) });
+  await pipe.boot()
+  assert.equal(pipe.api.sessionInfo().usePty, false)
+  const before = pipe.requests.length
+  assert.deepEqual(await pipe.api.resize(100, 30), { ok: true, resized: false, skipped: 'pipe' }); await pipe.api.resize(90, 20)
+  assert.equal(pipe.requests.filter(r => r.route === '/terminal/resize').length, 0, 'nothing is sent to the bridge')
+  assert.ok(!/적용하지 못했습니다|Pipe terminal sessions/.test(pipe.elements['terminal-operation-status'].textContent), 'no resize error text (the one-line pipe notice at connect is the existing Korean notice)')
+  assert.equal(pipe.warnings.filter(w => String(w[0]).includes('resize skipped')).length, 1, 'logged once')
+  assert.equal(pipe.requests.length, before)
+  const pty = await darwinFixture(); await pty.boot()
+  assert.equal((await pty.api.resize(100, 30)).resized, true); assert.equal(pty.requests.filter(r => r.route === '/terminal/resize').length >= 1, true)
+})
+
+test('c35: a click on an address in the terminal opens it in an EG-Desk Browser Card when the bridge says so (the shell catalog\'s openUrl); otherwise xterm\'s default', async () => {
+  const on = { handler: null }, off = { handler: null }, opened = []
+  const flagged = await darwinFixture({ webLinks: on, respond: (route, body, defaults) => (route === '/terminal/shells' ? { ...defaults(route, body), openUrl: true } : defaults(route, body)) })
+  await flagged.boot(); let prevented = 0
+  on.handler({ preventDefault: () => { prevented++; } }, 'https://claude.com/cai/oauth/authorize?state=s')
+  const posted = flagged.messages.filter(m => m.type === 'terminal-open-url')
+  assert.equal(posted.length, 1); assert.deepEqual(posted[0].urls, ['https://claude.com/cai/oauth/authorize?state=s']); assert.equal(posted[0].sessionId, 'owned-pty'); assert.equal(prevented, 1)
+  const plain = await darwinFixture({ webLinks: off }); plain.window.open = (...args) => opened.push(args)
+  await plain.boot(); off.handler({ preventDefault() {} }, 'https://example.test/x')
+  assert.equal(plain.messages.filter(m => m.type === 'terminal-open-url').length, 0); assert.deepEqual(opened.map(a => a[0]), ['https://example.test/x'])
+})
+
+test('c35: the terminal reports how long it has been quiet (null until it printed something): the login line waits for the shell', async () => {
+  const h = await darwinFixture({ respond: (route, body, defaults) => (route === '/terminal/read' ? { ...defaults(route, body), data: 'prompt % ' } : defaults(route, body)) })
+  assert.equal(h.api.outputIdleMs(), null)
+  await h.boot(); await settle()
+  assert.ok(Number.isFinite(h.api.outputIdleMs()) && h.api.outputIdleMs() >= 0)
+})
+
+test('u1: the terminal reports whether the shell\'s line editor is up (xterm bracketed paste mode); null when it cannot tell', async () => {
+  const h = await darwinFixture()
+  await h.boot(); await settle()
+  assert.equal(h.api.lineEditorReady(), null, 'a terminal without modes cannot tell')
+  h.term.modes = { bracketedPasteMode: false }; assert.equal(h.api.lineEditorReady(), false, 'start-up files still running')
+  h.term.modes = { bracketedPasteMode: true }; assert.equal(h.api.lineEditorReady(), true, 'the editor switched bracketed paste on at its prompt')
+  h.term.modes = { bracketedPasteMode: 'yes' }; assert.equal(h.api.lineEditorReady(), null)
+  h.term.modes = { get bracketedPasteMode() { throw new Error('gone'); } }; assert.equal(h.api.lineEditorReady(), null)
+})

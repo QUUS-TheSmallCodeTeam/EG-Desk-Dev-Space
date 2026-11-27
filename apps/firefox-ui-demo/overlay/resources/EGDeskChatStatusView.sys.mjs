@@ -39,6 +39,13 @@ const liveApprovals = run => (Array.isArray(run?.pendingApprovals) ? run.pending
 const liveQuestions = run => (Array.isArray(run?.pendingUserInputs) ? run.pendingUserInputs : [])
   .filter(input => input && input.status === 'pending' && input.stale !== true);
 
+/** u5: how many requests (approvals and questions the person has not answered) the runs of a room are waiting on, counted the way waitingAsk reads them. */
+export function waitingAskCount(runs) {
+  let count = 0;
+  for (const run of Array.isArray(runs) ? runs : []) if (run && run.localHistory !== true) count += liveApprovals(run).length + liveQuestions(run).length;
+  return count;
+}
+
 /**
  * What a waiting run asks of 대표님, in one line, with the button that goes to
  * answer it. The decision itself stays in the activity record: this only says

@@ -31,7 +31,7 @@ function omitDispatchFields(receipt, ...fields) {
   for (const field of fields) delete dispatchReceipt[field]
   return { ...receipt, dispatchReceipt }
 }
-function fixture(permission = 'interact') {
+function fixture(permission = 'interact', { bindUrl = 'https://example.test/local' } = {}) {
   let owner = 'engine-account-1'
   let current = snapshot()
   let actionCalls = 0
@@ -43,7 +43,7 @@ function fixture(permission = 'interact') {
     requests.push(request)
     if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound',
       binding: { cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default',
-        accountId: 'fixture-account', userContextId: 0, url: 'https://example.test/local',
+        accountId: 'fixture-account', userContextId: 0, url: bindUrl,
         engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 } }
     if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: current }
     if (request.kind === 'act') {
@@ -883,6 +883,7 @@ test('wait reports met, not met before timeout, or unknown and never sends an ac
 
 test('wait after an unconfirmed navigation waits for the replacement document and can resolve it', async () => {
   const f = guardedFixture()
+  f.current = guardedSnapshot({ innerWindowId: 41 })
   await f.bind()
   const seen = await f.observe()
   const destination = 'https://example.test/next'
@@ -892,6 +893,7 @@ test('wait after an unconfirmed navigation waits for the replacement document an
   f.current = guardedSnapshot({ documentId: 'document-2', revision: 1, url: destination })
   const loaded = await f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 5000 })
   assert.equal(f.waits()[0].options.wait.notDocumentId, 'document-1')
+  assert.equal(f.waits()[0].options.wait.notInnerWindowId, 41)
   assert.equal(loaded.status, 'wait-condition-met')
   assert.equal(loaded.wait.documentReplaced, true)
   assert.equal(loaded.navigationPostconditionReobserved, true)
@@ -1998,4 +2000,81 @@ test('BRW-10: click, pointer press and typing share the action-classifier gate; 
   seen = await open.observe()
   open.setAct(request => clicked(open, request))
   assert.equal((await open.dispatch('egdesk_browser_click', clickArgs(seen))).status, 'postcondition-observed')
+})
+
+// L1 c34 compliance: with the terminal-opener flag (EGDESK_TERMINAL_OPEN_URL=on) a Browser Card that shows an AI provider's sign-in page is opaque to the Agent.
+test('c34: a card on an AI provider\'s sign-in domain cannot be observed, screenshotted, clicked or navigated by an Agent when the flag is on; flag off and other sites are unchanged', async () => {
+  const saved = process.env.EGDESK_TERMINAL_OPEN_URL, at = uri => ({ ...source(), sourceRef: { ...source().sourceRef, uri } })
+  try {
+    for (const url of ['https://claude.com/cai/oauth/authorize?state=s', 'https://platform.claude.com/oauth/code/callback?code=c', 'https://claude.ai/login', 'https://auth.openai.com/log-in']) {
+      process.env.EGDESK_TERMINAL_OPEN_URL = 'on'
+      const f = fixture('interact', { bindUrl: url }), prepared = f.service.prepare({ selectedSources: [at(url)] })
+      await f.service.bind(run, prepared)
+      const before = f.requests.length
+      for (const tool of ['egdesk_browser_observe', 'egdesk_browser_screenshot']) await assert.rejects(f.service.dispatch(run, { tool, arguments: { cardId: 'browser-1' } }), { code: 'BROWSER_CARD_OPAQUE' }, `${tool} on ${url}`)
+      assert.equal(f.requests.length, before, 'nothing was sent to the card')
+      delete process.env.EGDESK_TERMINAL_OPEN_URL
+      const off = fixture('interact', { bindUrl: url }); await off.service.bind(run, off.service.prepare({ selectedSources: [at(url)] }))
+      assert.equal((await off.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })).status, 'observed', 'flag off: as before')
+    }
+    process.env.EGDESK_TERMINAL_OPEN_URL = 'on'
+    const other = fixture('interact', { bindUrl: 'https://example.test/local' }); await other.service.bind(run, other.service.prepare({ selectedSources: [at('https://example.test/local')] }))
+    assert.equal((await other.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })).status, 'observed')
+  } finally { if (saved === undefined) delete process.env.EGDESK_TERMINAL_OPEN_URL; else process.env.EGDESK_TERMINAL_OPEN_URL = saved }
+})
+
+test('navigate with only its destination derives an exact URL assertion, not an authority grant', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const seen = await f.observe()
+  const url = 'https://example.test/?q=fixture'
+  const base = { cardId: 'browser-1', observationId: seen.observationId, expectedRevision: seen.snapshot.revision, url }
+  const go = patch => f.dispatch('egdesk_browser_navigate', { ...base, ...patch })
+  await assert.rejects(go({ postcondition: { kind: 'visible-text', value: 'fixture' } }), { code: 'INVALID_BROWSER_TOOL', invalidBy: 'navigation-postcondition-kind' })
+  for (const patch of [{ url: 'file:///tmp' }, { url: 'https://user@example.test/' }, { postcondition: null }, { extra: true }]) await assert.rejects(go(patch), { code: 'INVALID_BROWSER_TOOL' })
+  for (const url of ['https://other.test/', 'http://example.test/']) await assert.rejects(go({ url }), { code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE' })
+  await assert.rejects(go({ expectedRevision: base.expectedRevision + 1 }), { code: 'BROWSER_OBSERVATION_STALE' })
+  assert.equal(f.acts().length, 0)
+  f.setAct(request => {
+    assert.deepEqual(request.postcondition, { kind: 'url', value: url })
+    f.current = guardedSnapshot({ documentId: 'document-2', revision: 1, url })
+    return f.acted(request, f.current, actorReceipt())
+  })
+  assert.equal((await go({})).status, 'postcondition-observed')
+  assert.equal(f.acts().length, 1)
+})
+
+test('only a confirmed fill + observed GET search recovers the navigation lock on a new document with added parameters', async () => {
+  for (const [land, form, ok] of [['cat', true, true], ['other', true, false], ['cat', false, false]]) {
+    const f = fixture(), cardId = 'browser-1', url = 'https://example.test/?q=cat'
+    const field = { ...snapshot().interactiveElements[0], role: 'textbox', tag: 'input', label: '검색' }
+    const call = (name, args = {}) => f.service.dispatch(run, { tool: `egdesk_browser_${name}`, arguments: { cardId, ...args } })
+    f.setSnapshot(snapshot(3, { interactiveElements: [field] }))
+    f.setNavigationAfterNull(true)
+    await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+    const before = await call('observe')
+    const fill = await call('fill', { observationId: before.observationId, expectedRevision: 3, ref: field.ref, expectedTarget: field, text: 'cat', postcondition: { kind: 'target-value', value: 'cat' } })
+    assert.equal(fill.status, 'postcondition-observed')
+    f.setSnapshot(snapshot(4, { interactiveElements: [{ ...field, value: 'cat' }, { ...snapshot().interactiveElements[0], ref: 'el_2', nav: { type: 'submit', form: { method: form ? 'get' : 'post', fields: ['text'], submitUrl: url } } }] }))
+    const typed = await call('observe')
+    await call('navigate', { observationId: typed.observationId, expectedRevision: 4, url, postcondition: { kind: 'url', value: url } })
+    f.setSnapshot(snapshot(5, { documentId: 'new', url: `https://example.test/?q=${land}&ia=web`, readyState: 'complete' }))
+    const after = await call('observe')
+    assert.equal(after.navigationPostconditionReobserved, ok)
+    assert.equal(Boolean(after.uncertainAction), !ok)
+  }
+})
+
+test('internal named click observes past loading; serialized copies cannot request the internal condition', async () => {
+  const { NAMED_CHANGE } = await import('./egdesk-browser-tool-runtime.mjs')
+  const f = fixture(); await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  const obs = await f.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  const args = { ...clickArgs(obs), expectedTarget: obs.snapshot.interactiveElements[0] }
+  await assert.rejects(f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: { ...args, postcondition: { ...NAMED_CHANGE } } }), { code: 'INVALID_BROWSER_TOOL' })
+  f.setReceiptEditor(receipt => { const loading = snapshot(4, { text: ['Loading...'], interactiveElements: [] }); f.setSnapshot(loading)
+    setTimeout(() => f.setSnapshot(snapshot(5, { text: ['Hello World!'], interactiveElements: [] })), 320)
+    return { ...receipt, after: loading }
+  })
+  const result = await f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: { ...args, postcondition: NAMED_CHANGE } })
+  assert.deepEqual([result.status, result.after.text, f.actionCalls], ['postcondition-observed', ['Hello World!'], 1]); assert.notEqual(result.observationId, obs.observationId)
 })

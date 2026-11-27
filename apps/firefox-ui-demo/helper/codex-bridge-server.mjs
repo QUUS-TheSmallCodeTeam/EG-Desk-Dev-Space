@@ -1,3 +1,5 @@
+import { stallConfigFromEnv } from './egdesk-engine-stall.mjs'
+import { registerConversationForgetters } from './egdesk-conversation-forgetters.mjs'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { fingerprintNativeExecutable } from './codex-native-schema-probe.mjs'
@@ -5,7 +7,7 @@ import { createCodexProfileAppServers } from './codex-profile-app-servers.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { accountAccessState, normalizeNativeAuth, publicAuthIdentityKey, publicPlanType, usageRefreshDue } from './codex-auth-state.mjs'
 import { usageDisplay } from './codex-account-usage.mjs'
-import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { CodexChatRuntime, TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { CODEX_ENGINE_PROFILE_ID, codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
 import { EngineRegistry, createEngineStatusEmitter } from './engine-registry.mjs'
@@ -22,8 +24,13 @@ import { createInheritedMcpSync } from './codex-inherited-mcp.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 import { createTerminalRunWatch } from './egdesk-terminal-run-watch.mjs'
+import { createTerminalStateWatch } from './egdesk-terminal-state-watch.mjs'
+import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
+import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
+import { createPageToolsWiring } from './egdesk-page-tools-wiring.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
+import { createTerminalOpenUrl } from './egdesk-terminal-open-url.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { createHmac, randomBytes } from 'node:crypto'
 import * as os from 'node:os'
@@ -34,10 +41,32 @@ import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
-import { createDecisionBudget, createDecisionClient } from './egdesk-decision-client.mjs'
+import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { decisionCallLogFromEnv, recordDecisionCalls } from './egdesk-decision-call-log.mjs' // u4
+import { createDecisionTransport } from './egdesk-decision-transport.mjs'
+import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
+import { applyUpperBundle, describeUpperBundle, hudRoutingCapability, modeGatedClient } from './egdesk-upper-bundle.mjs'
+import { PERSONAL_FLAGS_FILE, applyPersonalFlags, describePersonalFlags } from './egdesk-personal-flags.mjs'
+import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
+import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
+import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
+import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
+import { createNunchiConfig } from './egdesk-nunchi-runtime.mjs'
+import { createUserGuidanceHttpHandler } from './egdesk-user-guidance.mjs'
+import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-memory-wiring.mjs'
+import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
+import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
+import { briefingDeps } from './egdesk-briefing-engine.mjs'
+import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
+import { createHudRouting, createHudRoutingHttpHandler } from './egdesk-hud-routing.mjs'
+import { createRoomAccountHttpHandler } from './egdesk-room-account-http.mjs'
+import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler, createRunRequesterReadHttpHandler } from './egdesk-presence-mirror.mjs'
+import { createWindowWatch } from './egdesk-heartbeat.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
+import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
+import { createMemoryEvidenceHttpHandler } from './egdesk-memory-http.mjs'
 import { MAX_ENGINE_PROFILES, openEngineProfiles } from './egdesk-engine-profiles.mjs'
 import { createEngineProfilesHttpHandler } from './egdesk-engine-profiles-http.mjs'
 import { createDeskHttpHandler } from './egdesk-desk-http.mjs'
@@ -54,9 +83,14 @@ import { createClaudeReaderEvidence } from './egdesk-claude-capacity.mjs'
 import { createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { createSlotReadiness, isProfileSlot } from './egdesk-slot-readiness.mjs'
+import { browserSchemaReady } from './egdesk-claude-browser-route.mjs' // u5 (U19): a Claude turn's Browser tools are judged by Claude's readiness, not the Codex slot's
+import { createProfileReaders } from './egdesk-profile-readers.mjs'
+import { createProfileAccessFailures } from './egdesk-profile-access.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
+import { createLocalCapacity } from './egdesk-local-capacity.mjs'
 import { WORKFLOW_OWNER, openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { createPlanToolProvider } from './egdesk-plan-tool-provider.mjs'
 import { createAnnotationToolProvider } from './egdesk-annotation-tool-provider.mjs'
@@ -65,12 +99,22 @@ import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, read
 import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
 import { createHostAgent, resolveHostAgentExecutable } from './egdesk-host-agent.mjs'
 import { createHostControl, createHostControlHttpHandler } from './egdesk-host-control.mjs'
+import { createComputerObserveWiring } from './egdesk-computer-observe-wiring.mjs'
+import { BROWSER_STEP_FRAME_TYPE, browserStepsUiMode, createBrowserStepsChannel } from './egdesk-browser-steps-channel.mjs'
 
 // Ignore prerelease variables; do not pass them on in direct bridge launches.
 for (const name of Object.keys(process.env)) {
   if (/^EGDESK_BOARD_AGENT_DRAFT_(API_KEY|MODEL)$/i.test(name)) delete process.env[name]
 }
 
+// u1: EGDESK_UPPER=on switches the conversation path's turn-judgment developer flags on together (helper/egdesk-upper-bundle.mjs); a flag set explicitly keeps its value. Default off.
+// This runs before anything below reads a flag. It sets developer flags only: the Decision model stays the person's setting (mode 끔/기록만/사용 and a saved key).
+// 2026-11-26 (owner: "항상 킴으로 마치 내 개인 설정 하듯"): the person's saved feature flags (<data>/settings/egdesk-personal-flags.json) fill the flags the launch
+// did not set, before the bundle reads them. An explicit environment value wins; no file, no effect (helper/egdesk-personal-flags.mjs).
+const personalFlags = applyPersonalFlags(process.env, path.join(appDataDirectory(), 'settings', PERSONAL_FLAGS_FILE))
+if (personalFlags.applied.length || personalFlags.kept.length) console.log(`[egdesk-codex-bridge] ${describePersonalFlags(personalFlags)}`)
+const upperBundle = applyUpperBundle(process.env)
+if (upperBundle.on) console.log(`[egdesk-codex-bridge] ${describeUpperBundle(upperBundle)}`)
 const nodeRuntime = requireEGDeskNodeRuntime()
 
 const BRIDGE_PORT = 39218
@@ -127,12 +171,18 @@ const authState = {
 }
 
 function broadcast(event, chatProtocol = 0) {
+  // a1 (L1): a Browser step frame goes out only while EGDESK_BROWSER_STEPS_UI=on, checked again here (display only)
+  if (event?.type === BROWSER_STEP_FRAME_TYPE && !(event = browserSteps.gate(event))) return
   const payload = `event: codex\ndata: ${JSON.stringify(event)}\n\n`
   for (const client of clients) {
     if (chatProtocol && client.chatProtocol !== chatProtocol) continue
     client.send(payload)
   }
 }
+
+// a1 (L1): Browser task step lines for Chat and the Card (developer flag EGDESK_BROWSER_STEPS_UI, default off); the runtime
+// reports through decisionContext.browserSteps.publish(step). See egdesk-browser-steps-channel.mjs.
+const browserSteps = createBrowserStepsChannel({ mode: () => browserStepsUiMode(), broadcast: frame => broadcast(frame, 2) })
 
 function emitAuthStatus() {
   broadcast({
@@ -181,6 +231,7 @@ function ensureOntologyStore() {
 }
 ensureOntologyStore()
 const systemResourceMonitor = createSystemResourceMonitor({ profilePath: dataDir })
+const localCapacity = createLocalCapacity({ monitor: systemResourceMonitor })
 let chatStore = null
 let chatStoreError = null
 try {
@@ -218,13 +269,39 @@ const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'setting
 // Decision model (DECISION_MODEL_CONTEXT_SETUP.md): the OpenAI key lives in its
 // own 0600 file in the same private settings directory (never in .egdesk
 // exports); the mode is the bridge setting decisionContext ('off' unless chosen).
-// No local monthly cap until the owner picks one (§5.4). Never throws.
+// No local monthly cap until the owner picks one (§5.4). Never throws. The
+// month's input-token tally (and a cap, once chosen) is kept in its own 0600
+// file beside the key so a restart does not reset the local guard; the key is
+// never written there.
 const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings') })
-const decisionBudget = createDecisionBudget({})
-const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget })
+const decisionBudgetStore = openDecisionBudgetStore({ dataDir: path.join(dataDir, 'settings') })
+// Content-free threshold-calibration record (canon 5.3): numbers and closed words only, own 0600 file, never exported.
+const decisionCalibrationLog = openCalibrationLog({ dataDir: path.join(dataDir, 'settings') })
+const decisionBudget = createDecisionBudget({ monthlyInputTokenCap: decisionBudgetStore.state?.cap ?? null, initial: decisionBudgetStore.state,
+  onChange: state => { decisionBudgetStore.save(state) } })
+const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
+// One keep-alive transport for the single Decisions endpoint (never retries; see egdesk-decision-transport.mjs).
+const decisionTransport = createDecisionTransport()
+// Idle warm-up (c18; developer flag EGDESK_DECISION_WARMUP=advisory|on, default off; helper/egdesk-decision-warmup.mjs). Off: the client's fetch is the
+// transport itself and nothing below exists. On or advisory: every Decisions request is noted (times only) so that "the last request was N
+// minutes ago" is known for any kind of request, and one fixed content-free request may be sent when a composer is used or a turn starts.
+const decisionWarmupConfig = warmupConfigFromEnv(process.env)
+const decisionActivity = decisionWarmupConfig.mode === 'off' ? null : createDecisionActivity({ idleMs: decisionWarmupConfig.idleMs })
+const decisionClientBase = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey,
+  fetchImpl: decisionActivity ? decisionActivity.wrap(decisionTransport.fetch) : decisionTransport.fetch })
+// u4: developer flag EGDESK_DECISION_CALL_LOG=on (default off): every decision call is noted as a closed row (kind, start/end ms, input and cached tokens, outcome) around THE client; off, this is the client itself
+const decisionClient = recordDecisionCalls(decisionClientBase, decisionCallLogFromEnv(process.env))
+const decisionWarmup = decisionActivity ? createDecisionWarmup({ client: decisionClient, activity: decisionActivity, mode: () => decisionWarmupConfig.mode,
+  decisionsMode: () => bridgeSettings.decisionContext.mode, hasKey: () => decisionCredentials.getApiKey() !== null, idleMs: decisionWarmupConfig.idleMs, joinMs: decisionWarmupConfig.joinMs }) : null
+const recipientForCodexDecisions = ({ engineId, engineProfileId, ownerKey }) => {
+  if (engineId !== 'codex') return null
+  const auth = !engineProfileId || engineProfileId === CODEX_ENGINE_PROFILE_ID ? authState : codexProfileServers.snapshot(engineProfileId)?.auth
+  if (auth?.isLoggedIn !== true || auth.authMode !== 'chatgpt' || publicAuthIdentityKey(auth) !== ownerKey) return null
+  return recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model)
+}
 // SUB-11 Engine Profiles: the shared CLI logins plus EG-Desk-owned login
 // folders (<appData>/settings/engines/<id>, 0700). Claude runs the active
-// one (CLAUDE_CONFIG_DIR); Codex stays on its one shared app-server ('notYet').
+// one (CLAUDE_CONFIG_DIR); an owned Codex account uses its own app-server.
 const engineProfiles = openEngineProfiles({ dataDir: path.join(dataDir, 'settings'), isolatedCodex: true })
 const claudeProfileRows = () => engineProfiles.list('claude').map(row => ({ ...row, configDir: row.owned ? engineProfiles.configDir(row.id) : null }))
 const claudeProfileEnv = profileId => {
@@ -286,24 +363,42 @@ const claudeReader = {
   },
   disconnect(options) { return claudeReaderClient?.disconnect(options) },
 }
+// L1 c24 (flag EGDESK_ROOM_ACCOUNT=on, default off): a room on an Agent profile reads big sources on THAT profile's app-server as that account (owner decision,
+// U11); off, every Codex read goes through the shared reader as before.
+const profileReaders = createProfileReaders({ enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', isProfileSlot,
+  request: (id, method, params) => codexEngine.request(method, params, id), respond: (id, rpcId, result, error) => codexEngine.respond(rpcId, result, error, id), ownerKey: id => codexEngine.ownerKey(id) })
 contexts = new ContextRuntime({
-  store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, getReadCapacity: getClaudeReadCapacity,
+  store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, profileReaders, getReadCapacity: getClaudeReadCapacity,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   getAuthority: hints => chat.contextAuthority(hints),
+  // L1 c22: a run on another Codex engine profile is judged by THAT profile's server and binary (its own probe), not by the shared server being up
   schemaReady: authority => authority?.engineId === 'claude'
     ? claudeEngine.isReady() && claudeEngine.capabilities().has('dynamicTools')
-    : nativeCapabilities.schemaMatch && appServerReady,
+    : isProfileSlot(authority?.engineProfileId) ? codexProfileServers.capabilities(authority.engineProfileId).dynamicTools === true
+      : nativeCapabilities.schemaMatch && appServerReady,
 })
 for (const root of pendingFileRoots.values()) contexts.noteRoot(root)
-const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
-const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env),
+// L1 c24 (flag EGDESK_ROOM_ACCOUNT=on, default off; owner decision U11): a Browser grant is bound to the account of the slot running the room. A room on an
+// Agent profile uses THAT profile's account for binding and for every later check; the default room, and every room with the flag off, the default sign-in.
+const browserOwnerKeyFor = id => (process.env.EGDESK_ROOM_ACCOUNT === 'on' && isProfileSlot(id) ? codexEngine.ownerKey(id) : publicAuthIdentityKey(authState))
+const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor })
+// Browser-only transfer generation; restored settings never revive older work.
+let browserDecisionGeneration = 0
+// L1 c23: readiness of the slot that will run the turn. The shared slot reads the shared binary's probe and the shared server; a profile slot reads ITS
+// OWN binary's probe and ITS OWN server (ready and signed in), so neither server being down affects the other's rooms.
+const slotReadiness = createSlotReadiness({ shared: () => ({ schemaMatch: nativeCapabilities.schemaMatch, qaReadOnly: nativeCapabilities.qaReadOnly, ready: appServerReady }),
+  profiles: { capabilities: id => codexProfileServers.capabilities(id) } })
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: browserSchemaReady({ claudeLive: () => { try { return chat.claudeBrowserLive() === true } catch { return false } }, claudeReady: () => claudeEngine.isReady() && claudeEngine.capabilities().has('boundedQa'), codexReady: route => slotReadiness.qaReady(route?.engineProfileId) }), fixtureQa: fixtureBrowserQaFromEnv(process.env),
+  watchPopupLoad: (cardId, url) => workflow?.watchPopupLoad(cardId, url),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
-  decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null, client: decisionClient } })
+  decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
+    recipient: () => recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model),
+    generation: () => browserDecisionGeneration, client: decisionClient } })
 // egdesk_propose_plan on ordinary threads: plans wait for approval in the
 // workflow runtime opened below (null until then, so the tool answers unavailable).
-const planProvider = createPlanToolProvider({ plans: () => workflow?.plans ?? null, schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const planProvider = createPlanToolProvider({ plans: () => workflow?.plans ?? null, schemaReady: route => slotReadiness.schemaReady(route) })
 // CNV-05: egdesk_publish_annotation on ordinary threads (dotted '제안' over a card).
-const annotationProvider = createAnnotationToolProvider({ schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const annotationProvider = createAnnotationToolProvider({ schemaReady: route => slotReadiness.schemaReady(route) })
 // The Codex models the signed-in account can choose (model/list, hidden ones
 // excluded), read after each ready connection and on every account change;
 // null while unknown or signed out. They fill the Codex engines[] row and
@@ -314,26 +409,37 @@ const modelCatalog = createModelCatalogSync({
   identity: () => modelAccountKey(authState),
   onChange: () => engineStatus.check(),
 })
+// L1 c22: each profile server's binary is probed on its own (dynamicTools, ephemeral, turn/steer, thread/delete), remembered per binary; nothing is
+// inherited from the shared app-server's probe.
+const profileCapabilityCache = createNativeCapabilityCache()
+// L1 c25 (flag EGDESK_ROOM_ACCOUNT=on): the last access failure (auth, quota, permission) of each profile's own server, as status data per profile
+const profileAccess = createProfileAccessFailures({ enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', authOf: id => codexProfileServers.snapshot(id)?.auth ?? null })
 const codexProfileServers = createCodexProfileAppServers({
   resolveHome: id => engineProfiles.ownedCodexHome(id),
-  // Bind proof to this dedicated process at launch, never borrow the shared
-  // RPC, owner or a new binary's contract for an already-running account slot.
-  getBoardPeerContract: bin => nativeCapabilities.boardPeerContract && bin === nativeCapabilities.executable
-    && fingerprintNativeExecutable(bin) === nativeCapabilities.binaryFingerprint ? nativeCapabilities.boardPeerContract : null,
-  onNotification: (id, message) => codexEngine.notify(message, id),
-  onServerRequest: (id, message) => codexEngine.serverRequest(message, id),
+  inspectCapabilities: bin => profileCapabilityCache(bin),
+  // L1 c24: a profile's reader (flag) consumes the events of its own read-only child threads; everything else goes on as before
+  onNotification: (id, message) => { profileAccess.notify(id, message); if (!profileReaders.handleNotification(id, message)) codexEngine.notify(message, id) },
+  onServerRequest: (id, message) => { if (!profileReaders.handleServerRequest(id, message)) codexEngine.serverRequest(message, id) },
   onConnection: (id, state) => codexEngine.connection(state, id),
   onChange: () => engineStatus.check(),
+  // Hooks can run in a profile's app-server too (reports/l5-c16.md): the same version pin, one session per profile process.
+  onVersion: (id, info) => { try { chat.setEngineVersion({ engineId: 'codex', engineProfileId: id, userAgent: info?.userAgent ?? null }) } catch { /* recording only */ } },
 })
 // Each adapter owns its responses; the chat runtime routes engine RPC IDs.
 const codexEngine = createCodexEngineAdapter({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
-  profiles: codexProfileServers,
+  // L1 c25: a turn/start rejection on a profile's server is recorded for THAT profile (flag EGDESK_ROOM_ACCOUNT=on); every other call passes straight through
+  profiles: { ...codexProfileServers, request: (id, method, params) => profileAccess.request(id, method, () => codexProfileServers.request(id, method, params)) },
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
   getBoardPeerContract: () => appServerReady ? nativeCapabilities.boardPeerContract : null,
+  // c23: a plain message may be steered into a working turn when this binary's own generated schema says so (no version pin)
+  getSteerContract: () => appServerReady ? nativeCapabilities.steerContract : null,
+  // thread/delete: the shared app-server only, when its binary's generated schema has it (egdesk-native-capabilities threadDelete). A profile's
+  // own app-server is not proven here; deleting a conversation there records that the engine history remains (L2 c18).
+  getThreadDelete: id => (id == null || id === CODEX_ENGINE_PROFILE_ID) && appServerReady && nativeCapabilities.threadDelete === true,
   describe: () => describeCodexEngine({
     ready: appServerReady, starting: Boolean(appServerProcess) && !appServerReady, blocked: launchConfigBlocked,
     version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,
@@ -342,7 +448,10 @@ const codexEngine = createCodexEngineAdapter({
     residentProcesses: (appServerProcess && appServerProcess.exitCode == null ? 1 : 0) + codexProfileServers.residentCount(),
     residentLimit: MAX_ENGINE_PROFILES,
     models: modelCatalog.snapshot(),
-    extraProfiles: engineProfiles.list('codex').filter(row => row.owned).map(row => ({ ...row, ...codexProfileServers.snapshot(row.id) })),
+    extraProfiles: engineProfiles.list('codex').filter(row => row.owned).map(row => {
+      const failure = profileAccess.failureOf(row.id)
+      return { ...row, ...codexProfileServers.snapshot(row.id), ...(failure ? { accessFailure: failure } : {}) }
+    }),
   }),
 })
 // D-S1 (b) (2026-10-24): the installed, unmodified `claude`, one child
@@ -355,16 +464,21 @@ const claudeEngine = createClaudeEngineAdapter({
   defaultCwd: process.cwd(),
   onStatusChange: () => engineStatus.check(),
   processBudget: claudeProcessBudget,
+  // Deleting a conversation also removes the session files Claude Code keeps for it (helper/claude-session-files.mjs). Developer flag, default off.
+  deleteSessionFiles: () => process.env.EGDESK_CLAUDE_DELETE_SESSION === 'on',
   profiles: claudeProfileRows,
 })
 if (process.env.EGDESK_CLAUDE_READER === 'live') claudeReaderEvidence = createClaudeReaderEvidence({ adapter: claudeEngine, snapshot: () => claudeEngineStatus.snapshot() })
 const engineRegistry = new EngineRegistry({ defaultEngineId: PROVIDER_ID })
 engineRegistry.register(codexEngine)
 engineRegistry.register(claudeEngine)
+const canAddEngineProfileAndLogin = (id, row = engineRegistry.publicEngines().find(engine => engine.id === id)) =>
+  engineProfiles.supportsAddAndLogin(id) && ['ready', 'loginRequired'].includes(row?.status) && row.versionStatus !== 'unsupported'
+const publicEngines = () => engineRegistry.publicEngines().map(row => ({ ...row, profileAddAndLogin: canAddEngineProfileAndLogin(row.id, row) }))
 // SSE engine.status (design §7): sent whenever a public engines[] row changes
 // (connection, sign-in or account change, model list), beside auth.status.
 const engineStatus = createEngineStatusEmitter({
-  engines: () => engineRegistry.publicEngines(),
+  engines: publicEngines,
   emit: event => broadcast(event),
   v: BRIDGE_PROTOCOL_VERSION,
 })
@@ -385,22 +499,73 @@ const claudeEngineStatus = createClaudeEngineStatus({
 // the observe-only host helper (started when the host-activity view first
 // asks) and the activity timeline. Lease events reach chat.noteHostControl.
 // No shutdown step: the helper exits on its stdin EOF when the bridge exits.
+// U1 B1 (developer flag EGDESK_COMPUTER_OBSERVE=on, default off: null): EG-Desk's own computer observe tools for both engines. The same host helper
+// is started with --observe-content and the provider asks that agent (attach).
+const computerObserve = createComputerObserveWiring({ env: process.env, getChat: () => chat, getHostControl: () => hostControl })
 const hostControl = createHostControl({
-  makeAgent: onEvent => createHostAgent({ executable: resolveHostAgentExecutable(), onEvent }),
+  makeAgent: onEvent => {
+    const agent = createHostAgent({ executable: resolveHostAgentExecutable(), onEvent, ...(computerObserve ? computerObserve.agentOptions : {}) })
+    computerObserve?.attach(agent)
+    return agent
+  },
   onLeaseEvent: event => chat.noteHostControl(event),
   emit: event => broadcast({ ...event, v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, ts: Date.now() }),
 })
+let memoryEvidenceStore = null
+const getMemoryEvidence = () => memoryEvidenceStore ??= new MemoryEvidenceStore({ dataDir, captures: contextStore })
+// Advisory turn memory: off unless the bridge setting `turnMemory` is 'advisory'. The adapter and its write store open lazily.
+let wikiAdapter = null
+// Its internal options come from developer flags (turnMemoryFlagsFromEnv: EGDESK_TURN_MEMORY_ONE_PACKET / _WRITE_TARGET / _CONFIRM), default unchanged.
+const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, ontologyStore: ensureOntologyStore, deskStore, ...turnMemoryFlagsFromEnv(process.env),
+  getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: path.join(dataDir, 'settings') }) }) })
+// Direct browser entry: developer flag EGDESK_BROWSER_ENTRY=advisory|on, default off (no settings screen entry). It reuses the turn-memory
+// snapshot builder and the same adapter/write store; nothing opens while it is off.
+// Nunchi (U17; EGDESK_NUNCHI=on, default off): the person's reactions are read by the decision model and guide the conversation; durable candidates go to the user guidance record
+// (<data>/settings/egdesk-user-guidance.json), which the person applies or reverts through /v1/user-guidance. Nothing opens while the flag is off.
+const nunchiConfig = createNunchiConfig({ dataDir: path.join(dataDir, 'settings') })
+const handleUserGuidanceHttp = createUserGuidanceHttpHandler({ store: { list: a => nunchiConfig.store.list(a), setStatus: (...a) => nunchiConfig.store.setStatus(...a) }, enabled: () => nunchiConfig.enabled(), port: BRIDGE_PORT, guard: guardBridgeRequest, send: sendJson, receipts: n => chat.nunchiRecent(n) })
+const browserEntryConfig = createBrowserEntryConfig({ flag: () => process.env.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(),
+  wiki: args => turnMemoryConfig.wiki(args), openItemsFlag: () => process.env.EGDESK_BROWSER_OPEN_ITEMS })
+// The Desk's presence snapshot as the window posts it (same rows the placement runtime reads there). Memory only; the route is off (404)
+// unless the developer flag EGDESK_PRESENCE=on is set. Default off.
+const presenceMirror = createPresenceMirror()
+const handlePresenceMirrorHttp = createPresenceMirrorHttpHandler({ mirror: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
+// Whose task a conversation's run is (another member's presence alias, told by the window; memory only). Same flag, default off.
+const runRequesters = createRunRequesters({ presence: presenceMirror })
+const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRequesters, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
+// L1 c21 (5): a second Desk window reads a run's requester here
+const handleRunRequesterReadHttp = createRunRequesterReadHttpHandler({ requesters: runRequesters, presence: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
+// EG-Desk's own command and file tools, Codex as a pure model engine: developer flag EGDESK_OWN_TOOLS=on, default off (null: nothing changes).
+const ownToolsWiring = createOwnToolsWiring({ env: process.env, dataDir, spawn, getChat: () => chat, inspect: createGitTargetInspector() })
+// u1: the browser as EG-Desk tools for the conversation (a developer flag, default off: see egdesk-page-tools-wiring.mjs); approvals go through the own tools' ledger when that is on
+const pageToolsWiring = createPageToolsWiring({ env: process.env, getChat: () => chat, ledger: ownToolsWiring?.ledger ?? null })
+const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
+  // EGDESK_TERMINAL_GATE_METHOD=score selects the old 0-4 score question, only to compare; content predicates are the default.
+  method: process.env.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
+// A message typed while a run works is accepted into that run and handed to the session heartbeat (codex-chat-runtime.mjs, "Messages while a
+// run works"). Developer flag, default off: without it the composer waits for the turn and the runtime refuses such a message, as before.
+const IN_RUN_MESSAGES_ENABLED = process.env.EGDESK_INRUN_MESSAGES === 'on'
+const engineStall = stallConfigFromEnv(process.env) // developer flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS, default off (L5 c33): { firstEventMs } or null
+const agentReloadReuse = process.env.EGDESK_AGENT_RELOAD_REUSE === 'on' // developer flag, default off (L7 c27)
 const chat = new CodexChatRuntime({
+  localCapacity,
   engines: engineRegistry,
   contexts,
   resolveProjectWorkspace: request => localFiles.resolveProjectWorkspace(request),
   resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
-  toolProviders: [browserProvider, planProvider, annotationProvider],
+  toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),
+  ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
+  // developer flag, default off (L7 c27): an Agent-profile turn on a loaded thread skips the per-turn detach + resume while its resume parameters are unchanged
+  ...(agentReloadReuse ? { agentReloadReuse: true } : {}),
+  // developer flag, default off (L5 c33): a turn the engine accepted and then stayed silent on (no event for it within the flag's milliseconds) is interrupted and started once more
+  ...(engineStall ? { engineStall } : {}),
+  // L1 c21 (owner decision, provisional): a room keeps its account; an explicit switch continues the same room. Off unless EGDESK_ROOM_ACCOUNT=on.
+  roomAccount: { mode: () => (process.env.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') },
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
-  qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
+  qaReady: slot => slotReadiness.qaReady(slot),
   getNativeContractFingerprint: () => nativeCapabilities.contractFingerprint,
   profiles: profileStore,
   emit: event => { broadcast(event, 2); workflow?.onChatEvent(event); hostControl.onChatEvent(event) },
@@ -416,13 +581,54 @@ const chat = new CodexChatRuntime({
   // Decision model context setup before each ordinary turn; nothing runs while
   // the mode is 'off' (default) or no key is saved.
   decisionContext: {
+    settingsGeneration: () => browserDecisionGeneration,
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
-    client: decisionClient,
-    collect: async ({ body, context }) => (await collectDecisionCandidates({ body, clientThreadId: context.clientThreadId,
+    // u1 (U9): every turn-judgment feature reaches the Decision model through this client, which refuses to send while the person's mode is 끔 or no key is saved, whatever flag is on
+    client: modeGatedClient(decisionClient, { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null }),
+    // turn_context budget (values in codex-chat-runtime.mjs TURN_CONTEXT_BUDGET_MS / TURN_CONTEXT_COLD_BUDGET_MS): cold = first turn of a
+    // conversation or no warm Decisions socket (egdesk-decision-transport.mjs warm()).
+    budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisionTransport.warm(),
+    // Idle warm-up (EGDESK_DECISION_WARMUP, default off): a turn tells it before its first Decisions request; null when off.
+    ...(decisionWarmup ? { warmup: decisionWarmup } : {}),
+    // The selection's 'action' rule set (egdesk-context-setup.mjs CONTEXT_RULE_SETS): developer flag EGDESK_CONTEXT_RELEVANCE=action, default off.
+    ...(['action', 'action+status'].includes(process.env.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: process.env.EGDESK_CONTEXT_RELEVANCE } : {}),
+    calibrationLog: decisionCalibrationLog,
+    turnMemory: turnMemoryConfig,
+    nunchi: nunchiConfig,
+    browserEntry: browserEntryConfig,
+    // a1 (L1): where a Browser task's steps are reported for the screen (sends nothing while EGDESK_BROWSER_STEPS_UI is off)
+    browserSteps,
+    // Advisory draft check after an answer is posted (records only). Developer flag, default off; it has no settings screen entry.
+    // The check asks per-sentence yes/no questions (default); EGDESK_DRAFT_CHECK_DESIGN=choice selects the old 4-way choice for comparison (developer flag).
+    ...(['advisory', 'on'].includes(process.env.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => process.env.EGDESK_DRAFT_CHECK, design: () => (process.env.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates'), ...(process.env.EGDESK_DRAFT_CHECK_FILES === 'on' ? { fileText: () => true } : {}), ...(process.env.EGDESK_DRAFT_CHECK_INCOMPLETE === 'hold' ? { incompleteEvidence: () => 'hold' } : {}) } } : {}), // u5: the check may read the text of a prefetched file the engine was given (default off)
+    // Live-session heartbeat (egdesk-heartbeat.mjs) and, with EGDESK_DRAFT_CHECK=on (held, checked messages), intermediate messages while a run works. Developer flag, default off.
+    // attentionPosted: the session posted its pointer message for a provider's attention fact; the placement runtime withdraws it.
+    // With EGDESK_PRESENCE=on the audience rule also reads the Desk's presence snapshot (egdesk-presence-mirror.mjs); without it, as before, presence is unknown.
+    ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(process.env.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
+      attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') workPlacement.acknowledgePointer(key) }, ...(process.env.EGDESK_FLOW_STALLED_COPY === 'none' ? { stalledCopy: () => 'none' } : {}), ...(process.env.EGDESK_FLOW_NOTE_WORDING === 'waiting' ? { noteWording: () => 'waiting' } : {}) } } : {}),
+    // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
+    ...(IN_RUN_MESSAGES_ENABLED ? { inRunMessages: { mode: () => 'on' } } : {}),
+    ...(process.env.EGDESK_OPEN_ITEMS === 'on' ? { openItems: true } : {}), // c32: the open-item resolver (default off)
+    ...(process.env.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}), // c33: the answer's open proposals as defined items (L3), default off
+    ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
+    // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
+    ...(ownToolsWiring && !ownToolsWiring.shadow ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
+    // Working-memory gate at the EG-Desk tool-result boundary: developer flag EGDESK_WORKING_MEMORY=advisory|on, default off (results unchanged).
+    ...(['advisory', 'on'].includes(process.env.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => process.env.EGDESK_WORKING_MEMORY } } : {}),
+    topicRecipient: recipientForCodexDecisions,
+    recipientForChatChoice: recipientForCodexDecisions,
+    reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),
+    // c45: the briefing's fill turn starts while the answer is written (EGDESK_BRIEFING_PREFILL=on, default off: the key is absent and the runtime does nothing)
+    ...(process.env.EGDESK_BRIEFING_PREFILL === 'on' && process.env.EGDESK_BRIEFING_FLOW === 'on' ? { briefingPrefill: args => handleBoardPresentationHttp.prefill?.(args) } : {}),
+    get memoryEvidence() { return getMemoryEvidence() },
+    collect: async ({ body, context, memoryEvidenceFor, speech }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, speech, clientThreadId: context.clientThreadId,
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
   },
 })
+// U1 B1: EG-Desk's own computer observe tools (flag EGDESK_COMPUTER_OBSERVE=on; otherwise null and nothing is added). Registered after the runtime is built, so the
+// toolProviders list above (which the own-tools wiring test pins) stays as it is. The provider needs no runtime handle; collectToolSpecs reads the live list.
+if (computerObserve) chat.toolProviders.push(computerObserve.provider)
 // Owned Codex events reach only Chat on their originating profile, never
 // the shared Reader, WebSocket, default account state, or inherited MCP sync.
 codexEngine.subscribe({
@@ -431,6 +637,8 @@ codexEngine.subscribe({
   connection: (engineId, state, engineProfileId) => { chat.setConnection(engineId, state.ready, { processLost: state.processLost, engineProfileId }) },
 })
 // Claude conversation events reach the same runtime as app-server traffic.
+// u1: the page tools join the runtime's providers after it is made (nothing when the wiring is off)
+for (const provider of pageToolsWiring ? pageToolsWiring.toolProviders : []) chat.registerToolProvider(provider)
 claudeEngine.subscribe({
   notification: (_engineId, message) => { void chat.handleNotification(message) },
   serverRequest: (_engineId, message) => { void chat.handleServerRequest(message) },
@@ -453,17 +661,20 @@ const inheritedMcp = createInheritedMcpSync({
   onChange: servers => broadcast({ type: 'mcp.inherited', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, inheritedMcp: servers, ts: Date.now() }),
 })
 const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })
+// DM [보기 추천] (the person types options and asks for a recommendation) is hidden pending the owner's decision: it contradicts
+// "the person just talks". Developer flag, default off: without it the capability is not listed and the route does not exist.
+const CHAT_CHOICE_ENABLED = process.env.EGDESK_CHAT_CHOICE === 'on'
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
 // SUB-11: switching the Claude profile waits until no Claude turn runs (a
 // running Run never moves); a new static check then re-gates the adapter.
 const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
-  profiles: engineProfiles, port: BRIDGE_PORT,
+  profiles: engineProfiles, port: BRIDGE_PORT, canAddAndLogin: canAddEngineProfileAndLogin,
   busy: engine => engine === 'claude' && claudeEngine.stats().activeTurns > 0,
   inUse: id => [...chat.threads].some(([cid, thread]) => thread.engineProfileId === id && chat.conversationBusy(cid)),
   refresh: async id => {
     await codexEngine.refresh(id)
-    return engineRegistry.publicEngines().find(row => row.id === 'codex') ?? null
+    return publicEngines().find(row => row.id === 'codex') ?? null
   },
   onChange: () => {
     codexProfileServers.reconcile()
@@ -475,10 +686,57 @@ const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
   },
 })
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
+// L4 c23: the briefing version chain survives a bridge restart (ids, kinds, material-key hashes, versions and content hashes only; 0600 in the bridge's data dir).
+const briefingBindings = openBriefingBindings({ dataDir: path.join(dataDir, 'briefing') })
+// Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
+const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
+  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch,
+  briefingBindings,
+  // Briefing flow, `on` path. Publishing goes through the real context runtime; the design / redesign / new-component text comes from the answer's own model on a
+  // private fork (egdesk-briefing-engine.mjs over codex-internal-turn.mjs). Off unless EGDESK_BRIEFING_FLOW=on here AND the chrome's egdesk.briefingFlow is "on" AND
+  // the Decisions mode is on; otherwise the route answers 'no-engine' / 'mode' and does nothing. The advisory observe needs none of this.
+  // Order: the Decision model decides the design guide and the subjective model fills the data (default); EGDESK_BRIEFING_ORDER=design-first keeps the earlier order for comparison.
+  briefing: briefingDeps({ chat, contexts, enabled: process.env.EGDESK_BRIEFING_FLOW === 'on', order: process.env.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton',
+    // EGDESK_BRIEFING_FILL_CHECK=facts: judge only the filled pieces that carry a number, a date, a Latin word or a name (fewer tokens). Developer switch, default off (every piece).
+    fillCheck: process.env.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all',
+    // EGDESK_BRIEFING_COVERAGE=board: the cycle-19 whole-board coverage question, kept for comparison. Developer switch; default one question per fact.
+    coverage: process.env.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts',
+    // EGDESK_BRIEFING_LAYERS=on (c44, default off): what the Decision settled before the fill is not reopened by the engine's wording (an undecided step sentence over sure cards stays).
+    layers: process.env.EGDESK_BRIEFING_LAYERS === 'on' ? 'on' : 'off',
+    // EGDESK_BRIEFING_PREFILL=on (c45, default off): the fill turn is sent while the answer is still being written and its reply is used when the request after the answer is identical.
+    prefill: process.env.EGDESK_BRIEFING_PREFILL === 'on' ? 'on' : 'off',
+    // EGDESK_BRIEFING_OUTPUT_SCHEMA=on: the briefing's fill / design turn is sent with a JSON Schema (Codex outputSchema) built from the render components' accepted shape. Default off.
+    outputSchema: process.env.EGDESK_BRIEFING_OUTPUT_SCHEMA === 'on' ? 'on' : 'off' }) })
+// Work-surface placement (egdesk-work-placement.mjs): where an Agent's visible work surface should open, judged at the conversation's heartbeat among options the
+// canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory or on (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory" or "on"); it
+// records what it would choose and changes nothing on the canvas.
+const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: () => ['advisory', 'on'].includes(process.env.EGDESK_WORK_PLACEMENT),
+  // 'on' additionally lets a decided "point" become a pointer fact, which the session heartbeat turns into ONE chat message (EGDESK_CONVERSATION_FLOW=on). Cards are never moved in either mode.
+  live: () => process.env.EGDESK_WORK_PLACEMENT === 'on', calibrationLog: decisionCalibrationLog,
+  // the run's own request and answer and its egress gate, for the content questions (L1 cycle 12); the card words come from the chrome (maySend cards only)
+  contextFor: (key, options) => chat.placementContextFor(key, options) })
+// A conversation the person deleted in the surface (POST /chat/conversation/forget): besides the runtime's own per-conversation state, the
+// briefing bindings of its native conversation, the requester the window told for it, and its work-placement queue and pointer go.
+registerConversationForgetters(chat, { briefingBindings, runRequesters, workPlacement, turnMemoryConfig }) // helper/egdesk-conversation-forgetters.mjs: briefing bindings, run requesters, work placement, pending readings (c17), conversation memory (c18)
+// The window's event streams (/events): when the last one has been gone for 10 s, nobody can read a message, so idle live sessions end
+// (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
+const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })
+const handleWorkPlacementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key), port: BRIDGE_PORT })
+// L1 c20 Desk HUD routing: one yes/no question per row of the search field's own list; probabilities back, nothing runs. Off (404) unless
+// EGDESK_HUD_ROUTING=advisory or on (and the Decisions mode is advisory or on; the chrome's egdesk.hudRouting decides whether it asks at all).
+const hudRoutingEnabled = () => ['advisory', 'on'].includes(process.env.EGDESK_HUD_ROUTING)
+const hudRouting = createHudRouting({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: hudRoutingEnabled })
+const handleHudRoutingHttp = createHudRoutingHttpHandler({ routing: hudRouting, enabled: hudRoutingEnabled, port: BRIDGE_PORT })
+const handleRoomAccountHttp = createRoomAccountHttpHandler({ chat, enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', port: BRIDGE_PORT })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
-  budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT })
+  budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
+  warmup: decisionWarmup, onSettingsChanged: () => { browserDecisionGeneration++ } })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
+const handleMemoryEvidenceHttp = createMemoryEvidenceHttpHandler({ port: BRIDGE_PORT,
+  ensureAuth: hints => ensureChatAuth(hints, { allowIsolated: true, requireClientPair: true }),
+  resolveDm: hints => chat.memoryDmAuthority(hints), captures: contextStore, getEvidence: getMemoryEvidence,
+  getMode: () => bridgeSettings.decisionContext.mode })
 const handleContextHttp = createContextHttpHandler(contexts, ensureChatAuth, { port: BRIDGE_PORT })
 // Like /chat/history, profiles stay editable while Codex is signed out.
 const handleProfileHttp = createProfileHttpHandler({ store: () => profileStore, port: BRIDGE_PORT })
@@ -487,11 +745,13 @@ const handleDeskHttp = createDeskHttpHandler({ store: () => deskStore, port: BRI
 // RT-03 .egdesk export/inspect/import over the same local stores (signed out too).
 // Exports go to ~/Downloads/EG-Desk, or <app data>/exports without a Downloads folder.
 // RT-03 opt-in extras: captures of the signed-in account and local File drafts (off unless asked, D-R3).
-const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState) })
+const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState),
+  // L1 c25 (flag EGDESK_ROOM_ACCOUNT=on): captures of rooms on Agent profiles are stored under those accounts; the export lists them too
+  ...(process.env.EGDESK_ROOM_ACCOUNT === 'on' ? { ownerKeys: () => [publicAuthIdentityKey(authState), ...codexProfileServers.residentIds().map(id => codexEngine.ownerKey(id))] } : {}) })
 const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })
 const boardAskBindingKey = randomBytes(32)
 const boardAgentAsk = createBoardAgentAskService({
-  desk: deskStore, profiles: profileStore, selectContext: selectBoardAgentContext,
+  desk: deskStore, profiles: profileStore, selectContext: selectBoardAgentContext, calibrationLog: decisionCalibrationLog,
   decisionStatus: () => {
     const key = decisionCredentials.getApiKey()
     const mode = bridgeSettings.decisionContext.mode
@@ -508,7 +768,15 @@ const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, ch
 // /events/recent; SSE workflow.event and task.graph frames on /events.
 workflow = await openWorkflowRuntime({
   dataDir, chat, port: BRIDGE_PORT, broadcast: event => broadcast(event),
-  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,
+  ensureAuth: hints => ensureChatAuth(hints), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2, localCapacity,
+  // L1 c25 (flag EGDESK_ROOM_ACCOUNT=on, default off; owner decision U11): a plan belongs to the account of its room's profile slot; steps, sources and the
+  // delegation scope use that account. Off: roomSlotOf answers nothing and every plan uses the default sign-in, as before.
+  ownerKeyFor: browserOwnerKeyFor, roomKeyed: () => process.env.EGDESK_ROOM_ACCOUNT === 'on',
+  roomSlotOf: origin => {
+    if (process.env.EGDESK_ROOM_ACCOUNT !== 'on') return undefined
+    const slot = origin?.engineProfileId ?? chat.threadEngineProfile(origin?.conversationId)
+    return isProfileSlot(slot) ? slot : undefined
+  },
 })
 const detachContextServices = contexts.attachServices({ bus: workflow.bus, settings: bridgeSettings.contextSuggest, boards: deskStore })
 for (const root of pendingFileRoots.values()) workflow.watchRoot(root)
@@ -785,6 +1053,8 @@ async function connectToAppServer() {
     try {
       await connection.initialize()
       if (appServerSocket !== socket) return
+      // The command gate's hook path was source-checked for some Codex builds only (egdesk-codex-version-pin.mjs): record, never refuse.
+      try { chat.setEngineVersion({ engineId: 'codex', userAgent: connection.serverInfo?.userAgent ?? null }) } catch { /* recording only */ }
       const preflight = await preflightOwnedAppServer({
         launch: appServerLaunch, cwd: process.cwd(),
         request: (method, params) => connection.request(method, params),
@@ -890,7 +1160,14 @@ async function startChatgptDeviceLogin() {
 // ── Terminal PTY support ──
 // CODE-06: a user-typed test/build command's result rides on the next /terminal/read.
 const terminalRunWatch = createTerminalRunWatch({ bus: workflow?.bus ?? null, owner: WORKFLOW_OWNER })
-const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt), runWatch: terminalRunWatch })
+// Terminal state judge: developer flag EGDESK_TERMINAL_JUDGE=advisory|on, default off (then this wrapper only passes calls through).
+// Every Terminal card is the person's own terminal and belongs to no run: no session is agent-owned and none has an egress gate,
+// so no terminal text is sent to the decision model from here; rules and process facts are recorded with zero requests.
+// terminalStateWatch.terminalFacts() is the read-only, content-free fact provider for other system parts (a live-session heartbeat may also call beat()).
+const terminalStateWatch = createTerminalStateWatch({ runWatch: terminalRunWatch, flag: () => process.env.EGDESK_TERMINAL_JUDGE,
+  decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null, client: decisionClient, calibrationLog: decisionCalibrationLog },
+  egressFor: () => null, isAgentOwned: () => false, sendKey: (id, key) => terminalRegistry.write(id, key) })
+const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => { terminalStateWatch.noteExit(receipt); workflow?.publishTerminalExit(receipt) }, runWatch: terminalStateWatch })
 
 // npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
 // (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
@@ -905,8 +1182,11 @@ try {
   }
 } catch {}
 
-const terminalFactory = createTerminalSessionFactory({ registry: terminalRegistry })
-const handleTerminalHttp = createTerminalHttpHandler({ registry: terminalRegistry, factory: terminalFactory, port: BRIDGE_PORT })
+// c34 (flag EGDESK_TERMINAL_OPEN_URL=on, default off): an address a program in a Terminal card asks the system to open opens in an EG-Desk Browser Card instead (egdesk-terminal-open-url.mjs)
+const terminalOpenUrl = process.env.EGDESK_TERMINAL_OPEN_URL === 'on' ? createTerminalOpenUrl({ dir: path.join(dataDir, 'terminal-opener'), port: BRIDGE_PORT }) : null
+if (terminalOpenUrl) { try { terminalOpenUrl.install(); terminalRegistry.urlOpen = terminalOpenUrl } catch (error) { console.warn('[terminal] open-url opener could not be installed:', error?.code ?? 'error') } }
+const terminalFactory = createTerminalSessionFactory({ registry: terminalRegistry, ...(terminalRegistry.urlOpen ? { openUrl: terminalOpenUrl } : {}) })
+const handleTerminalHttp = createTerminalHttpHandler({ registry: terminalRegistry, factory: terminalFactory, port: BRIDGE_PORT, ...(terminalRegistry.urlOpen ? { urlOpen: terminalOpenUrl } : {}) })
 
 const bridgeServer = createServer(async (req, res) => {
   if (!req.url) {
@@ -925,10 +1205,16 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
   const route = url.pathname
+  // The paid closed-choice route is POST-only, including at the server's preflight boundary.
+  // Flag off: the route does not exist (no later handler may serve it either).
+  if (route === '/chat/choice' && !CHAT_CHOICE_ENABLED) { sendJson(res, 404, { code: 'CHAT_CHOICE_DISABLED' }); return }
+  if (route === '/chat/choice' && await handleChatHttp(req, res, url)) return
+  // Private management has its own POST-only contract, including preflight.
+  if (route.startsWith('/memory-evidence/') && await handleMemoryEvidenceHttp(req, res, url)) return
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token',
+      'Access-Control-Allow-Headers': 'Content-Type, X-EGDesk-Overlay-Build, X-EGDesk-Ontology-Profile, X-EGDesk-Ontology-Token, X-EGDesk-Terminal-Owner, X-EGDesk-Terminal-View',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS'
     })
     res.end()
@@ -951,9 +1237,9 @@ const bridgeServer = createServer(async (req, res) => {
     let browserTransportId = null
     const client = new BoundedSseClient(res, {
       chatProtocol: url.searchParams.get('chatProtocol') === '2' ? 2 : 1,
-      onClose: () => { clients.delete(client); if (browserTransportId) browserTransport.closeClient(browserTransportId) },
+      onClose: () => { clients.delete(client); windowWatch.left(clients.size); if (browserTransportId) browserTransport.closeClient(browserTransportId) },
     })
-    clients.add(client)
+    clients.add(client); windowWatch.arrived()
     if (client.chatProtocol === 2) browserTransportId = browserTransport.registerClient(client)
     client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true, ...(browserTransportId ? { browserTransportId } : {}) })}\n\n`)
     return
@@ -1012,13 +1298,15 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(IN_RUN_MESSAGES_ENABLED ? ['in-run-messages'] : []), ...(process.env.EGDESK_TERMINAL_OPEN_URL === 'on' ? ['terminal-open-url'] : []), ...(pageToolsWiring && ownToolsWiring?.ownTools?.claudeHarness?.() ? ['claude-browser'] : []), ...(hudRoutingCapability(process.env) ? [hudRoutingCapability(process.env)] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
         engines: ['registry', 'thread-lock'],
         boardDeliveryIntent: true,
+        boardPresentation: true,
         channelContext: true,
+        ...(browserSteps.enabled() ? { browserSteps: true } : {}),
         desk: deskStore ? ['local-store', 'generations', 'restore', 'board-revisions', 'board-revert', 'prefs-import'] : ['local-store-unavailable'],
         portable: [
           ...(deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable']),
@@ -1029,7 +1317,7 @@ const bridgeServer = createServer(async (req, res) => {
       bridge: bridgeBuildState(bridgeBuild, expectedOverlayBuild(req.headers, url.searchParams)),
       appServerReconnect: appServerBackoff.snapshot(),
       // Settings 'Accounts & AI engines' rows; the top-level Codex fields stay for older overlays.
-      engines: engineRegistry.publicEngines(),
+      engines: publicEngines(),
       // CU-07 rows { name, enabled, status, controlsExternal, kind }, or null when unknown.
       inheritedMcp: inheritedMcp.snapshot(),
       // RT-06/CHAT-06 { tasks, taskError, maxConcurrency, eventSeq, droppedEvents, watchedRoots, maxWatchedRoots, refusedRoots, droppedFileEvents }.
@@ -1105,7 +1393,7 @@ const bridgeServer = createServer(async (req, res) => {
   // terminal): one static check, coalesced, then the public row.
   if (req.method === 'POST' && route === '/engines/claude/refresh') {
     await claudeEngineStatus.refresh({ force: true })
-    sendJson(res, 200, { engine: engineRegistry.publicEngines().find(row => row.id === 'claude') ?? null })
+    sendJson(res, 200, { engine: publicEngines().find(row => row.id === 'claude') ?? null })
     return
   }
 
@@ -1130,7 +1418,7 @@ const bridgeServer = createServer(async (req, res) => {
         if (typeof body.confirm !== 'boolean') throw chatError('INVALID_CONFIRMATION', 'confirm must be true or false', 400)
         claudeEngine.confirmApiKeyEnv(body.confirm)
       }
-      sendJson(res, 200, { ...claudeEngine.apiKeyEnv(), engine: engineRegistry.publicEngines().find(row => row.id === 'claude') ?? null })
+      sendJson(res, 200, { ...claudeEngine.apiKeyEnv(), engine: publicEngines().find(row => row.id === 'claude') ?? null })
     } catch (error) {
       sendJson(res, error.httpStatus || 400, { code: error.code || 'INVALID_REQUEST', error: publicText(error.message, 300) })
     }
@@ -1168,6 +1456,14 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (await handleComputerControlHttp(req, res, url)) return
   if (await handleDecisionHttp(req, res, url)) return
+  if (await handleBoardPresentationHttp(req, res, url)) return
+  if (await handleWorkPlacementHttp(req, res, url)) return
+  if (await handleHudRoutingHttp(req, res, url)) return
+  if (await handleRoomAccountHttp(req, res, url)) return
+  if (await handleUserGuidanceHttp(req, res, url)) return
+  if (await handlePresenceMirrorHttp(req, res, url)) return
+  if (await handleRunRequesterReadHttp(req, res, url)) return
+  if (await handleRunRequesterHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return
@@ -1217,15 +1513,18 @@ async function shutdown() {
   try { detachContextServices() }
   catch { console.error('[egdesk-codex-bridge] context services did not detach cleanly') }
   bridgeServer.close()
+  localCapacity.close()
   systemResourceMonitor.close()
+  try { decisionTransport.close() } catch {} // release parked and warm Decisions sockets
+  try { await workflow?.close() }
+  catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await codexEngine.dispose() }
   catch { console.error('[egdesk-codex-bridge] Owned Codex conversations did not close cleanly') }
   try { await claudeEngine.dispose() }
   catch { console.error('[egdesk-codex-bridge] Claude conversations did not close cleanly') }
-  try { await workflow?.close() }
-  catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await localFiles.close() }
   catch { console.error('[egdesk-codex-bridge] managed file store did not close cleanly') }
+  try { memoryEvidenceStore?.close() } catch {}
   try { chatStore?.close() }
   catch { console.error('[egdesk-codex-bridge] local chat store did not close cleanly') }
   try { profileStore?.close() }
@@ -1242,6 +1541,7 @@ process.on('exit', () => {
   acceptingFileRoots = false
   pendingFileRoots.clear()
   try { detachContextServices() } catch {}
+  localCapacity.close()
   systemResourceMonitor.close()
   workflow?.files.close()
   codexProfileServers.killAll()
@@ -1249,5 +1549,5 @@ process.on('exit', () => {
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
   terminalRegistry.requestStopAll()
-  terminalRunWatch.close()
+  terminalStateWatch.close() // also closes the run watch it wraps
 })

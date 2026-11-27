@@ -1,0 +1,695 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
+import { readFileSync } from 'node:fs'
+import { HEARTBEAT_LIMITS, createHeartbeat, createHeartbeats, createWindowWatch } from './egdesk-heartbeat.mjs'
+import { browserTaskRow } from './egdesk-heartbeat-providers.mjs'
+import { createChatHttpHandler } from './codex-bridge-http.mjs'
+import { FLOW_LIMITS, FLOW_PREDICATES, WAIT_LABELS, attentionOf, audienceFacts, deriveFlowKind, enumerateOptions, flowPredicates, idleFlowFacts, messageEvidence, pointerBlocked, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, runContext, waitSummary, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { MID, world } from './egdesk-heartbeat-flow.fixture.mjs'
+
+// The session heartbeat (cycle 13): it lives as long as the conversation's session, across runs, at two tempos; the message
+// judgment reads the providers' facts as closed labels; a pointer message tells a person where something waits for them.
+// Virtual clock and timers throughout; mock engine and mock decision model; no network, no Codex binary.
+
+function clockwork() {
+  let clock = 70_000
+  const timers = []
+  return { monotonicNow: () => clock, pending: () => timers.length,
+    setTimer: (fn, ms) => { const timer = { fn, at: clock + ms }; timers.push(timer); return timer },
+    clearTimer: timer => { const i = timers.indexOf(timer); if (i >= 0) timers.splice(i, 1) },
+    advance(ms) { const end = clock + ms; for (;;) { timers.sort((a, b) => a.at - b.at); const next = timers[0]; if (!next || next.at > end) break; timers.shift(); clock = next.at; next.fn() } clock = end } }
+}
+const S = HEARTBEAT_LIMITS
+
+// ---- the heartbeat's own lifetime and tempo ----
+
+test('tempo: a beat every 5 s while a run works, every 20 s after it; the idle session ends by itself after 5 minutes with nothing pending', () => {
+  const c = clockwork(), hb = createHeartbeat({ key: 'dm', ...c }), at = []
+  hb.subscribe(beat => at.push([beat.facts.internalMs / 1000, beat.facts.tempo, beat.facts.phase]))
+  hb.activate()
+  c.advance(12_000); hb.settle() // the run ended at 12 s
+  assert.deepEqual(at, [[5, 'active', 'thinking'], [10, 'active', 'thinking']])
+  c.advance(60_000)
+  assert.deepEqual(at.slice(2), [[32, 'idle', 'idle'], [52, 'idle', 'idle'], [72, 'idle', 'idle']], 'idle beats are 20 s apart, counted from the end of the run')
+  assert.deepEqual([hb.state, hb.tempo, c.pending()], ['running', 'idle', 1])
+  c.advance(S.lingerMs)
+  assert.deepEqual([hb.state, hb.stopReason, c.pending()], ['stopped', 'idle', 0])
+  assert.equal(at.length, 2 + S.lingerMs / S.idleBeatMs, 'the last beat is the one that finds the session over: 15 idle beats in all')
+})
+
+test('hard stop: something still pending keeps an idle session alive, but never past 15 minutes without the person', () => {
+  const c = clockwork(), hb = createHeartbeat({ key: 'dm', ...c })
+  hb.setKeepAlive(facts => facts.sources.work?.attention === 'result')
+  hb.register('work', () => ({ attention: 'result', attentionFor: 'owner' }))
+  hb.activate(); c.advance(8000); hb.settle()
+  c.advance(S.lingerMs + 60_000)
+  assert.equal(hb.state, 'running', 'a result still waits for someone: the session is kept past the linger time')
+  c.advance(S.idleStopMs - S.lingerMs - 60_000)
+  assert.deepEqual([hb.state, hb.stopReason, c.pending(), hb.beats], ['stopped', 'idle', 0, 1 + S.idleStopMs / S.idleBeatMs])
+  // The person coming back (a message) starts the count again; a closed conversation ends at once.
+  const d = clockwork(), again = createHeartbeat({ key: 'dm2', ...d })
+  again.activate(); d.advance(6000); again.settle(); d.advance(200_000)
+  again.activate(); assert.equal(again.tempo, 'active'); d.advance(6000); again.settle()
+  d.advance(S.lingerMs - S.idleBeatMs); assert.equal(again.state, 'running', 'linger counts from the last run')
+  again.stop('closed'); assert.deepEqual([again.state, again.stopReason, d.pending()], ['stopped', 'closed', 0])
+})
+
+test('a new message re-activates the same heartbeat: the grid restarts at that message and the bounds get a new window', async () => {
+  const c = clockwork(), hb = createHeartbeat({ key: 'dm', ...c }), at = []
+  let asked = 0
+  hb.setJudge(async () => { asked++; return { answers: { p__q: { value: 'no', confidence: 0.99, margin: 0.9 } } } })
+  hb.register('p', { facts: () => ({ stepsRunning: 1 }), propose: () => ({ name: 'q', none: 'no', instructions: 'Is a message needed now?', options: [{ value: 'no', description: 'Nothing.' }, { value: 'yes', description: 'Send one.' }], facts: {}, kinds: [] }), onVerdict: () => 'none' })
+  hb.subscribe(beat => at.push(beat.facts.internalMs / 1000))
+  hb.activate()
+  for (let i = 0; i < 80; i++) { c.advance(5000); await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
+  const first = asked
+  assert.ok(first >= 1 && first <= S.maxAsks, `at most ${S.maxAsks} requests in one window (asked ${first})`)
+  hb.settle(); c.advance(33_000) // idle: one beat at +20 s
+  const before = at.length
+  hb.activate({ sinceMs: 0 }) // 433 s on the session's counter
+  assert.equal(hb.facts().sinceUserMs, 0)
+  for (let i = 0; i < 4; i++) { c.advance(5000); await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
+  assert.deepEqual(at.slice(before), [438, 443, 448, 453], 'beats 5 s after THIS message')
+  assert.ok(asked > first, 'the new run has its own window of requests')
+  hb.stop('closed')
+})
+
+test('nudge: a provider with something for the judge gets a beat within half a second, at most once per 5 s; acknowledge reaches the provider', () => {
+  const c = clockwork(), hb = createHeartbeat({ key: 'dm', ...c }), at = [], acks = []
+  hb.subscribe(beat => at.push(beat.facts.internalMs))
+  hb.register('work', { facts: () => ({ attention: 'result', attentionFor: 'owner' }), acknowledge: what => acks.push(what) })
+  hb.activate(); c.advance(1000); hb.settle() // idle from 1 s: next beat due at 21 s
+  c.advance(3000); assert.equal(hb.nudge(), true); assert.equal(hb.nudge(), false, 'a second nudge within 5 s is refused')
+  c.advance(500); assert.deepEqual(at, [4500])
+  c.advance(16_500); assert.deepEqual(at, [4500, 21_000], 'the grid is unchanged by a nudge')
+  assert.equal(hb.acknowledge('work', 'attention'), true); assert.deepEqual(acks, ['attention'])
+  assert.equal(hb.acknowledge('work', 'Some free text'), false); assert.equal(hb.acknowledge('nobody', 'attention'), false)
+  hb.stop('closed'); assert.equal(hb.nudge(), false)
+})
+
+test('registry: ensure keeps a session\'s heartbeat; when full, the longest-idle session gives way to a new one and a working one never does', () => {
+  const c = clockwork(), all = createHeartbeats({ ...c, limits: { ...HEARTBEAT_LIMITS, maxLive: 3 } })
+  const a = all.open('a'), b = all.open('b'), w = all.open('w')
+  for (const hb of [a, b, w]) hb.activate()
+  assert.equal(all.ensure('a'), a, 'the same heartbeat for the same live session')
+  assert.equal(all.open('x'), null, 'three working sessions: no room')
+  c.advance(1000); a.settle(); c.advance(1000); b.settle(); c.advance(1000)
+  const x = all.open('x')
+  assert.ok(x); assert.deepEqual([a.state, a.stopReason, b.state, w.state, all.size], ['stopped', 'limit', 'running', 'running', 3])
+  a.stop('closed'); assert.notEqual(all.ensure('a'), a, 'a stopped session gets a new heartbeat')
+  all.stopAll('restart'); assert.deepEqual([all.size, c.pending()], [0, 0])
+})
+
+// ---- closed labels: what is being waited on, what needs attention, where a pointer may go ----
+
+test('waitSummary: provider facts become closed labels with seconds; nothing else can ride along', () => {
+  const facts = sources => ({ phase: 'tool_running', stepsRunning: 1, sources })
+  assert.deepEqual(waitSummary(facts({ engine_commands: { active: true, phase: 'tool_running', terminal: 'running', terminalState: 'running_output', runningMs: 42_400, quietMs: 9000, commandsRunning: 1 } })), [{ what: 'command_running', seconds: 42 }])
+  assert.deepEqual(waitSummary(facts({ engine_commands: { terminal: 'waiting', quietMs: 12_000 } })), [{ what: 'command_waiting_input', seconds: 12 }])
+  assert.deepEqual(waitSummary(facts({ browser_task: { active: true, phase: 'waiting_user', waitingOnUser: true, task: 'need_context' } })), [{ what: 'browser_task_waiting_person', seconds: null }])
+  assert.deepEqual(waitSummary(facts({ browser_task: { task: 'running' }, work_placement: { placementsPending: 1 }, engine_commands: { terminal: 'running', runningMs: 7000 } })).map(w => w.what),
+    ['command_running', 'browser_task_running', 'placement_pending'], 'at most three, in a fixed order')
+  assert.deepEqual(waitSummary(facts({ other: { waitingOn: 'command_running', waitingOnMs: 3000 } })), [{ what: 'command_running', seconds: 3 }], 'a provider may say it directly')
+  assert.deepEqual(waitSummary(facts({ other: { waitingOn: 'rm_rf_slash' } })), [{ what: 'tool_running', seconds: null }], 'an unknown label is not passed on')
+  assert.deepEqual(waitSummary({ phase: 'thinking', stepsRunning: 0, sources: {} }), [])
+  const prompt = writerPrompt('explain_wait', { elapsedMs: 45_000, waits: [{ what: 'command_running', seconds: 42 }] })
+  assert.match(prompt, /a command is still running \(about 42 seconds so far\)/)
+  // The browser task's own row (browserTaskRow): running, wording its question, waiting for the person.
+  assert.deepEqual(waitSummary(facts({ browser_task: browserTaskRow({ active: true, status: 'running', stepsDone: 3, stepsRemaining: 21 }) })), [{ what: 'browser_task_running', seconds: null }])
+  assert.deepEqual(waitSummary(facts({ browser_task: browserTaskRow({ active: true, status: 'paused', asked: false, stepsDone: 3, stepsRemaining: 21 }) })), [{ what: 'browser_task_preparing_question', seconds: null }])
+  assert.deepEqual(waitSummary(facts({ browser_task: browserTaskRow({ active: true, status: 'paused', asked: true, stepsDone: 3, stepsRemaining: 21 }) })), [{ what: 'browser_task_waiting_person', seconds: null }])
+  assert.equal(Object.keys(WAIT_LABELS).length, 8)
+})
+
+test('attentionOf: the provider\'s attention fact as closed fields (who, where, kind); the placement runtime\'s field names are read as the same fact', () => {
+  const placement = { placementsPending: 0, placementsDecided: 2, pointerPending: true, pointerWhere: 'right', pointerDistance: 'very_far', pointerFor: 'owner', pointerNeeds: 'owner_action' }
+  assert.deepEqual(attentionOf({ sources: { work_placement: placement } }), { provider: 'work_placement', kind: 'approval', who: 'owner', where: 'right', distance: 'very_far', located: true, signature: 'work_placement:approval:owner' })
+  assert.equal(attentionOf({ sources: { work_placement: { ...placement, pointerPending: false } } }), null)
+  // Already in view: the placement runtime sends direction 'none' with distance 'in_view'; the writer must not be told "elsewhere".
+  const inView = attentionOf({ sources: { work_placement: { ...placement, pointerWhere: 'none', pointerDistance: 'in_view', pointerNeeds: 'review' } } })
+  assert.deepEqual([inView.kind, inView.where, inView.distance], ['result', 'in_view', 'in_view']); assert.match(pointerPrompt(inView), /It is inside what they are looking at on the desk\./)
+  assert.deepEqual(attentionOf({ sources: { tasks: { attention: 'question', attentionFor: 'requester', attentionWhere: 'somewhere_odd' } } }), { provider: 'tasks', kind: 'question', who: 'requester', where: 'none', distance: null, located: false, signature: 'tasks:question:requester' })
+  assert.equal(attentionOf({ sources: { tasks: { attention: 'result', attentionFor: 'everyone' } } }), null, 'who must be the owner or the requester')
+  const prompt = pointerPrompt({ kind: 'approval', who: 'owner', where: 'right', distance: 'very_far' })
+  assert.match(prompt, /needs their decision/); assert.match(prompt, /to the right of what they are looking at on the desk, far away/); assert.match(prompt, /Nothing was moved/)
+})
+
+test('pointerRoute: the task\'s own conversation only when that person is in it and nobody else is; else that person\'s own live conversation; else nowhere', () => {
+  const present = [{ member: 'self', self: true, active: true }, { member: 'm-jin', active: true }]
+  const own = { key: 'dm-owner', audience: { requester: 'self', owner: 'self', participants: ['self'] } }
+  assert.equal(pointerRoute({ person: 'owner', audience: { requester: 'self', owner: 'self', participants: ['self'] }, presence: present }).target, 'here')
+  assert.equal(pointerRoute({ person: 'owner', audience: { requester: 'm-jin', owner: 'self', participants: ['m-jin', 'self'] }, presence: present }).target, 'here')
+  assert.equal(pointerRoute({ person: 'owner', audience: { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, presence: present, others: [own] }).target, 'dm-owner', 'the owner is not in the member\'s conversation')
+  assert.equal(pointerRoute({ person: 'owner', audience: { requester: 'm-jin', owner: 'self', participants: ['m-jin', 'self', 'm-ha'] }, presence: present, others: [own] }).target, 'dm-owner', 'a third person is in the room: not there')
+  assert.deepEqual(pointerRoute({ person: 'owner', audience: { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, presence: present,
+    others: [{ key: 'room', audience: { requester: 'self', owner: 'self', participants: ['self', 'm-ha'] } }] }), { target: null, reason: 'no_conversation' }, 'never into a conversation someone else takes part in')
+  assert.deepEqual(pointerRoute({ person: 'owner', audience: { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, presence: [{ member: 'self', self: true, active: false }], others: [own] }), { target: null, reason: 'away' })
+  assert.equal(pointerRoute({ person: 'requester', audience: { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, presence: present }).target, 'here')
+  assert.equal(pointerRoute({ person: 'everyone', audience: null }).target, null)
+  // The option exists only with a route, once per fact, within the window's bound.
+  const base = { sent: 0, blocked: true, sinceLastMs: null, audience: { postable: true }, attention: { kind: 'result', located: true }, pointerTarget: 'here', pointed: false, pointers: 0 }
+  assert.deepEqual(enumerateOptions(base), ['none', 'pointer'])
+  for (const off of [{ pointerTarget: null }, { pointed: true }, { pointers: FLOW_LIMITS.maxPointers }, { attention: null }, { sinceLastMs: 1000 }]) assert.deepEqual(enumerateOptions({ ...base, ...off }), ['none'])
+})
+
+// ---- simulations in the real runtime ----
+
+const NATIVE_AFTER = ['thread/fork', 'thread/unsubscribe', 'turn/start'] // the private fork, its turn and its release
+const POINTER = '왼쪽에 결과가 준비되어 있어요. 편하실 때 확인해 주세요.'
+const pointerWorld = (t, { rows, audience, acks = [], writer } = {}) => world(t, { audience: ({ run }) => audience?.[run.clientThreadId] ?? null, presence: { snapshot: () => rows },
+  policy: { message: values => (values.includes('pointer') ? 'pointer' : 'none') }, writer: writer ?? (prompt => (/on the desk/.test(prompt) ? POINTER : null)), attentionPosted: e => acks.push(e) })
+// The placement runtime's provider, as it registers on the conversation's heartbeat (its present field names).
+function placementProvider(hb) {
+  const state = { pointer: null }
+  hb.register('work_placement', () => ({ placementsPending: 0, placementsDecided: state.pointer ? 1 : 0, pointerPending: Boolean(state.pointer), ...(state.pointer ?? {}) }))
+  return state
+}
+
+test('simulation 1: a member\'s task finishes while the owner works elsewhere — one pointer message in the owner\'s own conversation, nothing moved', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 2000 }, { member: 'm-jin', active: false }]
+  const acks = []
+  const w = pointerWorld(t, { rows, acks, audience: { 'dm-task': { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self'] } } })
+  const o = await w.dm('dm-owner', '예산표 정리해 주세요'); await w.advance(3000); await o.final('예산표를 정리했습니다.')
+  const m = await w.dm('dm-task', '분기 보고서 초안을 만들어 주세요'); await w.advance(4000); await m.final('보고서 초안을 만들었습니다.')
+  assert.deepEqual([o.hb.tempo, m.hb.tempo, w.requests.flow], ['idle', 'idle', 0])
+  // After the member's run ended, its result surface is placed and needs the owner (gap a: the heartbeat is still there to carry it).
+  assert.equal(w.chat.heartbeatFor('dm-task')?.state, 'running', 'what the placement runtime requires of the heartbeat after the run')
+  const placement = placementProvider(m.hb)
+  const eventsBefore = w.events.length, nativeBefore = w.native.length
+  placement.pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'look' }
+  assert.equal(m.hb.nudge(), true); await w.advance(S.nudgeMs)
+  assert.deepEqual(o.assistant(), ['예산표를 정리했습니다.', POINTER], 'one completed message in the owner\'s conversation')
+  assert.deepEqual(m.assistant(), ['보고서 초안을 만들었습니다.'], 'nothing in the member\'s conversation')
+  assert.deepEqual(acks, [{ key: 'dm-task', provider: 'work_placement' }]); placement.pointer = null // the placement runtime withdraws its fact
+  // L3 c16: who is there, where it is and whether a pointer was posted are code. The judgment read only the task's announcement of
+  // the finished work, quoted on its own (no told_N question: nothing was posted to the owner since the task began). The writer, in the
+  // owner's conversation, was told where in fixed words. Neither saw a member id or the other conversation's text.
+  const asked = w.beatRequests.at(-1).input.join('\n')
+  assert.deepEqual(w.beatRequests.at(-1).names, ['message__pointer'], 'one yes/no question about the work itself')
+  assert.match(asked, /Question message__pointer:\nThe message about the finished work:\n"""\n보고서 초안을 만들었습니다\.\n"""$/m)
+  assert.doesNotMatch(asked, /left|desk|owner|at the desk|What the message questions are about/, 'no geometry, audience or other material: those are code')
+  const prompt = w.forkPrompts.at(-1)
+  assert.match(prompt, /to the left of what they are looking at on the desk, some way off/)
+  assert.doesNotMatch(asked, /m-jin|예산표/); assert.doesNotMatch(prompt, /m-jin|보고서|예산표|분기/)
+  // Nothing moved: the only events are the message's own, in the owner's conversation; the only native calls are the private fork's.
+  const after = w.events.slice(eventsBefore)
+  assert.deepEqual([...new Set(after.map(e => `${e.clientThreadId}:${e.event}`))], ['dm-owner:message.started', 'dm-owner:message.delta', 'dm-owner:message.completed'])
+  const nativeAfter = w.native.slice(nativeBefore)
+  assert.deepEqual([...new Set(nativeAfter.map(([method]) => method))].sort(), NATIVE_AFTER, 'the private fork and its clean-up, nothing else')
+  assert.ok(nativeAfter.every(([method, params]) => params.threadId !== m.r.conversationId && (method === 'thread/fork' ? params.threadId === o.r.conversationId : String(params.threadId).startsWith('fork-'))),
+    'forked from the owner\'s conversation; the member\'s conversation is not touched')
+  assert.ok(w.native.slice(nativeBefore).filter(([method]) => method === 'turn/start').every(([, params]) => String(params.threadId).startsWith('fork-')), 'no turn on a real conversation')
+  // Once: later beats ask nothing more and post nothing more.
+  await w.advance(60_000)
+  assert.deepEqual([w.requests.flow, o.assistant().length, m.assistant().length], [1, 2, 1])
+  const entry = w.flowEntries().at(-1)
+  assert.deepEqual([entry.flow, entry.posted, entry.beat.phase], ['pointer', 'model', 'idle'])
+  t.diagnostic(`native after the task ended: ${JSON.stringify(nativeAfter.map(([method, params]) => `${method}@${String(params.threadId).replace(/-\d+$/, '')}`))}`)
+  t.diagnostic(`pointer: requests=${w.requests.flow} draftChecks=${w.requests.draft} ownerMessages=${o.assistant().length} memberMessages=${m.assistant().length}`)
+})
+
+test('simulation 1b: no pointer when the owner is away, has no conversation of their own, or the only place has someone else in it', async t => {
+  const audience = { 'dm-task': { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self'] } }
+  const point = async (w, withOwner) => {
+    const o = withOwner ? await w.dm('dm-owner', '작업') : null
+    if (o) { await w.advance(3000); await o.final('끝.') }
+    const m = await w.dm('dm-task', '보고서'); await w.advance(4000); await m.final('만들었습니다.')
+    placementProvider(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'look' }
+    m.hb.nudge(); await w.advance(60_000)
+    return { o, m }
+  }
+  const away = pointerWorld(t, { rows: [{ member: 'self', self: true, active: false }, { member: 'm-jin', active: true }], audience })
+  const a = await point(away, true)
+  assert.deepEqual([away.requests.flow, a.o.assistant().length, a.m.assistant().length], [0, 1, 1], 'the owner is away: not even a request')
+  const alone = pointerWorld(t, { rows: [{ member: 'self', self: true, active: true }], audience })
+  const b = await point(alone, false)
+  assert.deepEqual([alone.requests.flow, b.m.assistant().length], [0, 1], 'the owner has no live conversation of their own: nothing, and never into the member\'s')
+  const shared = pointerWorld(t, { rows: [{ member: 'self', self: true, active: true }], audience: { ...audience, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self', 'm-ha'] } } })
+  const c = await point(shared, true)
+  assert.deepEqual([shared.requests.flow, c.o.assistant().length], [0, 1], 'someone else takes part there: nothing')
+})
+
+test('simulation 2: tests are still running — the judge reads the command line this run\'s models already have, never its output; the writer gets the closed label', async t => {
+  const w = world(t, { flags: { held: true, flow: true, commands: true } }), d = await w.dm('dm-tests', '테스트 돌려 주세요')
+  await w.advance(1000)
+  await d.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll-secret', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await d.raw('item/commandExecution/outputDelta', { itemId: 'cmd-1', delta: 'running 40 tests\nFAIL payroll-secret-case\n' })
+  await w.advance(9000) // 10 s: the second beat asks
+  const row = d.hb.facts().sources.engine_commands
+  assert.deepEqual([row.terminal, row.runningMs], ['running', 9000])
+  const asked = w.beatRequests.at(-1).input.join('\n')
+  assert.match(asked, /The assistant is running a command: `npm test -- --suite=payroll-secret` \(running for about 9 seconds; its output shows it is still running\)\./)
+  assert.match(asked, /The person's request:\n"""\n테스트 돌려 주세요\n"""/); assert.deepEqual(w.beatRequests.at(-1).names, ['message__note'])
+  const prompt = w.forkPrompts.at(-1)
+  assert.match(prompt, /What is being waited on, as far as the system knows: a command is still running \(about 9 seconds so far\)/)
+  assert.doesNotMatch(asked, /FAIL|40 tests|payroll-secret-case/, 'the command\'s output is not sent'); assert.doesNotMatch(prompt, /npm|payroll|FAIL|40 tests/, 'the writer is told what kind of wait it is, in fixed words')
+  assert.equal(d.assistant().length, 1, 'the wait message is posted')
+  await d.raw('item/completed', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll-secret', cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: 'all passed\n' } })
+  await d.final('테스트가 모두 통과했습니다.')
+  assert.deepEqual(d.history().map(r => r[0]), ['user', 'assistant', 'assistant'])
+  t.diagnostic(`command label: beatRequests=${w.requests.flow} messages=${d.assistant().length}`)
+})
+
+test('simulation 3: the session goes idle — beats slow to 20 s, no request, and it stops; something pending keeps it until the hard stop; closing ends it at once', async t => {
+  const w = world(t), d = await w.dm('dm-idle')
+  await w.advance(11_000); await d.final('끝났습니다.')
+  const active = d.beats.map(b => b.at)
+  assert.deepEqual(active, [5000, 10_000])
+  await w.advance(S.lingerMs)
+  const idle = d.beats.map(b => b.at).slice(2)
+  assert.deepEqual(idle.slice(0, 3), [31_000, 51_000, 71_000]); assert.equal(idle.length, 15)
+  assert.deepEqual([d.hb.state, d.hb.stopReason, w.chat.heartbeatFor('dm-idle'), w.requests.flow, w.timers.length, w.flowEntries().length], ['stopped', 'idle', null, 0, 0, 0])
+  // A later message opens a new session heartbeat.
+  const again = await w.dm('dm-idle', '하나 더', { requestId: 'req-2', conversationId: d.r.conversationId })
+  assert.notEqual(again.hb, d.hb); assert.equal(again.hb.tempo, 'active'); await again.final('네.')
+  // Something still needs the owner, who is away: the session is kept, asks nothing, and stops at the hard bound.
+  const rows = [{ member: 'self', self: true, active: false }]
+  const kept = pointerWorld(t, { rows, audience: {} }), k = await kept.dm('dm-kept')
+  await kept.advance(6000); await k.final('끝.')
+  placementProvider(k.hb).pointer = { pointerWhere: 'right', pointerDistance: 'near', pointerFor: 'owner', pointerNeeds: 'owner_action' }
+  await kept.advance(S.lingerMs + 40_000); assert.equal(k.hb.state, 'running')
+  await kept.advance(S.idleStopMs - S.lingerMs - 40_000)
+  assert.deepEqual([k.hb.state, k.hb.stopReason, kept.requests.flow, kept.timers.length, k.assistant().length], ['stopped', 'idle', 0, 0, 1])
+  // The conversation is closed.
+  const closed = world(t), c = await closed.dm('dm-closed'); await closed.advance(6000); await c.final('끝.')
+  assert.equal(closed.chat.closeSession('dm-closed'), true)
+  assert.deepEqual([c.hb.state, c.hb.stopReason, closed.chat.heartbeats.size, closed.timers.length], ['stopped', 'closed', 0, 0])
+  assert.equal(closed.chat.closeSession('dm-closed'), false)
+  t.diagnostic(`idle: active beats=${active.length} idle beats=${idle.length} requests=${w.requests.flow}; kept until ${S.idleStopMs / 1000} s with 0 requests`)
+})
+
+test('simulation 4: a new run starts while a pointer is pending — the same heartbeat goes on, and the pointer is one message inside the new run\'s flow', async t => {
+  const rows = [{ member: 'self', self: true, active: true }]
+  const w = pointerWorld(t, { rows, audience: {} }), first = await w.dm('dm-x', '자료 조사해 주세요')
+  await w.advance(4000); await first.final('조사를 마쳤습니다.')
+  const placement = placementProvider(first.hb)
+  placement.pointer = { pointerWhere: 'below', pointerDistance: 'near', pointerFor: 'owner', pointerNeeds: 'look' }
+  // Before any idle beat the owner writes again.
+  await w.advance(2000)
+  const second = await w.dm('dm-x', '이어서 요약해 주세요', { requestId: 'req-2', conversationId: first.r.conversationId })
+  assert.equal(second.hb, first.hb, 'the session keeps its heartbeat'); assert.deepEqual([second.hb.tempo, second.hb.snapshot().providers.includes('work_placement')], ['active', true])
+  await w.advance(10_000) // the new run's second beat asks
+  assert.deepEqual(second.history().map(r => r[0]), ['user', 'assistant', 'user', 'assistant'])
+  assert.equal(second.assistant().at(-1), POINTER)
+  const posted = w.events.filter(e => e.event === 'message.completed' && e.details?.text === POINTER)
+  assert.deepEqual(posted.map(e => e.runId), [second.r.runId], 'posted once, as a message of the new run')
+  await w.advance(30_000); await second.final('요약했습니다.')
+  assert.deepEqual(second.assistant(), ['조사를 마쳤습니다.', POINTER, '요약했습니다.'])
+  assert.equal(w.flowEntries().filter(e => e.flow === 'pointer').length, 1)
+  t.diagnostic(`new run with pending pointer: requests=${w.requests.flow} pointerMessages=${posted.length}`)
+})
+
+test('simulation 4b: the pointer is being written when the new run starts — it is posted into the new run, once, before that run\'s answer', async t => {
+  let release = null
+  const gate = new Promise(resolve => { release = resolve })
+  const rows = [{ member: 'self', self: true, active: true }]
+  const w = pointerWorld(t, { rows, audience: {}, writer: async prompt => { if (!/on the desk/.test(prompt)) return null; await gate; return POINTER } })
+  const first = await w.dm('dm-y', '자료 조사해 주세요'); await w.advance(4000); await first.final('조사를 마쳤습니다.')
+  placementProvider(first.hb).pointer = { pointerWhere: 'right', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'look' }
+  first.hb.nudge(); await w.advance(S.nudgeMs)
+  assert.deepEqual([w.requests.flow, first.assistant().length], [1, 1], 'judged at the idle beat; the writer has not answered yet')
+  const second = await w.dm('dm-y', '이어서 요약해 주세요', { requestId: 'req-2', conversationId: first.r.conversationId })
+  release(); await w.settle(); await w.chat.draftCheckIdle(); await w.settle()
+  const posted = w.events.filter(e => e.event === 'message.completed' && e.details?.text === POINTER)
+  assert.deepEqual(posted.map(e => e.runId), [second.r.runId], 'folded into the run that is working now')
+  await w.advance(40_000); await second.final('요약했습니다.')
+  assert.deepEqual(second.assistant(), ['조사를 마쳤습니다.', POINTER, '요약했습니다.'])
+  assert.equal(w.events.filter(e => e.event === 'message.completed' && e.details?.text === POINTER).length, 1)
+})
+
+// ---- cycle 14: the close signal, the window going away, and a pointer with nowhere to go ----
+
+function post(handler, path, body) {
+  const req = Readable.from([Buffer.from(JSON.stringify(body))])
+  Object.assign(req, { method: 'POST', url: path, headers: { host: '127.0.0.1:39218', 'content-type': 'application/json' }, socket: { remoteAddress: '127.0.0.1' } })
+  const res = { headers: {}, setHeader(key, value) { this.headers[key] = value }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers) }, end(text) { this.body = text ? JSON.parse(text) : null } }
+  return handler(req, res, new URL(`http://127.0.0.1:39218${path}`)).then(handled => ({ handled, status: res.status, body: res.body }))
+}
+
+test('POST /chat/session/close: an idle session ends at once; a working one ends with its run instead of idling; no engine account check', async t => {
+  const w = world(t)
+  let auth = 0
+  const handler = createChatHttpHandler(w.chat, async () => { auth++; throw Object.assign(new Error('login'), { code: 'LOGIN_REQUIRED', httpStatus: 401 }) })
+  const idle = await w.dm('dm-a'); await w.advance(6000); await idle.final('끝.')
+  const closed = await post(handler, '/chat/session/close', { clientThreadId: 'dm-a' })
+  assert.deepEqual([closed.handled, closed.status, closed.body], [true, 200, { accepted: true, closed: true }])
+  assert.deepEqual([idle.hb.state, idle.hb.stopReason, w.chat.heartbeatFor('dm-a')], ['stopped', 'closed', null])
+  assert.deepEqual((await post(handler, '/chat/session/close', { clientThreadId: 'dm-a' })).body, { accepted: true, closed: false }, 'nothing live: still accepted')
+  const bad = await post(handler, '/chat/session/close', {})
+  assert.deepEqual([bad.status, bad.body.code], [400, 'INVALID_SESSION_CLOSE'])
+  // Closed while the run works: the run and its heartbeat go on; at the end the session stops instead of idling.
+  const busy = await w.dm('dm-b'); await w.advance(6000)
+  assert.deepEqual((await post(handler, '/chat/session/close', { clientThreadId: 'dm-b' })).body, { accepted: true, closed: false, afterRun: true })
+  assert.deepEqual([busy.hb.state, busy.hb.tempo], ['running', 'active'])
+  await w.advance(5000); assert.equal(busy.hb.beats, 2, 'still beating for the run')
+  await busy.final('끝났습니다.')
+  assert.deepEqual([busy.hb.state, busy.hb.stopReason, busy.assistant(), w.timers.length], ['stopped', 'closed', ['끝났습니다.'], 0])
+  // A message after the close opens the conversation again: that run's session idles as usual.
+  const again = await w.dm('dm-c'); await w.advance(2000)
+  await post(handler, '/chat/session/close', { clientThreadId: 'dm-c' }); await again.final('하나.')
+  const reopened = await w.dm('dm-c', '다시', { requestId: 'req-2', conversationId: again.r.conversationId }); await reopened.final('둘.')
+  assert.deepEqual([reopened.hb.state, reopened.hb.tempo], ['running', 'idle'])
+  assert.equal(auth, 0)
+})
+
+test('the window goes away: after 10 s without an event stream idle sessions end and a working run keeps its heartbeat; a reload within the grace changes nothing', async t => {
+  const c = clockwork(); let gone = 0
+  const watch = createWindowWatch({ ...c, onGone: () => gone++ })
+  watch.arrived(); watch.arrived(); watch.left(1); assert.equal(watch.waiting, false, 'another stream is still open')
+  watch.left(0); assert.equal(watch.waiting, true); c.advance(1500); watch.arrived() // a reload
+  c.advance(60_000); assert.deepEqual([gone, c.pending()], [0, 0])
+  watch.left(0); watch.left(0); c.advance(9999); assert.equal(gone, 0); c.advance(1); assert.deepEqual([gone, watch.waiting, c.pending()], [1, false, 0])
+  // The bridge wires it to its event streams and to the runtime (the bridge is a process entry point; its source is read here).
+  const bridge = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  assert.match(bridge, /const windowWatch = createWindowWatch\(\{ onGone: \(\) => chat\.closeIdleSessions\(\) \}\)/)
+  assert.match(bridge, /onClose: \(\) => \{ clients\.delete\(client\); windowWatch\.left\(clients\.size\);/); assert.match(bridge, /clients\.add\(client\); windowWatch\.arrived\(\)/)
+  const w = world(t)
+  const idle = await w.dm('dm-idle'); await w.advance(6000); await idle.final('끝.')
+  const busy = await w.dm('dm-busy'); await w.advance(6000)
+  assert.equal(w.chat.closeIdleSessions(), 1)
+  assert.deepEqual([idle.hb.stopReason, busy.hb.state, busy.hb.tempo, w.chat.heartbeats.size], ['closed', 'running', 'active', 1])
+  await busy.final('끝.')
+})
+
+const HELD_AUDIENCE = { 'dm-task': { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self'] },
+  'room': { requester: 'self', owner: 'self', participants: ['self', 'm-ha'] } }
+async function holdOne(w) {
+  const m = await w.dm('dm-task', '분기 보고서 초안을 만들어 주세요'); await w.advance(4000); await m.final('보고서 초안을 만들었습니다.')
+  const placement = placementProvider(m.hb)
+  placement.pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
+  m.hb.nudge(); await w.advance(S.nudgeMs)
+  return { m, placement }
+}
+
+test('a pointer with nowhere to go is held for that person and delivered once in the next run of their own conversation, without its direction', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 1000 }], acks = []
+  const w = pointerWorld(t, { rows, acks, audience: HELD_AUDIENCE })
+  const { m, placement } = await holdOne(w)
+  assert.deepEqual([w.requests.flow, w.chat.heldAttention.length, m.assistant().length], [0, 1, 1], 'no conversation of the owner is live: no request, the fact is held')
+  assert.deepEqual(Object.keys(w.chat.heldAttention[0]).sort(), ['at', 'id', 'kind', 'located', 'member', 'provider', 'signature', 'sourceKey'], 'who and what and that a surface existed, never where')
+  await w.advance(120_000); placement.pointer = null // the placement runtime withdraws its own fact after 120 s
+  // Never into a conversation someone else takes part in.
+  const room = await w.dm('room', '회의 정리해 주세요'); await w.advance(12_000); await room.final('정리했습니다.')
+  assert.deepEqual([room.assistant(), w.chat.heldAttention.length, w.requests.flow], [['정리했습니다.'], 1, 0], 'not offered there: not even a request')
+  // Three minutes after it was held the owner writes in their own conversation.
+  await w.advance(44_000)
+  const o = await w.dm('dm-owner', '예산표 정리해 주세요'); await w.advance(5000) // the first beat of this run
+  assert.deepEqual(o.assistant(), [POINTER])
+  const asked = w.beatRequests.at(-1).input.join('\n')
+  // L3 c16: the held fact is judged like any other: the source task's announcement quoted on its own (that run's own text, under its gate).
+  assert.deepEqual(w.beatRequests.at(-1).names, ['message__pointer'])
+  assert.match(asked, /Question message__pointer:\nThe message about the finished work:\n"""\n보고서 초안을 만들었습니다\.\n"""/)
+  assert.match(w.forkPrompts.at(-1), /It is elsewhere on the desk\./)
+  assert.doesNotMatch(asked, /m-jin|left/); assert.doesNotMatch(w.forkPrompts.at(-1), /m-jin|보고서|left/)
+  assert.deepEqual([w.chat.heldAttention.length, acks], [0, [{ key: 'dm-task', provider: 'work_placement' }]], 'delivered: dropped, and the source is told')
+  await w.advance(40_000); await o.final('정리했습니다.')
+  assert.deepEqual(o.assistant(), [POINTER, '정리했습니다.']); assert.equal(w.events.filter(e => e.event === 'message.completed' && e.details?.text === POINTER).length, 1)
+  assert.deepEqual(m.assistant(), ['보고서 초안을 만들었습니다.'])
+})
+
+test('held attention is bounded: gone after 15 minutes, at most 8, one per source fact; an owner who was away gets it when they are back', async t => {
+  const rows = [{ member: 'self', self: true, active: false, lastInputAgeMs: 400_000 }]
+  const w = pointerWorld(t, { rows, audience: HELD_AUDIENCE })
+  const { m } = await holdOne(w)
+  await w.advance(20_000); m.hb.nudge(); await w.advance(S.nudgeMs)
+  assert.deepEqual([w.chat.heldAttention.length, w.requests.flow], [1, 0], 'the owner is away: held once, however many beats see it')
+  rows[0] = { member: 'self', self: true, active: true, lastInputAgeMs: 500 }
+  const o = await w.dm('dm-owner', '돌아왔어요'); await w.advance(5000)
+  assert.deepEqual(o.assistant(), [POINTER]); await o.final('네.')
+  // The bound.
+  const late = pointerWorld(t, { rows: [{ member: 'self', self: true, active: true, lastInputAgeMs: 500 }], audience: HELD_AUDIENCE })
+  await holdOne(late)
+  await late.advance(FLOW_LIMITS.heldAttentionMs)
+  const l = await late.dm('dm-owner', '예산표'); await late.advance(12_000)
+  assert.deepEqual([l.assistant(), late.chat.heldAttention.length, late.requests.flow], [[], 0, 0], 'after 15 minutes it is not brought up any more')
+  await l.final('네.')
+  const many = pointerWorld(t, { rows: [], audience: {} })
+  const subject = n => ({ key: `k${n}`, conversationId: `c${n}`, run: null, pointed: new Set() })
+  for (let n = 0; n < 12; n++) many.chat.holdAttention(subject(n), { provider: 'work_placement', kind: 'result', who: 'owner', signature: 'work_placement:result:owner' })
+  assert.equal(many.chat.holdAttention(subject(11), { provider: 'work_placement', kind: 'result', who: 'owner', signature: 'work_placement:result:owner' }), false)
+  assert.deepEqual([many.chat.heldAttention.length, many.chat.heldAttention[0].sourceKey], [FLOW_LIMITS.maxHeldAttention, 'k4'])
+})
+
+// ---- cycle 15: the judge reads content and answers yes/no; code derives the kind ----
+
+test('deriveFlowKind: a question first, then a pointer, then a progress note worded by code (stalled when code found the silence); a yes for a kind code ruled out is ignored', () => {
+  const all = ['none', 'pointer', 'ask_missing', 'explain_wait', 'stalled']
+  assert.equal(deriveFlowKind(new Set(['ask', 'note']), all, { pointer: true }), 'ask_missing')
+  assert.equal(deriveFlowKind(new Set(['note']), all, { pointer: true }), 'pointer')
+  assert.equal(deriveFlowKind(new Set(['note']), all), 'stalled', 'code found the engine silent for the bound: the note is the stall line')
+  assert.equal(deriveFlowKind(new Set(['note']), ['none', 'explain_wait']), 'explain_wait')
+  assert.equal(deriveFlowKind(new Set(['note']), ['none', 'milestone']), 'milestone')
+  assert.equal(deriveFlowKind(new Set(['note']), ['none', 'explain_wait', 'milestone']), 'explain_wait')
+  assert.equal(deriveFlowKind(new Set(), all), 'none')
+  assert.equal(deriveFlowKind(new Set(['ask']), ['none', 'explain_wait'], { pointer: true }), 'none', 'code decided those kinds were not possible: a yes cannot bring them back')
+  // one question per predicate; the ask question exists only with its quoted note; there is no stall question; the note carries a topic
+  const qs = flowPredicates(['none', 'stalled', 'milestone', 'explain_wait', 'pointer', 'ask_missing'], { note: { text: '어느 환경인가요?' }, pointer: { kind: 'result', result: '정리했습니다.', posted: ['정리했습니다.'], topic: 'pointer_1' } })
+  assert.deepEqual(qs.map(q => [q.name, q.topic ?? null]), [['ask', null], ['pointer', 'pointer_1'], ['told_1', 'pointer_1'], ['note', 'explain_wait_milestone_stalled']])
+  assert.deepEqual(flowPredicates(['none', 'ask_missing', 'explain_wait']).map(q => q.name), ['note'])
+  assert.deepEqual(flowPredicates(['none', 'stalled']).map(q => [q.name, q.topic]), [['note', 'stalled']])
+  const ask = flowPredicates(['ask_missing'], { note: { text: '어느 환경인가요?' } })[0]
+  assert.deepEqual([ask.type, ask.quote, ask.kinds], ['predicate', { label: 'The assistant\'s latest note to itself', text: '어느 환경인가요?' }, ['run_text']])
+  assert.deepEqual(Object.keys(FLOW_PREDICATES).sort(), ['ask', 'note', 'pointer', 'told'])
+  for (const q of Object.values(FLOW_PREDICATES)) { assert.equal(q.type, 'predicate'); assert.match(q.instructions, /^[\x20-\x7E]{1,300}$/); assert.doesNotMatch(q.instructions, /none|nothing now|do nothing|at the desk|nobody|present/i) }
+})
+
+test('pointer: who is there, where it is and whether it was posted are code (pointerBlocked); the judge reads only the announcement and what was posted, each on its own', () => {
+  const ok = { attention: { kind: 'result', where: 'right', located: true }, pointerTarget: 'here', pointed: false, pointers: 0 }
+  // L3 c18: a finished result needs a surface the provider places off the person's view; a decision or a question does not.
+  assert.equal(pointerBlocked({ ...ok, attention: { kind: 'result', where: 'none', located: false } }), 'no_surface')
+  assert.equal(pointerBlocked({ ...ok, attention: { kind: 'approval', where: 'none', located: false } }), null)
+  assert.equal(pointerBlocked(ok), null)
+  assert.deepEqual([pointerBlocked({}), pointerBlocked({ ...ok, attention: { kind: 'result', where: 'in_view' } }), pointerBlocked({ ...ok, pointerTarget: null }), pointerBlocked({ ...ok, pointed: true }), pointerBlocked({ ...ok, declined: true }), pointerBlocked({ ...ok, pointers: FLOW_LIMITS.maxPointers })],
+    ['no_fact', 'in_view', 'no_route', 'pointed', 'declined', 'bound'])
+  const base = { sent: 0, blocked: true, sinceLastMs: null, audience: { postable: true } }
+  assert.deepEqual(enumerateOptions({ ...base, ...ok }), ['none', 'pointer']); assert.deepEqual(enumerateOptions({ ...base, ...ok, attention: { kind: 'result', where: 'in_view' } }), ['none'])
+  // nobody there: the route is code (pointerRoute) and there is no route, so no option and no question
+  assert.deepEqual(pointerRoute({ person: 'owner', audience: { requester: 'self', owner: 'self', participants: ['self'] }, presence: [{ member: 'self', self: true, active: false }] }), { target: null, reason: 'away' })
+  // the questions: the announcement only for a finished result; one told_N per posted message, newest two
+  const q = pointerPredicates({ kind: 'result', result: '세 곳의 요금제를 정리했습니다.', posted: ['첫째', '둘째', '셋째'] })
+  assert.deepEqual(q.map(row => [row.name, row.quote.label, row.quote.text, row.kinds]), [['pointer', 'The message about the finished work', '세 곳의 요금제를 정리했습니다.', ['run_text']],
+    ['told_1', 'A message already posted to this person', '둘째', ['run_text']], ['told_2', 'A message already posted to this person', '셋째', ['run_text']]])
+  assert.deepEqual(pointerPredicates({ kind: 'approval', result: '승인이 필요합니다.', posted: [] }), [], 'a decision waiting for them needs them by definition')
+  assert.deepEqual(pointerPredicates({ kind: 'result', result: null, posted: [] }), [])
+  // the combination
+  const result = { kind: 'result' }, approval = { kind: 'approval' }
+  assert.equal(pointerDecision(result, new Set(['pointer']), ['pointer', 'told_1']), true)
+  assert.equal(pointerDecision(result, new Set(['pointer', 'told_1']), ['pointer', 'told_1']), false, 'already told where: no pointer')
+  assert.equal(pointerDecision(result, new Set(), ['pointer']), false, 'the work does not need them')
+  assert.equal(pointerDecision(result, new Set(), []), true, 'nothing to read: the placement runtime\'s judgment stands')
+  assert.equal(pointerDecision(approval, new Set(), []), true); assert.equal(pointerDecision(approval, new Set(['told_1']), ['told_1']), false)
+  assert.equal(pointerDecision(null, new Set(['pointer']), ['pointer']), false)
+})
+
+test('runContext: the material is sentences plus the person\'s own words; each kind of content only when the run\'s gate allows it; without the run\'s text there is no material at all', () => {
+  const run = { pendingApprovals: [], activities: [{ id: 'n1', kind: 'workNote', status: 'completed', detail: { text: '의존성을 먼저 설치한다.' } },
+    { id: 'c0', kind: 'commandExecution', status: 'completed', detail: { command: 'npm ci' } }, { id: 't1', kind: 'mcpToolCall', status: 'inProgress', detail: { server: 'docs', tool: 'search' } },
+    { id: 'c1', kind: 'commandExecution', status: 'inProgress', detail: { command: `npm test\n -- ${'x'.repeat(300)}` } }] }
+  const flow = { sent: [{ kind: 'explain_wait', text: '조금 걸립니다.', at: 15_000 }], reasoningOpen: () => false }
+  const hb = { internalMs: 45_000, sinceUserMs: 45_000, sinceEngineMs: 1000, phase: 'tool_running', stepsDone: 1, stepsRunning: 2, stepsRemaining: null, sources: { engine_commands: { terminal: 'running', terminalState: 'running_output', runningMs: 20_000 } } }
+  const facts = { audience: audienceFacts({}) }
+  const own = new Set(['workNote'])
+  const open = runContext({ run, heartbeatFacts: hb, flow, facts, userText: '테스트를\n돌려 주세요', own })
+  assert.deepEqual(open.kinds.sort(), ['run_text', 'terminal_command'])
+  assert.match(open.text, /^The person's request:\n"""\n테스트를 돌려 주세요\n"""\n\nNow:\n- 45 seconds have passed since the person wrote\.\n- The assistant is running the tool docs \/ search\.\n- The assistant is running a command: `npm test -- x+…` \(running for about 20 seconds; its output shows it is still running\)\.\n- Tool steps finished so far: 1 \(the last one: a command: `npm ci`\)\./)
+  assert.match(open.text, /- The assistant's latest note to itself: "의존성을 먼저 설치한다\."\n- Waiting for this: the person who asked; whether they are at the desk is not known\.\n\nAlready said to the person while working:\n- 30 seconds ago \(a note that this takes a while\): "조금 걸립니다\."$/)
+  assert.ok(open.text.length < 1200, 'a long command line is cut')
+  const noTerminal = runContext({ run, heartbeatFacts: hb, flow, facts, userText: '테스트를 돌려 주세요', own, allows: kind => kind === 'run_text' })
+  assert.deepEqual(noTerminal.kinds, ['run_text']); assert.doesNotMatch(noTerminal.text, /npm/); assert.match(noTerminal.text, /The assistant is running a command \(running for about 20 seconds/); assert.match(noTerminal.text, /\(the last one: a command\)/)
+  assert.equal(runContext({ run, heartbeatFacts: hb, flow, facts, userText: '테스트를 돌려 주세요', own, allows: () => false }), null)
+  assert.doesNotMatch(open.text, /on the desk|is waiting (to|above|below|inside|elsewhere)/, 'no pointer material in the run\'s material: the pointer questions quote their own items')
+})
+
+test('in the runtime: the answers are yes/no per question and code picks the kind; a yes below the bar says nothing; the record keeps the derived kind and each probability, never text', async t => {
+  // The mock answers by probability per question (not by picked kind) to exercise the bar and the order.
+  const custom = (t, probabilities) => {
+    const w = world(t, {})
+    const decide = w.chat.decisionContext.client.decide
+    w.chat.decisionContext.client.decide = async request => { const out = await decide(request)
+      if (request.promptCacheKey === 'heartbeat-beat') for (const q of request.questions) if (probabilities[q.name] !== undefined) out.answers[q.name] = { type: 'predicate', probability: probabilities[q.name] }
+      return out }
+    return w
+  }
+  // ask 0.9 and note 0.95 at the same beat: the question to the person wins.
+  const both = custom(t, { message__ask: 0.9, message__note: 0.95 }), a = await both.dm('dm-a', '서비스를 배포해 주세요')
+  await both.advance(4000); await a.tool('s1', 'started'); await both.advance(2000); await a.tool('s1', 'completed'); await both.advance(1000); await a.note('n1', '어느 환경에 배포할까요?'); await both.advance(3000)
+  assert.deepEqual(both.beatRequests.at(-1).names, ['message__ask', 'message__note'])
+  assert.match(both.forkPrompts.at(-1), /You need one piece of information from the person/)
+  const entry = both.flowEntries().at(-1)
+  assert.deepEqual([entry.flow, entry.posted, entry.judgments.map(j => [j.q, j.would, j.p, j.threshold])], ['ask_missing', 'model', [['beat_ask', 'act', 0.9, 0.8], ['beat_note', 'act', 0.95, 0.8]]])
+  assert.ok(!JSON.stringify(both.flowEntries()).includes('배포'), 'no text in the record')
+  await a.final('끝.')
+  // 0.79 is not a yes: nothing is written, nothing is posted.
+  const below = custom(t, { message__note: 0.79 }), b = await below.dm('dm-b')
+  await below.advance(2000); await b.tool('s1', 'started'); await below.advance(8000)
+  assert.deepEqual([below.requests.flow, below.forkPrompts.length, b.assistant().length], [1, 0, 0])
+  assert.deepEqual([below.flowEntries().at(-1).flow, below.flowEntries().at(-1).judgments[0].would], ['none', 'none'])
+  await b.final('끝.')
+  // The run's models may not receive terminal data (Agent ceiling): the same question is asked without the command line.
+  const ceiling = custom(t, { message__note: 0.9 })
+  const run = await ceiling.dm('dm-c', '테스트 돌려 주세요'); const live = [...ceiling.chat.runs.values()].at(-1); live.toolCeiling = { terminal: 'none', browser: 'none' }
+  await ceiling.advance(2000); await run.tool('s1', 'started'); await ceiling.advance(8000)
+  const sent = ceiling.beatRequests.at(-1).input.join('\n')
+  assert.match(sent, /The assistant is running a command\./); assert.doesNotMatch(sent, /`ls`/); assert.equal(run.assistant().length, 1)
+  await run.final('끝.')
+})
+
+// ---- cycle 16: code preconditions for the pointer, the stall as code, the no-step floor ----
+
+function answering(t, probabilities, options = {}) {
+  const w = world(t, options)
+  const decide = w.chat.decisionContext.client.decide
+  w.chat.decisionContext.client.decide = async request => { const out = await decide(request)
+    if (request.promptCacheKey === 'heartbeat-beat') for (const q of request.questions) if (probabilities[q.name] !== undefined) out.answers[q.name] = { type: 'predicate', probability: probabilities[q.name] }
+    return out }
+  return w
+}
+
+test('no-step floor: a run whose engine is visibly thinking is first asked at 30 s, not 20 s; a run with a tool step is still asked from 10 s', async t => {
+  const w = answering(t, { message__note: 0.9 }), d = await w.dm('dm-think', '다음 분기 서버 증설 계획을 표로 정리해 주세요.')
+  await w.advance(1000); await d.raw('item/started', { item: { id: 'r1', type: 'reasoning', summary: [], content: [] } })
+  for (let s = 3; s < 30; s += 3) { await w.advance(s * 1000 - w.at()); await d.raw('item/reasoning/summaryTextDelta', { itemId: 'r1', delta: 'x' }) }
+  await w.advance(29_500 - w.at())
+  assert.deepEqual([w.requests.flow, d.assistant().length], [0, 0], 'nothing asked before 30 s')
+  await w.advance(500)
+  assert.deepEqual([w.requests.flow, w.beatRequests.at(-1).names], [1, ['message__note']]); assert.match(w.beatRequests.at(-1).input.join('\n'), /- 30 seconds have passed since the person wrote\./)
+  assert.equal(d.assistant().length, 1); await d.final('정리했습니다.')
+  const s = answering(t, {}), e = await s.dm('dm-step')
+  await s.advance(2000); await e.tool('s1', 'started'); await s.advance(8000)
+  assert.deepEqual([s.requests.flow, s.beatRequests.at(-1).names], [1, ['message__note']], 'a tool step: asked at 10 s as before'); await e.final('끝.')
+})
+
+test('pointer in the runtime: an answer that already said where -> told yes -> no pointer; a decision waiting for the owner -> no request at all, one pointer; the work question decides a result', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 1000 }]
+  const run = async (probabilities, answer, needs) => {
+    const w = answering(t, probabilities, { presence: { snapshot: () => rows }, writer: prompt => (/on the desk/.test(prompt) ? POINTER : null) })
+    const d = await w.dm('dm', '경쟁 제품 세 곳의 요금제를 조사해서 문서로 정리해 주세요.'); await w.advance(4000); await d.final(answer)
+    const before = w.requests.flow
+    placementProvider(d.hb).pointer = { pointerWhere: 'right', pointerDistance: 'near', pointerFor: 'requester', pointerNeeds: needs }
+    d.hb.nudge(); await w.advance(S.nudgeMs); await w.advance(60_000)
+    return { requests: w.requests.flow - before, names: w.beatRequests.slice(-1)[0]?.names ?? [], posted: d.assistant().slice(1), entry: w.flowEntries().at(-1) }
+  }
+  // L3 c17: the person asked for this work (they are the run's requester), so it is needed by definition: only told_N is asked.
+  const told = await run({ message__pointer: 0.97, message__told_1: 0.95 }, '문서를 정리해서 화면 오른쪽에 열어 두었습니다.', 'review')
+  assert.deepEqual([told.requests, told.names, told.posted, told.entry.flow], [1, ['message__told_1'], [], 'none'], 'they were told where: nothing is posted, and the fact is not asked about again')
+  const notTold = await run({ message__pointer: 0.02, message__told_1: 0.04 }, '문서를 정리했습니다.', 'review')
+  assert.deepEqual([notTold.requests, notTold.names, notTold.posted, notTold.entry.flow], [1, ['message__told_1'], [POINTER], 'pointer'], 'a requested result: a no to the work question cannot matter, it is not asked')
+  const nothing = await run({ message__told_1: 0.04 }, '테스트가 모두 통과했습니다. 따로 볼 것은 없습니다.', 'review')
+  assert.deepEqual([nothing.requests, nothing.posted], [1, [POINTER]], 'requested, not told where: pointed (c16 asked the work question here)')
+  const decide = await run({}, '승인할 항목을 정리했습니다.', 'owner_action')
+  assert.deepEqual([decide.names.includes('message__pointer'), decide.posted], [false, [POINTER]], 'a decision waiting for them needs them by definition')
+  assert.deepEqual([decide.entry.flow, decide.entry.questions, decide.entry.posted], ['pointer', 1, 'model'], 'only told_1 was asked (the answer was posted to them)')
+  // An owner who is away: no route, no request, the fact is held (c15 measured the old question at 1.0 here).
+  rows[0] = { member: 'self', self: true, active: false, lastInputAgeMs: 900_000 }
+  const away = await run({ message__pointer: 0.99 }, '문서를 정리했습니다.', 'review')
+  assert.deepEqual([away.requests, away.posted], [0, []])
+})
+
+test('pointer for a result the person did not request (a member\'s task, for the owner): only then is the result itself judged, quoted on its own', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 1000 }, { member: 'm-jin', active: false }]
+  const audience = { 'dm-task': { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self'] } }
+  const run = async (probability, answer) => {
+    const w = answering(t, { message__pointer: probability }, { audience: ({ run }) => audience[run.clientThreadId] ?? null, presence: { snapshot: () => rows }, writer: prompt => (/on the desk/.test(prompt) ? POINTER : null) })
+    const o = await w.dm('dm-owner', '예산표 정리해 주세요'); await w.advance(3000); await o.final('예산표를 정리했습니다.')
+    const m = await w.dm('dm-task', '견적서 수정본 초안을 만들어 주세요'); await w.advance(4000); await m.final(answer)
+    placementProvider(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
+    m.hb.nudge(); await w.advance(S.nudgeMs); await w.advance(60_000)
+    const req = w.beatRequests.at(-1)
+    return { names: req.names, asked: req.input.join('\n'), posted: o.assistant().slice(1) }
+  }
+  const decide = await run(0.93, '견적서 수정본 초안을 만들었습니다. 단가 적용 여부를 정해 주셔야 발송할 수 있습니다.')
+  assert.deepEqual([decide.names, decide.posted], [['message__pointer'], [POINTER]])
+  assert.match(decide.asked, /Question message__pointer:\nThe message about the finished work:\n"""\n견적서 수정본 초안을 만들었습니다\. 단가 적용 여부를 정해 주셔야 발송할 수 있습니다\.\n"""/)
+  const plain = await run(0.1, '견적서 수정본 초안을 만들었습니다.')
+  assert.deepEqual([plain.names, plain.posted], [['message__pointer'], []], 'nothing for the owner to act on or decide: no pointer')
+})
+
+test('heartbeat messages are checked against the facts they were composed from: the run\'s state (the command line only where the gate allows it), the request, never the turn\'s materials', async t => {
+  const checks = [], CONCRETE = '결제 테스트(`npm test`)를 10초째 돌리고 있어요. 끝나면 바로 알려 드릴게요.'
+  const w = world(t, { flags: { held: true, flow: true, commands: true }, writer: () => CONCRETE })
+  const decide = w.chat.decisionContext.client.decide
+  w.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') checks.push(request.input.map(row => row.content).join('\n')); return decide(request) }
+  const d = await w.dm('dm', '전체 테스트 돌리고 결과 알려줘')
+  await w.advance(1000); await d.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await w.advance(9000)
+  assert.deepEqual(d.assistant(), [CONCRETE], 'the wait message is posted')
+  assert.equal(checks.length, 1, 'one draft-check request for the message')
+  assert.match(checks[0], /Sentence S1:\n"""\n결제 테스트\(`npm test`\)를 10초째 돌리고 있어요\.\n"""/); assert.doesNotMatch(checks[0], /끝나면 바로 알려 드릴게요/, 'a sentence without a concrete detail is not sent')
+  assert.match(checks[0], /\[E1 time=present\]\n"""\nThe person asked: 전체 테스트 돌리고 결과 알려줘\n"""/)
+  assert.match(checks[0], /\[E2 time=present\]\n"""\n10 seconds have passed since the person wrote\. The assistant is running a command: `npm test -- --suite=payroll` \(running for about 9 seconds\)/)
+  assert.doesNotMatch(checks[0], /content not available/, 'no content-free reference from the turn')
+  await d.final('끝났습니다.')
+  // The Agent's models may not receive terminal data: the same check without the command line.
+  const closed = world(t, { flags: { held: true, flow: true, commands: true }, writer: () => CONCRETE }), seen = []
+  const decide2 = closed.chat.decisionContext.client.decide
+  closed.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') seen.push(request.input.map(row => row.content).join('\n')); return decide2(request) }
+  const c = await closed.dm('dm', '전체 테스트 돌리고 결과 알려줘'); [...closed.chat.runs.values()].at(-1).toolCeiling = { terminal: 'none', browser: 'none' }
+  await closed.advance(1000); await c.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await closed.advance(9000)
+  assert.equal(seen.length, 1); assert.doesNotMatch(seen[0], /--suite=payroll/, 'the command line is not in the evidence'); assert.match(seen[0], /The assistant is running a command \(running for about 9 seconds\)/)
+  await c.final('끝.')
+  // A wait message without any concrete detail (s4's real one): nothing to check against facts of the present, no request, posted.
+  const plain = world(t, { flags: { held: true, flow: true, commands: true } }), plainChecks = []
+  const decide3 = plain.chat.decisionContext.client.decide
+  plain.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') plainChecks.push(request); return decide3(request) }
+  const p = await plain.dm('dm', '전체 테스트 돌리고 결과 알려줘')
+  await plain.advance(1000); await p.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await plain.advance(9000)
+  assert.deepEqual([p.assistant(), plainChecks.length], [[MID], 0])
+  await p.final('끝.')
+  // A pointer message: the place and the kind, in the fixed words the writer was given.
+  const ev = messageEvidence({ kind: 'pointer', attention: { kind: 'approval', where: 'left', distance: 'far' } })
+  assert.deepEqual(ev, [{ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: 'Something that needs the person\'s decision is waiting to the left of what they are looking at on the desk, some way off. Nothing was moved into the person\'s view.' }])
+})
+
+// ---- cycle 18: notes without "?" ride along; a result pointer needs a located surface ----
+
+test('ride-along: notes without "?" are judged on a request that goes out anyway (oldest first, two at most, each once); a yes is an early question about that note; notes alone cause no request', async t => {
+  const NEEDS = '배포 대상 환경이 운영인지 스테이징인지 요청에 없다. 사용자가 정해 주어야 진행할 수 있다.'
+  const w = answering(t, {}, { writer: prompt => (/need one piece of information/.test(prompt) ? '어느 환경에 배포할지 알려 주세요.' : null) })
+  const decide = w.chat.decisionContext.client.decide, asked = []
+  w.chat.decisionContext.client.decide = async request => { const out = await decide(request)
+    if (request.promptCacheKey === 'heartbeat-beat') {
+      asked.push(request.questions.map(q => q.name))
+      request.questions.forEach((q, i) => { if (/^message__ask_\d$/.test(q.name)) out.answers[q.name] = { type: 'predicate', probability: request.input.some(row => row.content.startsWith(`Question ${q.name}:`) && row.content.includes(NEEDS)) ? 0.97 : 0.02 } })
+      if (out.answers.message__note) out.answers.message__note = { type: 'predicate', probability: 0.1 }
+    }
+    return out }
+  const d = await w.dm('dm', '주문 서비스를 배포해 주세요.')
+  await w.advance(1000); await d.note('n1', '저장소 상태를 먼저 확인한다.'); await d.note('n2', '빌드 설정 파일을 읽는다.')
+  await w.advance(1000); await d.note('n3', NEEDS)
+  await w.advance(1000); await d.tool('s1', 'started')
+  await w.advance(7000) // 10 s: the first request (a tool step is running), the two oldest notes ride along
+  assert.deepEqual(asked, [['message__note', 'message__ask_1', 'message__ask_2']])
+  const first = w.beatRequests.at(-1).input.join('\n')
+  assert.match(first, /Question message__ask_1:\nA note the assistant wrote to itself:\n"""\n저장소 상태를 먼저 확인한다\.\n"""/); assert.match(first, /Question message__ask_2:\nA note the assistant wrote to itself:\n"""\n빌드 설정 파일을 읽는다\.\n"""/)
+  assert.deepEqual(d.assistant(), [], 'both plain: no early question')
+  await w.advance(30_000) // the next request (after the backoff) carries the one note not judged yet
+  assert.deepEqual(asked.at(-1), ['message__note', 'message__ask_1']); assert.match(w.beatRequests.at(-1).input.join('\n'), new RegExp(`Question message__ask_1:\\n[^\\n]*\\n"""\\n${NEEDS.replace(/[.?]/g, '\\$&')}`))
+  assert.deepEqual(d.assistant(), ['어느 환경에 배포할지 알려 주세요.'], 'a yes: the early question about that note')
+  assert.match(w.forkPrompts.at(-1), new RegExp(NEEDS.slice(0, 20)))
+  const later = asked.length
+  await w.advance(60_000)
+  assert.ok(asked.slice(later).every(names => !names.some(n => /^message__ask_\d$/.test(n))), 'judged once: never again')
+  await d.final('배포했습니다.')
+  // Notes alone never cause a request: no tool step and an active engine before 30 s.
+  const quiet = answering(t, {}), q = await quiet.dm('dm-q', '계획을 정리해 주세요.')
+  for (let s = 1; s < 25; s += 3) { await quiet.advance(s * 1000 - quiet.at()); await q.note(`q${s}`, `메모 ${s}번을 정리한다.`) }
+  await quiet.advance(25_000 - quiet.at())
+  assert.equal(quiet.requests.flow, 0); await q.final('정리했습니다.')
+})
+
+test('a finished result is pointed to only when the provider places its surface off the person\'s view (Main 2026-11-24, rule 3); a decision needs no surface', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 1000 }]
+  const run = async attention => {
+    const w = answering(t, { message__told_1: 0.02 }, { presence: { snapshot: () => rows }, writer: prompt => (/on the desk/.test(prompt) ? POINTER : null) })
+    const d = await w.dm('dm', '경쟁 제품 세 곳의 요금제를 조사해서 문서로 정리해 주세요.'); await w.advance(4000); await d.final('문서를 정리했습니다.')
+    d.hb.register('tasks', () => attention)
+    d.hb.nudge(); await w.advance(S.nudgeMs); await w.advance(30_000)
+    return { requests: w.requests.flow, posted: d.assistant().slice(1) }
+  }
+  assert.deepEqual(await run({ attention: 'result', attentionFor: 'requester' }), { requests: 0, posted: [] }, 'a result with no surface placed anywhere: nothing to point to, no request')
+  assert.deepEqual(await run({ attention: 'result', attentionFor: 'requester', attentionWhere: 'left', attentionDistance: 'far' }), { requests: 1, posted: [POINTER] }, 'requested, located, not told: pointed')
+  assert.deepEqual((await run({ attention: 'approval', attentionFor: 'requester' })).posted, [POINTER], 'a decision waiting for them needs no surface')
+})

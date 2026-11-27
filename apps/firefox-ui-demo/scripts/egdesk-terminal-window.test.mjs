@@ -95,7 +95,7 @@ function dispatch(target, type, init = {}) {
   return event;
 }
 
-async function terminalWindow({ api } = {}) {
+async function terminalWindow({ api, options = {}, windowOverrides = {}, depOverrides = {} } = {}) {
   const { createTerminalZone } = await import(new URL('resources/surface/EGDeskSurfaceTerminal.mjs', overlay));
   const events = [], messages = new Map(), documentListeners = [];
   const host = makeNode('main'); host.isRoot = true;
@@ -132,6 +132,7 @@ async function terminalWindow({ api } = {}) {
       return shell;
     },
   });
+  Object.assign(deps, depOverrides);
   const frameWindow = { terminalAPI: api ? { hostEventKey: '00000000-0000-4000-8000-000000000001', focus: () => events.push('terminal-focus'), kill: async () => { events.push('session-killed'); return { ok: true }; }, ...api } : undefined };
   const el = deps.el;
   deps.el = (tag, props, ...children) => {
@@ -143,20 +144,20 @@ async function terminalWindow({ api } = {}) {
     document: { getElementById: () => host,
       addEventListener: (type, fn, capture) => documentListeners.push({ type, fn, capture }),
       removeEventListener: (type, fn) => { const at = documentListeners.findIndex(item => item.type === type && item.fn === fn); if (at >= 0) documentListeners.splice(at, 1); } },
-    window: { addEventListener: (type, fn) => messages.set(type, fn), removeEventListener: type => messages.delete(type) },
+    window: { addEventListener: (type, fn) => messages.set(type, fn), removeEventListener: type => messages.delete(type), ...windowOverrides },
     console: { warn() {} }, setTimeout: fn => { fn(); return 0; },
   };
   const saved = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   const restore = () => { for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } };
-  let card;
-  try { card = createTerminalZone(deps).spawnTerminalCard({}); } catch (error) { restore(); throw error; }
+  let card, zone;
+  try { zone = createTerminalZone(deps); card = zone.spawnTerminalCard(options); } catch (error) { restore(); throw error; }
   const frame = card.find('iframe');
   const hostEventKey = frameWindow.terminalAPI?.hostEventKey;
   const receiver = messages.get('message');
   const directMessage = (data, envelope = {}) => receiver({ source: frameWindow, origin: 'chrome://userchrome', ...envelope, data: { hostEventKey, ...data } });
   const message = (data, envelope = {}) => messages.get('message') && directMessage(data, envelope);
-  return { card, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore, frame, hostEventKey, directMessage, boardCloseRequests: deps.boardCloseRequests,
+  return { card, zone, host, events, state, shell, shellOptions, closeDot, documentListeners, message, restore, frame, hostEventKey, directMessage, unload: () => messages.get('unload')?.(), boardCloseRequests: deps.boardCloseRequests,
     confirm: card.find('.egd-terminal-close-confirm'), cancel: card.find('.egd-terminal-close-confirm-cancel'),
     go: card.find('.egd-terminal-close-confirm-go') };
 }
@@ -174,8 +175,8 @@ test('the Terminal window uses the shared Desk Window bar with a Korean name and
     assert.equal(identity.children[1].textContent, '연결 중');
     assert.equal(identity.children[1].getAttribute('role'), 'status');
     assert.equal(h.shell.slots.actions.children[0].className, 'egd-terminal-run-chip', 'the result chip sits with the bar actions');
-    assert.equal(h.closeDot.title, '터미널 종료 후 닫기', 'the red dot says that it also ends the session');
-    assert.equal(h.closeDot.getAttribute('aria-label'), '터미널 종료 후 닫기');
+    assert.equal(h.closeDot.title, '터미널 닫기', 'the red dot opens the close choices');
+    assert.equal(h.closeDot.getAttribute('aria-label'), '터미널 닫기');
     assert.deepEqual(h.card.children.map(child => child.className.split(' ').pop()),
       ['egd-terminal-header', 'egd-terminal-run-result', 'egd-terminal-close-confirm', 'egd-terminal-body']);
     h.message({ type: 'terminal-ready', shellLabel: 'zsh' });
@@ -188,7 +189,7 @@ test('the Terminal window uses the shared Desk Window bar with a Korean name and
     h.message({ type: 'terminal-no-session' });
     assert.equal(identity.children[1].textContent, '세션 없음');
   } finally { h.restore(); }
-  assert.doesNotMatch(terminalSource, />_ |Terminal'\)/, 'no English window name remains');
+  assert.doesNotMatch(terminalSource, /egd-terminal-title[^\n]+['"]Terminal['"]/, 'the actual window title is localized');
 });
 
 test('the red dot asks before closing a running session; 취소 keeps the window and the session', async () => {
@@ -474,4 +475,233 @@ test('cleanup revokes a captured terminal receiver even before a queued event ca
     h.directMessage({ type: 'terminal-ready', shellLabel: 'stale' }, { source: null });
     assert.deepEqual(h.events, before); assert.equal(h.host.children.length, 0);
   } finally { h.restore(); }
+});
+
+test('owned close keeps cancel, and detach closes only after a hold ACK without kill', async () => {
+  let acknowledge, calls = 0;
+  const ref = { ok: true, sessionId: 'live-pty', bridgeInstance: 'bridge', expiresAt: 12345, shellLabel: 'zsh' };
+  const h = await terminalWindow({ api: { ptyId: 'live-pty', isConnected: () => true, canDetach: () => true,
+    detachLocal: () => { calls++; return new Promise(resolve => { acknowledge = resolve; }); } } });
+  try {
+    const detach = h.confirm.children[3];
+    dispatch(h.closeDot, 'click');
+    assert.equal(detach.hidden, false);
+    assert.equal(detach.textContent, '창만 닫고 실행 유지');
+    dispatch(h.cancel, 'click');
+    assert.equal(calls, 0);
+    dispatch(h.closeDot, 'click');
+    dispatch(detach, 'click');
+    assert.equal(calls, 1);
+    assert.equal(h.host.children.includes(h.card), true);
+    acknowledge(ref); await Promise.resolve(); await Promise.resolve();
+    assert.equal(h.host.children.includes(h.card), false);
+    assert.equal(h.events.includes('session-killed'), false);
+    const picker = h.zone.spawnTerminalCard({ idle: true });
+    const held = picker.children.find(x => x.getAttribute('aria-label') === '유지 중인 Terminal');
+    assert.equal(held.children[2].children[0].textContent, 'zsh 1 · 다시 연결');
+    assert.match(surface, /cardState.type === 'terminal'\) \{[^}]+spawnTerminalCard\(\{ idle: true \}\)/);
+  } finally { h.restore(); }
+});
+
+test('explicit terminate does not close the view at the request ACK', async () => {
+  let confirmExit, attempts = 0;
+  const h = await terminalWindow({ api: { ptyId: 'live-pty', closeForBoard: () => {
+    attempts++; return new Promise(resolve => { confirmExit = resolve; });
+  } } });
+  try {
+    dispatch(h.closeDot, 'click');
+    assert.equal(h.confirm.children[3].hidden, true);
+    dispatch(h.go, 'click');
+    assert.equal(attempts, 1);
+    confirmExit(false); await Promise.resolve();
+    assert.equal(h.host.children.includes(h.card), true);
+    assert.match(h.confirm.children[0].textContent, /종료를 확인하지 못했습니다/);
+    dispatch(h.go, 'click');
+    confirmExit(true); await Promise.resolve();
+    assert.equal(h.host.children.includes(h.card), false);
+    assert.equal(h.events.includes('session-killed'), false);
+  } finally { h.restore(); }
+});
+
+
+test('Terminal ownership begins only at authenticated API readiness, and never reopens after unload', async () => {
+  for (const idle of [true, false]) {
+    const configured = [], requests = [];
+    let identities = 0;
+    const configureLocal = (transport, idle) => configured.push({ transport, idle });
+    const h = await terminalWindow({ options: { idle }, api: { configureLocal }, windowOverrides: {
+      crypto: { randomUUID: () => 'id-' + (++identities) },
+      fetch: async (url, init) => { requests.push({ url, init }); return {}; },
+    } });
+    const ready = { type: 'terminal-api-ready' };
+    try {
+      assert.equal(new URL(h.frame.src).searchParams.get('managed'), '1');
+      assert.equal(identities, 0, 'import, factory, window and iframe assembly allocate no owner');
+      h.message(ready, { source: {} });
+      h.message({ ...ready, hostEventKey: 'different-document' });
+      assert.equal(identities, 0);
+      assert.deepEqual(configured, []);
+      h.message(ready, { source: null });
+      assert.equal(identities, 2, 'one owner and one view id for the current frame');
+      assert.deepEqual(configured.map(entry => entry.idle), [idle]);
+      assert.deepEqual(requests, [], 'parent does not start a PTY on ready');
+      const url = 'http://127.0.0.1:39218/terminal/shells';
+      await configured[0].transport(url, { method: 'GET' });
+      assert.deepEqual(requests[0].init.headers, { 'X-EGDesk-Terminal-Owner': 'id-1', 'X-EGDesk-Terminal-View': 'id-2' });
+      h.frame.contentWindow.terminalAPI = { hostEventKey: 'reload', configureLocal };
+      h.message(ready, { source: null });
+      assert.equal(identities, 2, 'prior document cannot rotate ownership');
+      h.message({ ...ready, hostEventKey: 'reload' }, { source: null });
+      await configured[1].transport(url);
+      assert.deepEqual(requests[1].init.headers, { 'X-EGDesk-Terminal-Owner': 'id-1', 'X-EGDesk-Terminal-View': 'id-3' });
+      h.unload();
+      assert.match(requests.at(-1).url, /close-local-scope$/);
+      h.message({ ...ready, hostEventKey: 'reload' });
+      assert.equal(identities, 3, 'no post-close ownership or view allocation');
+      assert.equal(configured.length, 2);
+    } finally { h.restore(); }
+  }
+});
+
+// Exercise the managed iframe's real parent transport, not an unrestricted
+// test fetch. File checks use this route before preparing and dispatching PTY input.
+test('managed Terminal can verify the exact bound File project without widening File transport', async () => {
+  const requests = [];
+  let transport, identity = 0;
+  const h = await terminalWindow({ options: { activate: false, reveal: false },
+    api: { configureLocal(fn) { transport = fn; } }, windowOverrides: {
+      crypto: { randomUUID: () => 'id-' + (++identity) },
+      fetch: async (url, init) => { requests.push({url, init}); return {ok: true}; },
+    } });
+  const origin = 'http://127.0.0.1:39218';
+  const url = origin + '/v1/files/projects/open';
+  const request = { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({boardId:'board-a', expectedProjectId:'project-a', expectedRootId:'root-a'}), signal: new AbortController().signal };
+  try {
+    h.message({type:'terminal-api-ready'}, {source:null});
+    assert.equal(requests.length, 0, 'parent queues no action on connect');
+    for (const [target, init] of [[url, {...request, method:'GET'}], [url, undefined],
+      [url + '?extra=1', request], [url + '/', request], [url + '#extra', request],
+      [origin + '/v1/files/projects/scripts', request], [origin + '/v1/files/projects/attach', request],
+      [origin + '/v1/files/save', request], ['http://localhost:39218/v1/files/projects/open', request],
+      ['http://127.0.0.1:39219/v1/files/projects/open', request], ['https://untrusted.test/v1/files/projects/open', request]]) {
+      assert.throws(() => transport(target, init), /Invalid terminal transport/);
+    }
+    assert.equal(requests.length, 0);
+    for (let phase = 0; phase < 2; phase++) await transport(url, request);
+    assert.deepEqual(requests, Array.from({length:2}, () => ({url, init:{...request, redirect:'error',
+      headers:{...request.headers, 'X-EGDesk-Terminal-Owner':'id-1', 'X-EGDesk-Terminal-View':'id-2'}}})));
+    h.unload();
+    assert.match(requests.at(-1).url, /\/terminal\/close-local-scope$/);
+    assert.throws(() => transport(url, request), /Invalid terminal transport/);
+    assert.equal(requests.length, 3);
+  } finally { h.restore(); }
+});
+
+// L1 c34 (bridge flag EGDESK_TERMINAL_OPEN_URL): addresses a program of this session asked to open come to the card as 'terminal-open-url'; each opens a Browser Card beside it, in the background.
+test('a terminal-open-url message opens a Browser Card for each http(s) address, in the background, beside this terminal; only the card\'s own authenticated frame can ask', async () => {
+  const opened = [];
+  const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: (url, options) => { opened.push([url, options]); return {}; } } });
+  try {
+    const SIGN_IN = 'https://claude.com/cai/oauth/authorize?code=true&state=synthetic';
+    h.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: [SIGN_IN] });
+    assert.deepEqual(opened.map(([url]) => url), [SIGN_IN]);
+    assert.equal(opened[0][1].background, true, 'no camera move, no activation: the person is typing in the terminal');
+    assert.equal(opened[0][1].opener, h.card, 'placed with the terminal card as the opener');
+    assert.equal(opened[0][1].openMode, 'new');
+    h.message({ type: 'terminal-open-url', urls: [SIGN_IN] });
+    assert.equal(opened.length, 1, 'the same address twice within seconds opens one card');
+    h.message({ type: 'terminal-open-url', urls: ['file:///etc/passwd', 'javascript:alert(1)', 'chrome://browser/content', 'https://user:pw@a.example/', 'not a url', 5, null] });
+    h.message({ type: 'terminal-open-url', urls: 'https://a.example/' }); h.message({ type: 'terminal-open-url' });
+    assert.equal(opened.length, 1, 'anything but a plain http(s) address is ignored');
+    h.message({ type: 'terminal-open-url', urls: ['https://a.example/1', 'https://a.example/2', 'https://a.example/3', 'https://a.example/4', 'https://a.example/5', 'https://a.example/6'] });
+    assert.equal(opened.length, 1 + 4, 'at most four addresses per message');
+    const before = opened.length;
+    for (const envelope of [{ source: {} }, { source: undefined }, { source: null, origin: 'https://example.invalid' }, { source: null, origin: 'chrome://userchrome.evil' }]) h.message({ type: 'terminal-open-url', urls: ['https://forged.example/'] }, envelope);
+    for (const hostEventKey of [undefined, null, '', 'other-card-key']) h.message({ type: 'terminal-open-url', urls: ['https://forged.example/'], hostEventKey }, { source: null });
+    assert.equal(opened.length, before, 'a forged message opens nothing');
+  } finally { h.restore(); }
+});
+
+test('a Browser Card that cannot be opened is logged and the terminal keeps working', async () => {
+  const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: () => { throw new Error('card limit'); } } });
+  try { h.message({ type: 'terminal-open-url', urls: ['https://a.example/'] }); h.message({ type: 'terminal-ready', shellLabel: 'zsh' }); assert.equal(h.shell.slots.identity.children[1].textContent, 'zsh'); } finally { h.restore(); }
+});
+
+test('the surface hands the Terminal zone spawnBrowserCard, and the frame page forwards openUrls of a read to its host', () => {
+  assert.match(surface, /singletonSourceRef,\n\s+spawnBrowserCard,\n\s+spawnDeskWindowShell,/);
+  assert.match(initializer, /Array\.isArray\(result\.openUrls\)[\s\S]{0,200}type: 'terminal-open-url'/);
+});
+
+// c35 (UX-7): a Terminal opened from another card (the login button's terminal from the Settings card) asks the camera to keep that requester in view.
+test('c35: spawnTerminalCard passes the requesting card to the reveal as keepVisible; without one the reveal is as before', async () => {
+  const reveals = [];
+  const h = await terminalWindow({ api: { ptyId: null, isConnected: () => false }, depOverrides: { revealPlacedCanvasCard: (card, placement, options) => reveals.push(options) } });
+  try {
+    assert.deepEqual(reveals, [{ kind: 'terminal' }], 'no requester: only the kind');
+    const requester = { id: 'egd-settings-card-1' };
+    const second = h.zone.spawnTerminalCard({ keepVisible: requester });
+    assert.ok(second); assert.equal(reveals.at(-1).keepVisible, requester); assert.equal(reveals.at(-1).kind, 'terminal');
+    h.zone.spawnTerminalCard({ reveal: false }); assert.equal(reveals.length, 2, 'reveal: false reveals nothing');
+  } finally { h.restore(); }
+});
+
+// c36: a Browser Card opened for a terminal session's sign-in is closed when that session ends; the person's own cards never are.
+test('c36: the Browser Cards a session\'s program asked for are linked to it and closed when the session ends (exit, no session, disconnect) or the terminal card closes; unlinked cards stay', async () => {
+  const closed = [], make = name => { const c = { name, isConnected: true, dataset: {}, _deskWindowShell: { requestClose: () => { closed.push(name); c.isConnected = false; } } }; return c; };
+  for (const endEvent of ['terminal-exit-confirmed', 'terminal-no-session', 'terminal-disconnected', 'card-closed']) {
+    closed.length = 0; const spawned = [], own = make('own');
+    const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: (url) => { const c = make(`signin-${spawned.length}`); spawned.push(c); return c; } } });
+    try {
+      h.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=s', 'https://a.example/2'] });
+      assert.equal(spawned.length, 2); assert.ok(spawned.every(c => c._signinSessionId === 'pty-1' && c.dataset.egdSigninSession === 'pty-1'), 'linked to the session');
+      for (const forged of [{ source: {} }, { source: null, origin: 'https://example.invalid' }]) h.message({ type: endEvent === 'card-closed' ? 'terminal-exit-confirmed' : endEvent }, forged);
+      assert.deepEqual(closed, [], 'a forged end message closes nothing');
+      if (endEvent === 'card-closed') { dispatch(h.closeDot, 'click'); dispatch(h.go, 'click'); await new Promise(resolve => setImmediate(resolve)); assert.ok(h.events.includes('window-closed'), 'the terminal card closed: ' + JSON.stringify(h.events)); }
+      else h.message({ type: endEvent });
+      assert.deepEqual(closed, ['signin-0', 'signin-1'], endEvent); assert.equal(own.isConnected, true, 'a card the person opened is not touched')
+      h.message({ type: 'terminal-exit-confirmed' }); assert.deepEqual(closed, ['signin-0', 'signin-1'], 'closed once');
+    } finally { h.restore(); }
+  }
+});
+
+test('c36: the terminal card reports its linked sign-in cards and whether its session ended for good (exit, or a disconnect after it had been connected)', async () => {
+  const mk = () => ({ isConnected: true, dataset: {}, _deskWindowShell: { requestClose() {} } });
+  const run = async (events) => {
+    const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: () => mk() } });
+    try { const card = h.card; const before = { count: card._linkedSigninCount(), ended: card._sessionEnded === true }; for (const e of events) h.message(e); return { before, count: card._linkedSigninCount(), ended: card._sessionEnded === true }; } finally { h.restore(); }
+  };
+  const r1 = await run([{ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=s'] }]);
+  assert.deepEqual([r1.before.count, r1.count, r1.ended], [0, 1, false]);
+  assert.equal((await run([{ type: 'terminal-exit-confirmed' }])).ended, true);
+  assert.equal((await run([{ type: 'terminal-no-session' }])).ended, false, 'no session at the start is the start failing, not a session that ended');
+  assert.equal((await run([{ type: 'terminal-disconnected' }])).ended, false, 'a connection that never came up');
+  assert.equal((await run([{ type: 'terminal-ready' }, { type: 'terminal-disconnected' }])).ended, true);
+});
+
+// u1 item 1 and 2: the sign-in card opens beside the terminal and in view; it closes when the engine says the login worked
+test('u1: the sign-in card is asked to open beside this terminal and be brought into view (still in the background); a Claude sign-in is watched and its card closes on success only', async () => {
+  const opened = [], closed = [], watched = [];
+  const make = name => { const c = { name, isConnected: true, dataset: {}, _deskWindowShell: { requestClose: () => { closed.push(name); c.isConnected = false; } } }; return c; };
+  let resolveWatch;
+  const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: (url, options) => { opened.push([url, options]); return make(`card-${opened.length}`); } } });
+  try {
+    h.state.watchClaudeSignedIn = (card, href) => { watched.push([card, href]); return /claude\.com/.test(href) ? new Promise(resolve => { resolveWatch = resolve; }) : null; };
+    const CLAUDE = 'https://claude.com/cai/oauth/authorize?code=true&state=synthetic';
+    h.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: [CLAUDE, 'https://example.test/docs'] });
+    assert.equal(opened.length, 2);
+    for (const [, options] of opened) { assert.equal(options.background, true); assert.equal(options.besideOpener, h.card); assert.equal(options.revealBackground, true); assert.equal(options.opener, h.card); }
+    assert.deepEqual(watched.map(([card, href]) => [card, href]), [[h.card, CLAUDE], [h.card, 'https://example.test/docs']], 'the surface is asked for each address and decides which is Claude\'s');
+    resolveWatch('ended'); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(closed, [], 'a watch that ended without success closes nothing here (the session end does)');
+  } finally { h.restore(); }
+  const h2 = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: () => make(`s-${closed.length}`) } });
+  try {
+    closed.length = 0; let resolve2;
+    h2.state.watchClaudeSignedIn = () => new Promise(resolve => { resolve2 = resolve; });
+    h2.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=s'] });
+    assert.deepEqual(closed, []); resolve2('signedIn'); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed.length, 1, 'closed once the login worked'); assert.equal(h2.card.isConnected !== false, true, 'the terminal card stays');
+    const h3 = h2; h3.state.watchClaudeSignedIn = () => Promise.reject(new Error('bridge')); h3.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=t'] }); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed.length, 1, 'a failing watch closes nothing and throws nothing');
+  } finally { h2.restore(); }
 });

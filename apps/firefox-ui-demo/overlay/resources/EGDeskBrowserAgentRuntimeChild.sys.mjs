@@ -470,12 +470,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
 
   // Editors go through the same hints as fields; their text itself is never
   // observed (see valueFor/labelFor/isSensitiveText).
-  isSensitiveControl(node) {
+  // allowHidden (u8, D19): the form-submission proof asks whether a field is sensitive by what it IS (password, private mark, a name or label that says secret); a type=hidden field is masked from
+  // reading (the default, unchanged) but is not by itself a reason to call a form sensitive: Google's search form carries six (ei, hl, source, ...). A hidden field named like a secret still is.
+  isSensitiveControl(node, { allowHidden = false } = {}) {
     if (!node) return false;
     const tag = String(node.tagName || "").toLowerCase();
     if (!node.isContentEditable && !["input", "textarea", "select"].includes(tag)) return false;
     const type = String(node.type || node.getAttribute?.("type") || "").toLowerCase();
-    if (["password", "hidden"].includes(type)) return true;
+    if (type === "password" || (type === "hidden" && !allowHidden)) return true;
     if (this.privateMarked(node)) return true;
     const hints = ["autocomplete", "name", "id", "aria-label", "placeholder"].map(key =>
       String(node.getAttribute?.(key) || (key === "id" ? node.id : "") || "")
@@ -778,7 +780,13 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       const labelled = labelledBy.split(/\s+/).map((id) => doc.getElementById(id)?.textContent || "").join(" ");
       if (labelled.trim()) return this.compact(labelled, 120);
     }
-    if (node.id) {
+    const associated = node.labels?.[0];
+    if (associated) {
+      const label = associated.cloneNode(true);
+      for (const field of label.querySelectorAll('input,select,textarea,button,script,style')) field.remove();
+      if (label.textContent?.trim()) return this.compact(label.textContent, 120);
+    }
+    if (!associated && node.id) {
       const label = doc.querySelector(`label[for="${CSS.escape(node.id)}"]`);
       if (label?.textContent?.trim()) return this.compact(label.textContent, 120);
     }
@@ -789,7 +797,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         || node.getAttribute?.("title")
         || node.getAttribute?.("placeholder")
         || node.getAttribute?.("aria-placeholder")
-        || (editor ? "" : node.innerText || node.textContent)
+        || (editor || /^(select|textarea)$/i.test(node.tagName) ? "" : node.innerText || node.textContent)
         || node.getAttribute?.("name")
         || node.getAttribute?.("id")
         || (editor ? "Editable text" : ""),
@@ -800,7 +808,8 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   valueFor(node) {
     if (this.isSensitiveControl(node)) return "";
     const tag = String(node.tagName || "").toLowerCase();
-    if (tag === "select") return this.compact(node.selectedOptions?.[0]?.textContent || node.value || "", 120);
+    if (tag === "select") return this.boundedValue(node.value || "");
+    if (tag === "input" && ['checkbox','radio'].includes(node.type)) return node.indeterminate ? 'mixed' : node.checked ? 'checked' : 'unchecked';
     if (tag === "textarea" || tag === "input") return this.boundedValue(node.value || "");
     if (node.isContentEditable) return this.boundedValue(this.editorText(node), { editor: true });
     if (tag === "label" || this.pointerSignals(node)) return this.hiddenChoiceInput(node)?.state || "";
@@ -949,9 +958,106 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       tag: String(node.tagName || "").toLowerCase(),
       href: node.href || node.getAttribute?.("href") || "",
       value: this.valueFor(node),
+      ...this.choiceFacts(node),
       disabled: this.isDisabled(node),
       bounds: this.roundedBounds(this.viewportRect(node)),
+      ...(this.navigationFacts(node) ? { nav: this.navigationFacts(node) } : {}),
     };
+  }
+
+  choiceFacts(node) {
+    const tag = String(node.tagName || '').toLowerCase();
+    const toggle = tag === 'input' && ['checkbox','radio'].includes(node.type);
+    if ((!toggle && tag !== 'select' && !(tag === 'input' && ['date','time','number'].includes(node.type))) || this.isSensitiveControl(node)) return {};
+    const labels = [];
+    for (let p = node.parentElement; p; p = p.parentElement) {
+      if (p.matches?.('fieldset,section,form,[role=region],[role=dialog]')) labels.push(p.getAttribute('aria-label') || p.querySelector(':scope > legend,:scope > h1,:scope > h2,:scope > h3')?.textContent || '');
+    }
+    const choice = { inForm: !!node.form, sensitiveRegion: !!node.closest?.('[data-sensitive],[data-private]'), regionLabels: labels.map(s => this.compact(s, 120)),
+      immediate: ['onchange','onclick','oninput','aria-checked'].some(a => node.hasAttribute?.(a)) };
+    if (toggle) return { choice, checked: !!node.checked, choiceValue: this.boundedValue(node.value || '') };
+    if (tag !== 'select') return { choice };
+    choice.multiple = !!node.multiple;
+    choice.truncated = (node.options?.length ?? 0) > 32;
+    const options = [];
+    for (let i = 0; i < Math.min(32, node.options?.length ?? 0); i++) {
+      const o = node.options[i];
+      options.push({ label: this.compact(o.label, 100), value: String(o.value).slice(0, 120), disabled: !!o.disabled || o.parentElement?.disabled === true || o.value.length > 120 });
+    }
+    return { choice, options, selectedLabel: this.compact(node.selectedOptions?.[0]?.label || '', 100) };
+  }
+
+  // L8 c20: facts the helper's read-only-navigation proof reads for a button (the helper presses one only when they prove a same-site GET
+  // form submission or a client-side view change). Facts only, never a decision; null for anything that is not a button.
+  //   type: the button's type; sensitiveRegion: inside [data-sensitive]/[data-private]; regionLabel: the nearest region's label;
+  //   form: { method, fields: field kinds, sensitive, submitUrl: the exact URL a GET submission loads } (a form submitter only);
+  //   controls: { text } of the panel it controls (aria-controls), for a button outside any form.
+  navigationFacts(node) {
+    try {
+      const tag = String(node.tagName || "").toLowerCase();
+      const inputType = String(node.getAttribute?.("type") || "").toLowerCase();
+      const role = this.roleFor(node);
+      const isButton = tag === "button" || (tag === "input" && ["submit", "button", "image"].includes(inputType)) || role === "button" || role === "tab";
+      if (!isButton) return null;
+      const type = tag === "button" ? (inputType || "submit") : tag === "input" ? inputType : null;
+      const sensitiveRegion = Boolean(node.closest?.("[data-sensitive],[data-private]"));
+      const region = node.closest?.("fieldset,section,form,[role=region],[role=dialog],[aria-label]");
+      const regionLabel = this.compact(region ? (region.getAttribute?.("aria-label") || region.querySelector?.("legend,h1,h2,h3,h4")?.textContent || "") : "", 60);
+      const facts = { type, sensitiveRegion, regionLabel, form: null, controls: null };
+      const form = tag === "button" || tag === "input" ? node.form || null : null;
+      // Only native, unassociated buttons outside anchors/forms qualify for the named-button path.
+      if (tag === "button" && !form && node.closest && !node.closest("a,form,[data-sensitive],[data-private]") && node.hasAttribute && !node.hasAttribute("form") && !node.hasAttribute("formaction") && node.getRootNode?.() === node.ownerDocument && node.ownerDocument === this.document) {
+        // An inner label must not hide a sensitive outer section. Only offer complete, bounded ancestry.
+        const labels = [];
+        let p = node.parentElement;
+        for (let depth = 0; p && depth < 48; depth++, p = p.parentElement) {
+          if (!p.matches?.("fieldset,section,form,[role=region],[role=dialog],[aria-label],[aria-labelledby]")) continue;
+          if (p.hasAttribute("aria-labelledby")) break;
+          const label = p.getAttribute("aria-label") || p.querySelector("legend,h1,h2,h3,h4")?.textContent || "";
+          if (label.length > 100 || labels.length >= 8) break;
+          if (label) labels.push(label);
+        }
+        if (!p) { facts.standalone = true; facts.regionLabels = labels; }
+      }
+      if (form && type !== "button") {
+        const method = String(node.getAttribute?.("formmethod") || form.getAttribute?.("method") || "get").toLowerCase();
+        const fields = [], params = [];
+        let sensitive = false;
+        for (const field of Array.from(form.elements || []).slice(0, 40)) {
+          const ftag = String(field.tagName || "").toLowerCase();
+          const ftype = ftag === "input" ? String(field.getAttribute?.("type") || "text").toLowerCase() : ftag;
+          // u8 (D19): a file input with no name, or a disabled one, is never part of a submission (Google's search form carries an unnamed hidden one for image search); it is neither a field kind nor a reason to call the form sensitive. A NAMED file input still is both.
+          if (ftype === "file" && (!field.getAttribute?.("name") || field.disabled)) continue;
+          if (ftype === "password" || ftype === "file" || this.isSensitiveControl(field, { allowHidden: true }) || isSensitiveAutocomplete(field.getAttribute?.("autocomplete"))) sensitive = true;
+          fields.push(ftype);
+          const name = field.getAttribute?.("name");
+          if (!name || field.disabled || ["submit", "button", "image", "reset", "file"].includes(ftype)) continue;
+          if ((ftype === "checkbox" || ftype === "radio") && !field.checked) continue;
+          params.push([name, String(field.value ?? "")]);
+        }
+        const own = node.getAttribute?.("name");
+        if (own) params.push([own, String(node.value ?? "")]);
+        let submitUrl = null;
+        if (method === "get" && !sensitive) {
+          const doc = node.ownerDocument;
+          const url = new URL(node.getAttribute?.("formaction") || form.getAttribute?.("action") || doc?.URL || "", doc?.baseURI || doc?.URL);
+          url.search = new URLSearchParams(params).toString();
+          url.hash = "";
+          submitUrl = url.href;
+        }
+        facts.form = { method, fields, sensitive, submitUrl };
+      } else if (!form) {
+        const id = node.getAttribute?.("aria-controls");
+        const panel = id ? node.ownerDocument?.getElementById?.(id) : null;
+        if (panel && !panel.closest?.("[data-sensitive],[data-private]")) {
+          const text = this.compact(panel.querySelector?.("h1,h2,h3,h4,legend,label,p,li")?.textContent || panel.textContent || "", 60);
+          if (text) facts.controls = { text };
+        }
+      }
+      return facts;
+    } catch {
+      return null;
+    }
   }
 
   interactiveElements(doc, limit = 80, scan = this.scanRoots(doc)) {
@@ -1318,18 +1424,20 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   assertGuard(action, guard) {
     if (!guard || typeof guard !== "object") throw new Error("Guarded Browser action requires observed state");
     const current = this.observationState();
-    if (guard.documentId !== current.documentId || guard.revision !== current.revision
-        || guard.viewport?.width !== current.viewport.width || guard.viewport?.height !== current.viewport.height
-        || guard.viewport?.devicePixelRatio !== current.viewport.devicePixelRatio
-        || guard.focusedRef !== (this.focusedElement(this.document)?.ref || null)
-        || guard.url !== this.contentWindow.location.href) {
-      throw new Error("Browser observation is stale; observe the current page again");
-    }
+    // L6 a1 (D25): the same checks; the refusal names the fact that moved in one closed word, for the helper's staleBy. The viewport is named before the
+    // revision because a viewport change also moves the revision (observationState), and the cause is what the record needs.
+    const moved = guard.documentId !== current.documentId ? "document"
+      : guard.viewport?.width !== current.viewport.width || guard.viewport?.height !== current.viewport.height
+        || guard.viewport?.devicePixelRatio !== current.viewport.devicePixelRatio ? "viewport"
+      : guard.revision !== current.revision ? "revision"
+      : guard.focusedRef !== (this.focusedElement(this.document)?.ref || null) ? "focus"
+      : guard.url !== this.contentWindow.location.href ? "url" : null;
+    if (moved) throw new Error(`Browser observation is stale [${moved}]; observe the current page again`);
     // An observed Gecko document identity must still be this actor's.
     const identity = this.documentIdentity();
     for (const key of ["innerWindowId", "browsingContextId"]) {
       if (Object.hasOwn(guard, key) && guard[key] !== identity[key]) {
-        throw new Error("Browser observation is stale; the document changed");
+        throw new Error("Browser observation is stale [identity]; the document changed");
       }
     }
     if (action.type === "navigate") {
@@ -1340,16 +1448,17 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       return;
     }
     if (action.type === "scroll") return this.assertScrollGuard(action, guard);
+    // L6 a1b: each refusal of the observed element names, in one closed word, which of these same checks refused it (the helper's targetBy).
     if (!action.ref || action.selector || !guard.target || guard.target.ref !== action.ref) {
-      throw new Error("Browser action requires an observed element reference");
+      throw new Error("Browser action requires an observed element reference [reference]");
     }
     const target = this.guardTarget(action.ref);
     if (!this.isVisible(target) || this.isDisabled(target)) {
-      throw new Error("Browser target is unavailable; observe again");
+      throw new Error(`Browser target is unavailable [${this.isVisible(target) ? "disabled" : "hidden"}]; observe again`);
     }
     if (this.isSensitiveControl(target)) throw new Error("Sensitive fields require the native user path");
     if (action.type === "fill" && !this.isFillableControl(target)) {
-      throw new Error("Browser target is not an editable field; observe again");
+      throw new Error("Browser target is not an editable field [not-editable]; observe again");
     }
     if (action.type === "fill" && (typeof action.text !== "string" || action.text.length > MAX_FILL_TEXT)) {
       throw new Error("Browser fill text exceeds the bounded input; use the native user path");
@@ -1459,15 +1568,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   guardTarget(ref) {
     if (this.frameForRef(ref) === undefined) throw new Error("Browser frame is stale; observe the current page again");
     const target = this.nodeForRef(ref);
-    if (!target) throw new Error("Browser target is unavailable; observe again");
+    if (!target) throw new Error("Browser target is unavailable [gone]; observe again");
     return target;
   }
 
   assertSameTarget(target, ref, expected) {
     const live = this.isCandidate(target) ? this.elementItem(target) : null;
-    if (!live || live.ref !== ref || ["role", "label", "href", "value", "tag"].some(key => live[key] !== expected[key])) {
-      throw new Error("Browser target changed; observe again");
-    }
+    const moved = !live ? "candidate" : live.ref !== ref ? "reference" : ["role", "label", "href", "value", "tag"].find(key => live[key] !== expected[key]);
+    if (moved) throw new Error(`Browser target changed [${moved}]; observe again`);
   }
 
   // Point a click would use: the centre of the part of the element inside its
@@ -1528,7 +1636,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   assertScrollGuard(action, guard) {
     const scroll = this.scrollState();
     if (!guard.scroll || guard.scroll.x !== scroll.x || guard.scroll.y !== scroll.y) {
-      throw new Error("Browser observation is stale; the scroll position changed");
+      throw new Error("Browser observation is stale [scroll]; the scroll position changed");
     }
     if (action.selector) throw new Error("Browser action requires an observed element reference");
     const boundedDirection = ["up", "down", "top", "bottom"].includes(action.direction) && ["page", "half"].includes(action.amount);
@@ -1541,16 +1649,16 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     const container = action.direction != null;
     if ((container && !boundedDirection) || (!container && action.amount != null) ||
         !guard.target || guard.target.ref !== action.ref) {
-      throw new Error("Browser action requires an observed element reference");
+      throw new Error("Browser action requires an observed element reference [reference]");
     }
     const target = this.guardTarget(action.ref);
-    if (!this.isVisible(target)) throw new Error("Browser target is unavailable; observe again");
+    if (!this.isVisible(target)) throw new Error("Browser target is unavailable [hidden]; observe again");
     this.assertSameTarget(target, action.ref, guard.target);
     if (!container) return;
     const state = this.scrollContainerState(target);
     if (!state) throw new Error("Browser target is not a scrollable container; observe again");
     if (!guard.containerScroll || guard.containerScroll.x !== state.x || guard.containerScroll.y !== state.y) {
-      throw new Error("Browser observation is stale; the container scroll position changed");
+      throw new Error("Browser observation is stale [scroll]; the container scroll position changed");
     }
   }
 

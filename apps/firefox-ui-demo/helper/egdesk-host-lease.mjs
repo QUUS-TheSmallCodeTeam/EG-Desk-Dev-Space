@@ -61,7 +61,7 @@ const DIRECT_TOOLS = new Set([
   'invoke_menu', 'set_window_frame', 'focus_window', 'activate_app',
 ])
 const POSSIBLE_TOOLS = new Set(['launch_app', 'open_application', 'open_url', 'notify', 'run_script'])
-const OTHER_TOOLS = new Set(['capture', 'screenshot', 'list_apps', 'list_windows', 'get_app_state', 'get_window_state', 'check_permissions', 'wait', 'status'])
+const OTHER_TOOLS = new Set(['capture', 'screenshot', 'list_apps', 'list_windows', 'read_elements', 'get_app_state', 'get_window_state', 'check_permissions', 'wait', 'status'])
 const TOOL_MODES = new Map([
   ['app', new Map([['launch', 'possible'], ['activate', 'direct'], ['resize', 'direct'], ['list', 'other']])],
   ['clipboard', new Map([['get', 'other'], ['set', 'possible']])],

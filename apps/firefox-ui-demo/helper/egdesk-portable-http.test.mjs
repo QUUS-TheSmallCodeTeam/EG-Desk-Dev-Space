@@ -319,6 +319,42 @@ async function rewriteBundle(bytes, { payload, manifest } = {}) {
   ]))
 }
 
+test('portable Browser local locations never reopen a recipient filesystem, including pre-fix bundles', needsBundle, async t => {
+  const a = device(t, 'local-browser-sender'), b = device(t, 'local-browser-recipient')
+  const uri = 'file:///synthetic-private-root/local-note.md'
+  const cards = [
+    { id: 'card-local', type: 'browser', runtimeState: { uri }, sourceRef: { kind: 'browser-url', uri } },
+    { id: 'card-fallback', type: 'browser', sourceRef: { kind: 'browser-url', uri: '  FILE:///synthetic-private-root/local-note.md' } },
+    { id: 'card-web', type: 'browser', runtimeState: { uri: 'https://example.com/retained' } },
+  ]
+  const boardId = 'agenda-local-browser-001'
+  a.desk.saveBoard(boardId, { body: boardBody(boardId, 'Local source references', cards), expectedRevision: null })
+  const out = await a.api('POST', '/v1/portable/export', { scope: 'board', boardId })
+  assert.equal(out.status, 201)
+  const bytes = readFileSync(path.join(a.exportDir, out.data.fileName))
+  let rawContains = false
+  await dependencies.codec.read(bytes, async entry => {
+    const body = await collect(entry.bytes())
+    if (entry.name.startsWith('objects/')) rawContains ||= has(body, 'synthetic-private-root')
+  })
+  assert.equal(rawContains, false, 'outbound archive does not contain these local navigation fields')
+  const legacy = await rewriteBundle(bytes, { payload: value => { value.board.body.cards = cards } })
+  const bundle = legacy.toString('base64')
+  const summary = await b.api('POST', '/v1/portable/inspect', { bundle })
+  assert.equal(summary.status, 200)
+  assert.deepEqual([summary.data.scope, summary.data.boards, summary.data.cards], ['board', 1, 3])
+  nothingWritten(b)
+  const imported = await b.api('POST', '/v1/portable/import', { bundle, mode: 'asNew' })
+  assert.equal(imported.status, 201)
+  const [main, fallback, web] = b.desk.board(boardId).head.body.cards
+  assert.equal(main.runtimeState.uri, 'about:blank')
+  assert.equal(main.sourceRef.uri, 'about:blank')
+  assert.equal(fallback.runtimeState.uri, 'about:blank')
+  assert.equal(fallback.sourceRef.uri, 'about:blank')
+  assert.equal(web.runtimeState.uri, 'https://example.com/retained')
+  assert.equal(a.desk.board(boardId).head.body.cards[0].runtimeState.uri, uri)
+})
+
 test('damaged, altered, private-field and newer-version files are refused and nothing is written', needsBundle, async t => {
   const a = device(t, 'damage-a')
   seed(a)
@@ -497,7 +533,7 @@ test('the bridge mounts portable routes after Desk routes, behind the loopback g
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
   at("import { createPortableHttpHandler } from './egdesk-portable-http.mjs'")
   at('const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, chat: () => chatStore, profiles: () => profileStore, attachments: portableAttachments, fileDrafts: portableFileDrafts, appDataDir: dataDir, port: BRIDGE_PORT })')
-  at('const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState) })')
+  at('const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState),')
   at("const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })")
   const mount = at('if (await handlePortableHttp(req, res, url)) return')
   assert.ok(at('if (!guardBridgeRequest(req, BRIDGE_PORT)) {') < mount)

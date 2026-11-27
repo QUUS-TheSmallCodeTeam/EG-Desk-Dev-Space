@@ -1,0 +1,57 @@
+{
+  "set": "real-engine-topic-return-v1",
+  "description": "Pattern: a topic return (\"아까 그거 다시\"). The first file is read, the conversation moves to a second one, and then the person returns to the first by pointing at it; the answer must come from the first file and not from the second. Pattern taken from the person's real turns (masked); the folder is synthetic. Expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "topic-return",
+      "folder": {
+        "notes/quote-a.md": "# A사 견적\n단가 12,800원, 납기 12월 20일, 승인자 팀장.\n",
+        "notes/ship-b.md": "# B사 출하\n출하일 1월 15일, 수량 500개, 담당 물류팀.\n"
+      },
+      "turns": [
+        {
+          "say": "notes/quote-a.md 를 읽고 한 줄로 요약해 줘.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "answerIncludes": [
+              "12월 20일"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그건 됐고, notes/ship-b.md 에는 뭐가 있어?",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "answerIncludes": [
+              "1월 15일"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "아까 그거 다시. 첫 번째 파일에서 납기가 언제라고 했지?",
+          "expect": {
+            "answerIncludes": [
+              "12월 20일"
+            ],
+            "answerExcludes": [
+              "1월 15일"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

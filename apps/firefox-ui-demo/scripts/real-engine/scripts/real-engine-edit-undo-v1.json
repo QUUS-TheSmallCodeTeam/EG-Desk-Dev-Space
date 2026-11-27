@@ -1,0 +1,43 @@
+{
+  "set": "real-engine-edit-undo-v1",
+  "description": "Starter (c): a small edit with a preview first (dryRun) and then applied, an undo record exists, and the undo restores the file. Only a model that previews first passes the toolCalls check; that is a finding, not a harness fault.",
+  "conversations": [
+    {
+      "id": "edit-undo",
+      "folder": {
+        "app.js": "const greeting = 'hello'\nmodule.exports = { greeting }\n"
+      },
+      "turns": [
+        {
+          "say": "In app.js change the word hello to hi. Show me a preview of the edit first (dryRun), then apply it.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_edit_file",
+              "egdesk_edit_file"
+            ],
+            "files": {
+              "app.js": "const greeting = 'hi'\nmodule.exports = { greeting }\n"
+            },
+            "undoRecords": 1,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "Undo that edit.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_undo_edit"
+            ],
+            "files": {
+              "app.js": "const greeting = 'hello'\nmodule.exports = { greeting }\n"
+            },
+            "noNativeTools": true,
+            "posted": true
+          }
+        }
+      ]
+    }
+  ]
+}

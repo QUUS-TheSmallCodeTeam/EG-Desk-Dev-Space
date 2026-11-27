@@ -1,0 +1,28 @@
+{
+  "set": "real-engine-read-file-v1",
+  "description": "Starter (a): the model reads one file through EG-Desk's read tool and answers from it. No native tools, one posted answer.",
+  "conversations": [
+    {
+      "id": "read-file",
+      "folder": {
+        "notes.txt": "first line: ordering cutoff is 3pm\nsecond line: ship on Friday\nthird line: invoices go to finance\n"
+      },
+      "turns": [
+        {
+          "say": "Read notes.txt in this folder and tell me what its first line says.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "posted": true,
+            "answerIncludes": [
+              "3pm"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

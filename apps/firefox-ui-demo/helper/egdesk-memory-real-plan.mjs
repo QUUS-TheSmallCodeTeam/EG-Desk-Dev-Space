@@ -1,0 +1,333 @@
+import { createHash } from 'node:crypto'
+import { buildWiki, ternary } from './egdesk-wiki-reconstruction.mjs'
+import { SYNTHETIC_PAGES, choiceAnswer, mockSpeechAnswer } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { judgeTurnWrite, mergeSpeechLabels, prepareTurnMemory, recordFromLabels, triageSkipsFetch } from './egdesk-turn-memory.mjs'
+import { SPEECH_THRESHOLDS, speechDesignInterpretations, speechSegments } from './egdesk-speech-grounding.mjs'
+import { readChoice } from './egdesk-decision-questions.mjs'
+
+// END-TO-END real-measurement plan for the whole turn-memory loop (triage -> first-turn reconstruction or mid-session fetch -> write judgment)
+// on the public synthetic wiki, three scenarios x first/mid position = 6 runs.
+//
+// Why "teacher forcing": the loop is adaptive (round 2 is built from the answers of round 1), so a request body cannot be fixed offline
+// unless the earlier answers are fixed. The PRODUCT CODE therefore builds every request while a scripted client answers with the
+// PRE-REGISTERED expectations; each recorded request is then sent as is and scored against the expectation for that stage only. Every stage is
+// measured on identical input and a wrong early answer cannot hide or distort a later stage. What this does NOT measure: error propagation in a
+// live loop (a wrong scan answer changing the next request). A live pass can follow if this one passes.
+//
+// Thresholds are the product's own: predicate yes >= 0.8, no <= 0.2; choice accepted at confidence 0.75 and margin 0.2.
+
+export const ASKED_AT = Date.parse('2026-11-24T14:30:00+09:00')
+export const SCOPE = Object.freeze({ allowedScopes: ['dm:this-room'], writeScope: 'dm:this-room' })
+const NOT = (prefixes, ids = []) => ({ prefixes, ids })
+const OFF_TOPIC_PG = NOT(['quote/', 'jev/', 'misc/'], ['db/redis'])
+const OFF_TOPIC_A = NOT(['db/', 'jev/', 'misc/'], ['quote/b-request', 'quote/b-v1', 'quote/c-contract', 'quote/parts'])
+const OFF_TOPIC_J = NOT(['quote/', 'db/', 'misc/'])
+
+// forced: what the scripted client answers yes to (so the product builds the next request). must/mustNot/soft: what is scored.
+export const RUNS = Object.freeze([
+  { id: 'pg-first', message: 'PostgreSQL 마이그레이션 배포 끝났어', position: 'first', held: [],
+    triage: { courtesy: 'no', need: 'yes', recall: 'no', record: 'yes' }, scan: ['db/pg-plan', 'db/pg-design', 'db/pg-health'], open: ['db/sqlite-schema', 'db/pg-followup', 'db/pg-rollback'],
+    status: { 'db/pg-plan': 'plan', 'db/pg-design': 'done' }, write: { target: 'db/pg-plan', status: 'done', form: 'assertion', time: 'past_unspecified' },
+    hard: { triage: { courtesy: 'no', record: 'yes' }, mustPick: ['db/pg-plan'], mustNot: OFF_TOPIC_PG, status: { 'db/pg-plan': 'plan', 'db/pg-design': 'done' }, write: { target: 'db/pg-plan', status: 'done' } },
+    soft: { open: ['db/sqlite-schema', 'db/pg-followup'], labels: { form: 'assertion' } } },
+  { id: 'pg-mid', message: 'PostgreSQL 마이그레이션 배포 끝났어', position: 'mid', held: ['db/pg-design', 'db/pg-plan', 'db/pg-rollback', 'db/sqlite-schema'],
+    triage: { courtesy: 'no', need: 'yes', recall: 'no', record: 'yes' }, scan: ['db/pg-health', 'db/pg-followup'], open: [], status: { 'db/pg-health': 'done', 'db/pg-followup': 'plan' },
+    write: { target: 'db/pg-plan', status: 'done', form: 'assertion', time: 'past_unspecified' },
+    hard: { triage: { courtesy: 'no', needNotNo: true, record: 'yes' }, mustPick: ['db/pg-health', 'db/pg-followup'], mustNot: NOT([], ['db/pg-bench']), heldNeverScanned: true, write: { target: 'db/pg-plan', status: 'done' } },
+    soft: { triageNeed: 'yes', labels: { form: 'assertion' } } },
+  { id: 'a-first', message: '지난주 A사 견적 건 어디까지 됐지?', position: 'first', held: [],
+    triage: { courtesy: 'no', need: 'yes', recall: 'any', record: 'no' }, scan: ['quote/a-request', 'quote/a-v1', 'quote/a-v2-plan'], open: ['quote/a-meeting', 'quote/a-decision'],
+    status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other', 'quote/a-v1': 'done' }, write: null,
+    hard: { triage: { courtesy: 'no', record: 'no' }, mustPick: ['quote/a-v1', 'quote/a-v2-plan'], mustNot: OFF_TOPIC_A, status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other' }, noPrivate: 'quote/a-cost' },
+    soft: { open: ['quote/a-meeting', 'quote/a-decision'] } },
+  { id: 'a-mid', message: '지난주 A사 견적 건 어디까지 됐지?', position: 'mid', held: ['quote/a-request', 'quote/a-v1'],
+    triage: { courtesy: 'no', need: 'yes', recall: 'any', record: 'no' }, scan: ['quote/a-v2-plan', 'quote/a-decision', 'quote/a-meeting'], open: [], status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other' }, write: null,
+    hard: { triage: { courtesy: 'no', needNotNo: true, record: 'no' }, mustPick: ['quote/a-v2-plan'], mustNot: NOT([]), heldNeverScanned: true, status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other' }, noPrivate: 'quote/a-cost' },
+    soft: { triageNeed: 'yes', pick: ['quote/a-decision', 'quote/a-meeting'] } },
+  { id: 'j-first', message: '아까 jev hook 흐름 다시 정리해줘', position: 'first', held: [],
+    triage: { courtesy: 'no', need: 'yes', recall: 'yes', record: 'no' }, scan: ['jev/flow-note', 'jev/utt-user', 'jev/draft'], open: ['jev/utt-agent'], status: { 'jev/draft': 'plan' }, write: null,
+    hard: { triage: { courtesy: 'no', record: 'no' }, mustPick: ['jev/flow-note'], mustNot: OFF_TOPIC_J, status: { 'jev/draft': 'plan' } }, soft: { open: ['jev/utt-agent'], pick: ['jev/utt-user', 'jev/draft'] } },
+  { id: 'j-mid', message: '아까 jev hook 흐름 다시 정리해줘', position: 'mid', held: ['jev/draft', 'jev/utt-user'],
+    triage: { courtesy: 'no', need: 'yes', recall: 'yes', record: 'no' }, scan: ['jev/flow-note', 'jev/utt-agent'], open: [], status: {}, write: null,
+    hard: { triage: { courtesy: 'no', needNotNo: true, record: 'no' }, mustPick: ['jev/flow-note'], mustNot: NOT([]), heldNeverScanned: true }, soft: { triageNeed: 'yes', pick: ['jev/utt-agent'] } },
+])
+
+// Controls for the re-measurement: a mid-session turn whose answer IS covered by what is held (the fetch may legitimately be skipped).
+export const CONTROLS = Object.freeze([
+  { id: 't6-covered', message: '그럼 롤백 조건은?', position: 'mid', held: ['db/pg-plan', 'db/pg-health', 'db/pg-followup', 'db/pg-rollback'],
+    triage: { courtesy: 'no', need: 'no', recall: 'no', record: 'no' }, scan: [], open: [], status: {}, write: null,
+    hard: { triage: { courtesy: 'no', record: 'no' }, mustPick: [] }, soft: { triageNeed: 'no', triageRecall: 'no' } },
+])
+// The small re-measurement after the first end-to-end run: only the failing stages plus controls.
+export const REMEASURE = Object.freeze(['pg-mid-1-triage', 'pg-mid-2-scan', 'a-first-2-scan', 'j-mid-1-triage', 'j-mid-2-scan', 't6-covered-1-triage']) // in run order
+// The two-request check of the first-turn scan wording (after the live run of 2026-11-24 put jev/flow-note into the PostgreSQL packet).
+export const FIRST_SCAN = Object.freeze(['pg-first-2-scan', 'j-first-2-scan'])
+/** Pre-registered, per page id. yes: must be decided yes (>= 0.8). no: must be decided no (<= 0.2). wanted: soft. Every other page: not a decided yes. */
+export const FIRST_SCAN_EXPECT = Object.freeze({
+  'pg-first-2-scan': { yes: ['db/pg-plan'], no: ['jev/flow-note'], wanted: ['db/pg-health', 'db/pg-followup'], topic: 'db/' },
+  'j-first-2-scan': { yes: ['jev/flow-note'], no: [], wanted: [], topic: 'jev/' },
+})
+const SUBSETS = { remeasure: () => REMEASURE, 'first-scan': () => FIRST_SCAN }
+
+const sha = text => createHash('sha256').update(text).digest('hex')
+export const estimateTokens = (choiceQ, predQ, bytes) => Math.round(56.5 * choiceQ + 134.8 * predQ + 0.1983 * bytes) // typed model solved from the three real requests of 2026-11-24
+const blocks = (content, header) => {
+  if (typeof content !== 'string' || !content.startsWith(header)) return []
+  return content.slice(header.length).split(/\n\n(?=P\d+ \|)/).map(b => /^(P\d+) \| ([^\n]*)/.exec(b)).filter(Boolean).map(m => ({ alias: m[1], title: m[2].split(' | ').at(-1) }))
+}
+
+/** A client that answers with the run's pre-registered expectations and records every request the product code builds. */
+function scriptedClient(run, wiki, recorded) {
+  const idOfTitle = new Map([...wiki.pages.values()].map(p => [p.title, p.id]))
+  const yesNo = (v) => ({ type: 'predicate', probability: v ? 0.97 : 0.02 })
+  return { async decide(request) {
+    const texts = request.input.map(m => (typeof m.content === 'string' ? m.content : ''))
+    const find = header => texts.find(t => t.startsWith(header))
+    const map = header => Object.fromEntries(blocks(find(header), header).map(b => [b.alias, idOfTitle.get(b.title) ?? null]))
+    const aliases = { ...map('Pages:\n'), ...map('Picked pages:\n'), ...map('Linked pages you may open:\n'), ...map('Candidate pages:\n') }
+    const answers = {}
+    for (const q of request.questions) {
+      if (q.name === 'tn_courtesy') answers[q.name] = yesNo(run.triage.courtesy === 'yes')
+      else if (q.name === 'tn_need') answers[q.name] = yesNo(run.triage.need === 'yes')
+      else if (q.name === 'tn_recall') answers[q.name] = yesNo(run.triage.recall === 'yes')
+      else if (q.name === 'tn_record') answers[q.name] = yesNo(run.triage.record === 'yes')
+      else if (/^pg_\d+$/.test(q.name)) answers[q.name] = yesNo(run.scan.includes(aliases[`P${Number(q.name.slice(3)) + 1}`]))
+      else if (/^op_P\d+$/.test(q.name)) answers[q.name] = yesNo(run.open.includes(aliases[q.name.slice(3)]))
+      else if (/^st_P\d+$/.test(q.name)) answers[q.name] = choiceAnswer(q, run.status[aliases[q.name.slice(3)]] ?? 'unknown', 0.95)
+      else if (q.name === 'tw_target') answers[q.name] = choiceAnswer(q, Object.entries(aliases).find(([, id]) => id === run.write?.target)?.[0] ?? 'none', 0.95)
+      else if (q.name === 'tw_status') answers[q.name] = choiceAnswer(q, run.write?.status ?? 'unknown', 0.95)
+      else if (/^tw_link_\d+$/.test(q.name)) answers[q.name] = yesNo(false)
+      else if (/^speech_/.test(q.name)) answers[q.name] = mockSpeechAnswer(q)
+    }
+    recorded.push({ questions: request.questions, input: request.input, aliases, scripted: answers })
+    return { answers, usage: { inputTokens: 0 }, model: 'scripted', latencyMs: 0 }
+  } }
+}
+
+const receiptsFor = (wiki, ids, threadKey) => ({ usable: true, threadKey, pages: Object.fromEntries(ids.map(id => [id, { revision: wiki.pages.get(id).revision, hash: wiki.pages.get(id).contentKey ?? sha(wiki.pages.get(id).body) }])) })
+
+/** Build the six runs offline: every request body, its sha256, size and expected tokens. Nothing is sent. */
+export async function buildPlan({ pages = SYNTHETIC_PAGES, askedAt = ASKED_AT, subset = null } = {}) {
+  const wiki = buildWiki(pages)
+  const runs = []
+  const only = subset ? SUBSETS[subset]?.() ?? null : null
+  if (subset && !only) throw new Error(`unknown request set: ${subset}`)
+  for (const run of subset === 'remeasure' ? [...RUNS, ...CONTROLS] : RUNS) {
+    const recorded = []
+    const client = scriptedClient(run, wiki, recorded)
+    const position = run.position === 'mid' ? { kind: 'mid', reason: 'live_thread' } : { kind: 'first', reason: 'no_native_thread' }
+    const memory = await prepareTurnMemory({ message: run.message, wiki, client, scope: SCOPE, askedAt, position, threadKey: 'thread-1', ontologyWrite: true,
+      budget: run.position === 'mid' ? { linksFirst: true } : {}, delivered: run.held.length ? receiptsFor(wiki, run.held, 'thread-1') : null,
+      // These runs are the record of what was measured on 2026-11-24 (the 'choice' write target); they keep that design so the saved real
+      // answers still score against the same requests. The 'about' design has its own plan (egdesk-write-target-plan.mjs).
+      writeTarget: 'choice' })
+    if (memory.judgeWrite) await memory.judgeWrite()
+    const requests = recorded.map((r, index) => {
+      const names = r.questions.map(q => q.name)
+      const stage = names.includes('tn_courtesy') ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : names.some(n => /^pg_/.test(n)) ? 'scan' : 'expand'
+      const body = { model: 'gpt-6-luna', input: r.input, questions: r.questions }
+      const text = JSON.stringify(body)
+      const choice = r.questions.filter(q => q.type === 'choice').length, predicate = r.questions.length - choice
+      return { name: `${run.id}-${index + 1}-${stage}`, stage, body, bytes: Buffer.byteLength(text), sha256: sha(text), questions: names.length, choice, predicate, estInputTokens: estimateTokens(choice, predicate, Buffer.byteLength(text)), aliases: r.aliases, scripted: r.scripted }
+    })
+    const kept = only ? requests.filter(r => only.includes(r.name)) : requests
+    if (kept.length) runs.push({ id: run.id, message: run.message, position: run.position, held: run.held, requests: kept, estInputTokens: kept.reduce((n, r) => n + r.estInputTokens, 0) })
+  }
+  const totals = { runs: runs.length, requests: runs.reduce((n, r) => n + r.requests.length, 0), estInputTokens: runs.reduce((n, r) => n + r.estInputTokens, 0), bytes: runs.reduce((n, r) => n + r.requests.reduce((m, q) => m + q.bytes, 0), 0) }
+  return { wiki, runs, totals }
+}
+
+// ---- scoring: per stage, against the pre-registered expectation of that run ----
+const state = answer => ternary(answer)
+function answerMap(list) {
+  const out = {}
+  for (const a of Array.isArray(list) ? list : []) {
+    if (!a || typeof a.name !== 'string') continue
+    out[a.name] = a.type === 'choice' ? { ...a, probabilities: [...(a.probabilities ?? [])].sort((x, y) => y.probability - x.probability) } : a
+  }
+  return out
+}
+
+/** score(runDef, planRun, resultsByRequestName) -> { id, pass, hardFailures, checks }. results: { [name]: { status, answers: [...] } } */
+export function scoreRun(def, planRun, results, wiki) {
+  const checks = []
+  const add = (severity, name, ok, detail = null) => checks.push({ severity, name, ok, ...(detail === null ? {} : { detail }) })
+  const answersOf = request => answerMap(results[request.name]?.answers)
+  for (const request of planRun.requests) {
+    const r = results[request.name]
+    if (!r || r.status !== 200) { add('hard', `${request.name}: HTTP 200 with typed answers`, false, r?.status ?? 'not sent'); continue }
+    const a = answersOf(request)
+    const complete = request.body.questions.every(q => a[q.name]?.type === q.type)
+    add('hard', `${request.name}: every question answered with its own type`, complete)
+    if (request.stage === 'triage') {
+      const c = state(a.tn_courtesy), n = state(a.tn_need), rec = state(a.tn_record)
+      add('hard', 'triage courtesy is decided and as pre-registered', c.state === def.hard.triage.courtesy, `p=${c.p}`)
+      add('hard', 'triage record is decided and as pre-registered', rec.state === def.hard.triage.record, `p=${rec.p}`)
+      const catalogComplete = JSON.stringify(request.body.input).includes('Stored pages that are not held (titles only):') && !JSON.stringify(request.body.input).includes('more stored pages are not listed')
+      // the c11 rule: these runs were measured and scored under it
+      const skips = triageSkipsFetch({ courtesy: c, need: n, recall: state(a.tn_recall), catalog: { complete: catalogComplete } }, { legacyRecall: true })
+      if (def.hard.triage.needNotNo) add('hard', 'triage does not skip the fetch (the rule applied to the answers; a wrong skip loses material)', !skips, `need=${n.p} recall=${state(a.tn_recall).p} skip=${skips}`)
+      if (def.hard.triage.needNotNo) add('soft', 'triage need is not a decided "no"', n.state !== 'no', `p=${n.p}`)
+      if (def.soft.triageNeed) add('soft', 'triage need is a decided yes', n.state === def.soft.triageNeed, `p=${n.p}`)
+      if (a.tn_recall && def.triage.recall && def.triage.recall !== 'any') add('soft', `triage recall is a decided ${def.triage.recall}`, state(a.tn_recall).state === def.triage.recall, `p=${state(a.tn_recall).p}`)
+      if (def.soft.triageNeed === 'no') add('soft', 'triage need is a decided no (the held pages cover it)', n.state === 'no', `p=${n.p}`)
+    }
+    if (request.stage === 'scan') {
+      const pickedIds = []
+      for (const [alias, id] of Object.entries(request.aliases)) {
+        const v = state(a[`pg_${Number(alias.slice(1)) - 1}`])
+        if (id && v.state === 'yes') pickedIds.push(id)
+        if (id && def.hard.mustPick?.includes(id)) add('hard', `scan picks ${id}`, v.state === 'yes', `p=${v.p}`)
+        const off = def.hard.mustNot
+        if (id && off && (off.ids?.includes(id) || off.prefixes?.some(pre => id.startsWith(pre)))) add('hard', `scan does not pick ${id}`, v.state !== 'yes', `p=${v.p}`)
+        if (id && def.soft.pick?.includes(id)) add('soft', `scan picks ${id}`, v.state === 'yes', `p=${v.p}`)
+      }
+      if (def.hard.heldNeverScanned) add('hard', 'held pages are not among the scanned options', !Object.values(request.aliases).some(id => def.held.includes(id)))
+      if (def.hard.noPrivate) add('hard', 'the private-scope page was never offered', !Object.values(request.aliases).includes(def.hard.noPrivate))
+    }
+    if (request.stage === 'expand') {
+      for (const [alias, id] of Object.entries(request.aliases)) {
+        if (a[`st_${alias}`] && def.hard.status?.[id]) {
+          const read = readChoice({ x: a[`st_${alias}`] }, 'x', { minConfidence: 0.75, minMargin: 0.2 })
+          add('hard', `status of ${id} reads as ${def.hard.status[id]}`, read.state === 'accepted' && read.value === def.hard.status[id], `read=${read.value}/${read.state}`)
+        }
+        if (a[`op_${alias}`] && def.soft.open?.includes(id)) add('soft', `link to ${id} is opened`, state(a[`op_${alias}`]).state === 'yes', `p=${state(a[`op_${alias}`]).p}`)
+        if (a[`op_${alias}`] && def.soft.pick?.includes(id)) add('soft', `link to ${id} is opened`, state(a[`op_${alias}`]).state === 'yes', `p=${state(a[`op_${alias}`]).p}`)
+      }
+    }
+    if (request.stage === 'write' && def.write) {
+      const target = readChoice({ x: a.tw_target }, 'x', { minConfidence: 0.75, minMargin: 0.2 })
+      const expectedAlias = Object.entries(request.aliases).find(([, id]) => id === def.hard.write.target)?.[0]
+      add('hard', `write target is ${def.hard.write.target}`, target.state === 'accepted' && target.value === expectedAlias, `read=${target.value}/${target.state}`)
+      const status = readChoice({ x: a.tw_status }, 'x', { minConfidence: 0.75, minMargin: 0.2 })
+      add('hard', `write status is ${def.hard.write.status}`, status.state === 'accepted' && status.value === def.hard.write.status, `read=${status.value}/${status.state}`)
+      // Installed speech labels must not be wrong (an uninstalled label is not a failure)
+      for (const axis of ['form']) {
+        const want = def.soft.labels?.[axis]
+        const read = readChoice({ x: a[`speech_${axis}_0`] }, 'x', { minConfidence: 0.85, minMargin: 0.2 })
+        if (want) add('soft', `isolated ${axis} label, when installed, is ${want}`, read.state !== 'accepted' || read.value === want, `read=${read.value}/${read.state}`)
+      }
+    }
+  }
+  // Pre-registered shape of the run: no write request when the turn is not worth recording.
+  if (!def.write) add('hard', 'no write judgment request is made when triage says "not worth recording"', !planRun.requests.some(r => r.stage === 'write'))
+  const hard = checks.filter(c => c.severity === 'hard')
+  const hardFailures = hard.filter(c => !c.ok)
+  return { id: def.id, pass: hardFailures.length === 0, hardFailures: hardFailures.map(c => c.name), hardTotal: hard.length, softMisses: checks.filter(c => c.severity === 'soft' && !c.ok).map(c => c.name), checks }
+}
+
+/** Whole measurement: passes when at least 5 of 6 runs have no hard failure AND every triage hard check holds in all six. */
+export function scorePlan(plan, results) {
+  const scored = RUNS.map(def => scoreRun(def, plan.runs.find(r => r.id === def.id), results, plan.wiki))
+  const triageFailures = scored.flatMap(s => s.checks.filter(c => c.severity === 'hard' && !c.ok && /^triage/.test(c.name)))
+  return { runsPassed: scored.filter(s => s.pass).length, pass: scored.filter(s => s.pass).length >= 5 && triageFailures.length === 0, triageFailures: triageFailures.map(c => c.name), scored }
+}
+
+/** The re-measurement passes when no included request has a hard failure (the controls included). */
+export function scoreRemeasure(plan, results) {
+  const defs = [...RUNS, ...CONTROLS]
+  const scored = plan.runs.map(run => scoreRun(defs.find(d => d.id === run.id), run, results, plan.wiki))
+  return { pass: scored.every(s => s.pass), runsPassed: scored.filter(s => s.pass).length, scored }
+}
+
+/**
+ * The first-turn scan check: each request is read against FIRST_SCAN_EXPECT by page id.
+ * pass: no hard failure. An undecided answer (between the bars) on a page that must be "no" is NOT a pass and not a wrong pick either: it is
+ * reported as inconclusive, because the product then asks again in the link round, which these two requests do not include.
+ */
+export function scoreFirstScan(plan, results) {
+  const scored = plan.runs.flatMap(run => run.requests.map(request => {
+    const expect = FIRST_SCAN_EXPECT[request.name], checks = []
+    const add = (severity, name, ok, detail = null) => checks.push({ severity, name, ok, ...(detail === null ? {} : { detail }) })
+    const r = results[request.name]
+    if (!expect) { add('hard', `${request.name}: has a pre-registered expectation`, false); return { id: request.name, checks } }
+    if (!r || r.status !== 200) { add('hard', `${request.name}: HTTP 200 with typed answers`, false, r?.status ?? 'not sent'); return { id: request.name, checks } }
+    const a = answerMap(r.answers)
+    add('hard', `${request.name}: every question answered with its own type`, request.body.questions.every(q => a[q.name]?.type === q.type))
+    const byId = new Map()
+    for (const q of request.body.questions) { const id = request.aliases[`P${Number(q.name.slice(3)) + 1}`]; if (id) byId.set(id, state(a[q.name])) }
+    for (const id of expect.yes) add('hard', `${id} is picked`, byId.get(id)?.state === 'yes', `p=${byId.get(id)?.p ?? null}`)
+    for (const id of expect.no) {
+      const v = byId.get(id)
+      add('hard', `${id} is decided not needed`, v?.state === 'no', `p=${v?.p ?? null}${v?.state === 'unknown' ? ' (undecided: the link round would ask again; inconclusive here)' : ''}`)
+    }
+    const stray = [...byId].filter(([id, v]) => !id.startsWith(expect.topic) && v.state === 'yes').map(([id, v]) => `${id}=${v.p}`)
+    add('hard', 'no page of another matter is picked', stray.length === 0, stray.join(', ') || null)
+    for (const id of expect.wanted) add('soft', `${id} is picked`, byId.get(id)?.state === 'yes', `p=${byId.get(id)?.p ?? null}`)
+    const undecided = [...byId].filter(([, v]) => v.state === 'unknown' && v.p !== null).map(([id, v]) => `${id}=${v.p}`)
+    add('soft', 'no page is left undecided', undecided.length === 0, undecided.join(', ') || null)
+    return { id: request.name, checks }
+  })).map(s => ({ ...s, hardFailures: s.checks.filter(c => c.severity === 'hard' && !c.ok).map(c => c.name), softMisses: s.checks.filter(c => c.severity === 'soft' && !c.ok).map(c => c.name) }))
+    .map(s => ({ ...s, pass: s.hardFailures.length === 0 }))
+  return { pass: scored.every(s => s.pass), runsPassed: scored.filter(s => s.pass).length, scored }
+}
+
+// ---- labelling an utterance once, at page creation: three public synthetic utterances, labels registered before any call ----
+// The request is the product's own page-creation request (the write judgment: where to record, the state it reports, and the three
+// isolated axes of each sentence). No candidate pages: each utterance is a new fact, so the only question besides the labels is "new or not".
+export const UTTERANCE_LABELS = Object.freeze([
+  { id: 'u1-relayed-past', message: '거래처 D사가 어제 단가를 올렸다고 들었어.',
+    labels: { source: 'attributed_report', form: 'assertion', time: 'past_anchored' }, page: { slice: 'past', kind: 'reported_by_other', status: 'done' } },
+  { id: 'u2-own-plan', message: '다음 주 화요일에 은모래 창고 재고를 다시 셀 예정이야.',
+    labels: { source: 'unspecified', form: 'plan', time: 'future_anchored' }, page: { slice: 'planned', kind: 'utterance', status: 'plan' } },
+  { id: 'u3-own-observation', message: '내가 달그림 상자 수량을 직접 세어 봤는데 42개였어.',
+    labels: { source: 'self_reported_observation', form: 'assertion', time: 'past_unspecified' }, page: { slice: 'past', kind: 'utterance', status: 'done' } },
+])
+const AXES = ['source', 'form', 'time']
+
+/** The three requests, built by judgeTurnWrite itself with a recording client. Nothing is sent. */
+export async function buildUtterancePlan({ askedAt = ASKED_AT } = {}) {
+  const runs = []
+  for (const def of UTTERANCE_LABELS) {
+    let recorded = null
+    await judgeTurnWrite({ message: def.message, candidates: [], askedAt, client: { async decide(request) { recorded = request; return { answers: {} } } } })
+    const body = { model: 'gpt-6-luna', input: recorded.input, questions: recorded.questions }, text = JSON.stringify(body)
+    const choice = recorded.questions.filter(q => q.type === 'choice').length, predicate = recorded.questions.length - choice
+    const request = { name: `${def.id}-write`, stage: 'write', body, bytes: Buffer.byteLength(text), sha256: sha(text), questions: recorded.questions.length, choice, predicate, estInputTokens: estimateTokens(choice, predicate, Buffer.byteLength(text)) }
+    runs.push({ id: def.id, message: def.message, position: 'page-creation', held: [], requests: [request], estInputTokens: request.estInputTokens })
+  }
+  return { runs, totals: { runs: runs.length, requests: runs.length, estInputTokens: runs.reduce((n, r) => n + r.estInputTokens, 0), bytes: runs.reduce((n, r) => n + r.requests[0].bytes, 0) } }
+}
+
+/**
+ * Registered before the call, with the bars the product uses (speech labels: confidence >= 0.85 and margin >= 0.20; not changed here):
+ *   hard  a label that was INSTALLED must be the registered one (a wrong installed label is the only way a stored label can mislead);
+ *         every request answers every question with its own type.
+ *   soft  how many of the nine axes were installed (a label that is not installed is "unknown", which stores nothing: allowed);
+ *         the utterance would become a page (target "new" accepted, time slice known) with the registered slice, provenance kind and status.
+ * pass: no hard failure AND at least 6 of 9 axes installed (the earlier isolated run installed 3 of 6, none wrong; one sentence per request
+ * is the easier case, so less than two thirds would mean the page-creation labelling is not doing its job).
+ */
+export function scoreUtteranceLabels(plan, results) {
+  let installedTotal = 0
+  const scored = plan.runs.map(run => {
+    const def = UTTERANCE_LABELS.find(d => d.id === run.id), request = run.requests[0], checks = []
+    const add = (severity, name, ok, detail = null) => checks.push({ severity, name, ok, ...(detail === null ? {} : { detail }) })
+    const r = results[request.name]
+    if (!r || r.status !== 200) { add('hard', `${request.name}: HTTP 200 with typed answers`, false, r?.status ?? 'not sent'); return { id: run.id, checks, installed: 0 } }
+    const a = answerMap(r.answers)
+    add('hard', `${request.name}: every question answered with its own type`, request.body.questions.every(q => a[q.name]?.type === q.type))
+    const spans = speechSegments(def.message)
+    add('hard', 'the utterance is one sentence', spans.length === 1, `sentences=${spans.length}`)
+    const got = speechDesignInterpretations('axes-isolated', a, spans)[0] ?? { source: 'unknown', form: 'unknown', time: 'unknown' }
+    let installed = 0
+    for (const axis of AXES) {
+      const answer = a[`speech_${axis}_0`], top = answer?.probabilities?.[0], second = answer?.probabilities?.[1]
+      const detail = `installed=${got[axis]} registered=${def.labels[axis]} top=${top?.value ?? null}:${top?.probability ?? null} second=${second?.value ?? null}:${second?.probability ?? null}`
+      if (got[axis] !== 'unknown') installed++
+      add('hard', `${axis}: an installed label is the registered one`, got[axis] === 'unknown' || got[axis] === def.labels[axis], detail)
+      add('soft', `${axis}: installed`, got[axis] !== 'unknown', detail)
+    }
+    installedTotal += installed
+    const target = readChoice(a, 'tw_target', { minConfidence: 0.75, minMargin: 0.2 })
+    add('soft', 'recorded as a new page', target.state === 'accepted' && target.value === 'new', `state=${target.state} value=${target.value ?? null} confidence=${target.confidence ?? null}`)
+    const rec = recordFromLabels(mergeSpeechLabels([got]).labels)
+    const said = readChoice(a, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
+    const status = said.state === 'accepted' && (said.value === 'done' || said.value === 'plan') ? said.value : rec.status
+    add('soft', 'page attributes as registered', rec.slice === def.page.slice && rec.provenance.kind === def.page.kind && status === def.page.status, `slice=${rec.slice} kind=${rec.provenance.kind} status=${status}`)
+    return { id: run.id, checks, installed }
+  }).map(s => ({ ...s, hardFailures: s.checks.filter(c => c.severity === 'hard' && !c.ok).map(c => c.name), softMisses: s.checks.filter(c => c.severity === 'soft' && !c.ok).map(c => c.name) }))
+    .map(s => ({ ...s, pass: s.hardFailures.length === 0 }))
+  const axes = UTTERANCE_LABELS.length * AXES.length
+  return { pass: scored.every(s => s.pass) && installedTotal >= 6, runsPassed: scored.filter(s => s.pass).length, installed: installedTotal, axes, bars: { ...SPEECH_THRESHOLDS }, scored }
+}

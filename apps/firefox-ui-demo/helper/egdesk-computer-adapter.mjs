@@ -15,8 +15,9 @@ import { HOST_LEASE_CODES, HostLeaseBlocked, hostLaneKey } from './egdesk-host-l
 // takes the host lease (egdesk-host-lease.mjs) for every action, checks the
 // delivery ceiling and the frame revision right before sending, and returns a
 // closed result. It never retries.
-export const COMPUTER_METHODS = Object.freeze(['capture', 'listApps', 'listWindows', 'click', 'typeText', 'key', 'scroll', 'drag'])
-export const COMPUTER_READ_METHODS = Object.freeze(['capture', 'listApps', 'listWindows'])
+// readElements (B1): the window's accessibility elements (role, label, value, rect), read-only.
+export const COMPUTER_METHODS = Object.freeze(['capture', 'listApps', 'listWindows', 'click', 'typeText', 'key', 'scroll', 'drag', 'readElements'])
+export const COMPUTER_READ_METHODS = Object.freeze(['capture', 'listApps', 'listWindows', 'readElements'])
 export const COMPUTER_ACTION_METHODS = Object.freeze(['click', 'typeText', 'key', 'scroll', 'drag'])
 export const ACTION_EFFECTS = Object.freeze(['confirmed', 'partial', 'unverifiable', 'suspected_noop', 'refused'])
 export const ACTION_ROUTES = Object.freeze(['accessibility', 'synthetic_events', 'global_input'])
@@ -133,6 +134,9 @@ export function validateComputerArgs(method, args = {}) {
       const target = targetOf(value.target, false)
       return target ? { target } : {}
     }
+    case 'readElements':
+      only(value, ['target'])
+      return { target: targetOf(value.target) }
     case 'capture':
       only(value, ['target', 'maxEdge'])
       if (value.maxEdge !== undefined && !count(value.maxEdge, 256, 4096)) throw new ArgumentError('maxEdge')
@@ -267,6 +271,38 @@ function normalizeWindows(raw) {
   })).filter(window => window.windowId !== null).slice(0, LIST_MAX)
 }
 
+const ELEMENTS_MAX = 400
+// What the model reads of an accessibility read: closed fields, bounded text. A sensitive element carries no value (the helper never reads it).
+function normalizeElements(raw) {
+  const source = plainObject(raw) ? raw : {}
+  const elements = (Array.isArray(source.elements) ? source.elements : []).filter(plainObject).slice(0, ELEMENTS_MAX).map(element => {
+    const out = { index: optionalText(element.index, 24), role: optionalText(element.role, 64) }
+    const subrole = optionalText(element.subrole, 64), label = optionalText(element.label, 160)
+    const sensitive = element.sensitive === true
+    const value = sensitive ? null : optionalText(element.value, 240)
+    if (subrole) out.subrole = subrole
+    if (label) out.label = label
+    if (value) out.value = value
+    if (sensitive) out.sensitive = true
+    if (typeof element.enabled === 'boolean') out.enabled = element.enabled
+    if (element.focused === true) out.focused = true
+    const rect = boundsOf(element.rect)
+    if (rect) out.rect = rect
+    if (Number.isSafeInteger(element.depth) && element.depth >= 0 && element.depth <= 64) out.depth = element.depth
+    return out
+  }).filter(element => element.index && element.role)
+  return {
+    elements,
+    count: elements.length,
+    truncated: source.truncated === true,
+    complete: source.complete === true,
+    sensitiveOmitted: count(source.sensitiveOmitted, 0, 1_000_000) ? source.sensitiveOmitted : 0,
+    windowId: count(source.window?.windowId, 0, Number.MAX_SAFE_INTEGER) ? source.window.windowId : null,
+    windowBounds: boundsOf(source.window?.bounds),
+    geometryRevision: count(source.geometryRevision, 0, Number.MAX_SAFE_INTEGER) ? source.geometryRevision : null,
+  }
+}
+
 function withDeadline(promise, ms, timers, onTimeout) {
   if (!Number.isFinite(ms) || ms <= 0) return promise
   let handle
@@ -310,6 +346,7 @@ export function createComputerAdapter({ provider, lease = null, deliveryCeiling 
         if (frame.geometryRevision !== null) frames.set(frameKey(args.target), frame.geometryRevision)
         return { ok: true, frame, image }
       }
+      if (method === 'readElements') return { ok: true, elements: normalizeElements(raw) }
       return method === 'listApps' ? { ok: true, apps: normalizeApps(raw) } : { ok: true, windows: normalizeWindows(raw) }
     } catch {
       return { ok: false, error: { code: CODES.HOST_ACTION_FAILED, hint: 'Reading the screen state failed. Try again.' } }
@@ -460,6 +497,11 @@ export function createFakeComputerProvider({ apps = DEFAULT_APPS, windows = DEFA
       return { frame: { windowId: args.target.windowId ?? 11, width: 800, height: 600, scale: 2, geometryRevision: revisionOf(args.target) }, image: { mime: 'image/png', data: 'iVBORw0KGgo=' } }
     },
     async listApps() { calls.push({ method: 'listApps' }); return { apps: apps.map(app => ({ ...app })) } },
+    async readElements(args) {
+      calls.push({ method: 'readElements' })
+      return { window: { windowId: args.target.windowId ?? 11, bounds: { x: 0, y: 0, width: 800, height: 600 } }, geometryRevision: revisionOf(args.target), truncated: false, complete: true, sensitiveOmitted: 0,
+        elements: [{ index: 'e1', depth: 0, role: 'AXButton', label: 'OK', rect: { x: 10, y: 10, width: 60, height: 20 } }] }
+    },
     async listWindows(args) {
       calls.push({ method: 'listWindows' })
       const lane = args.target ? hostLaneKey(args.target) : null

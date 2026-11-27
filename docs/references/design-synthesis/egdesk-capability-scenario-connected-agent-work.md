@@ -340,6 +340,12 @@ ECS: 상황·목표·판단·상태 전환
 | 15 | 진행 중 Run이 새 active ref와 만난다 | 현재 turn이 사용한 receipt와 다음 turn에서 resolve될 새 revision의 compatible/conflict 차이 | 필요한 경우 사용자 조정을 더한다 | compatible 변화는 다음 turn의 새 Ontology Resolution Receipt에 반영한다 | 같은 Run의 다음 turn에서 자연스럽게 조정한다 | new receipt·Turn Context Revision | authority·target·concurrent write 충돌일 때만 해당 action safety-block |
 | 16 | 활성화 뒤 퇴행이 확인된다 | 영향받은 새 turn·업무, 이전/현재 revision과 rollback 영향 | rollback 여부와 범위를 결정한다 | revision을 삭제하지 않고 새 active pointer와 rollback receipt를 기록한다 | 이후 turn에서 rollback된 active ref를 사용한다 | rolled-back·history preserved | 과거 Run·turn의 실제 binding은 유지 |
 
+#### 부서 간 납기 질문: 담당자·기기·권한은 일대일이 아니다
+
+다음은 기존 사례에서 얻은 경계를 설명하는 예시이며, 특정 직원의 권한표나 현장 배포 기록이 아니다. 영업 담당자는 고객 메일에서 **품목과 필요한 날짜**만 골라 생산 부서에 확인을 요청한다. 생산 담당자가 다른 PC에서 자기 업무 계정으로 확인해 가능한 날짜를 회신한다. 영업 쪽이 자기 Board에 회신을 반영하고, 실제 고객 발송은 발송 권한이 있는 사람이 따로 한다. 두 부서가 같은 PC나 AI 실행 계정을 쓸 수도 있지만 어느 경우에도 그 계정명이 실제 답한 사람을 증명하지 않는다. 서비스 프로세스가 가동된 PC와 사람이 업무 자료에 로그인한 세션도 같다고 가정하지 않는다.
+
+현재 로컬 예시에서 오가는 것은 [선택한 발췌·질문·회신 파일](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share)이다. 파일을 받은 사람은 영업 직원의 DM이나 메일함을 얻지 않는다. 미래의 실시간 초대에서도 확인된 사람에게 **그 Board에서 Agent에 질문할 권한**을 주는 것과 Agent 설정을 복사하거나 소유자의 사용량·도구를 쓰게 하는 것은 별개의 결정이다.
+
 #### 태화트랜스 사례에서 일반화한 운영 경계
 
 - 공통 개념·규칙, 역할 전용 evidence/runtime, 일회성 실행기록과 미완성 산출물은 서로 다른

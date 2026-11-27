@@ -115,8 +115,8 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   ask.policy({ boardId: wrongBoard.id, action: 'save', expectedVersion: null, profileId: active.id, excerpts: [], publicInstructions: '' })
   const change = (action, expectedVersion) => ask.policy({ boardId: hostBoard.id, action, expectedVersion })
   const issue = version => change('issue', version)
-  const decisionEgress = mode === 'draft'
-  const prepare = (request, boardId = hostBoard.id) => ask.prepare({ boardId, request, mode, decisionEgress })
+  // No per-request screening choice: Decisions (on in this fixture) screens only in the draft run, where the excerpts already go to a model.
+  const prepare = (request, boardId = hostBoard.id) => ask.prepare({ boardId, request, mode })
   async function makeRequest(issued) {
     const request = reviewFlow(guest)
     request.flow.openRequest(guestBoard)
@@ -180,6 +180,8 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   assert.throws(() => prepare(ordinaryRequest), { code: 'BOARD_AGENT_ASK_CODE_REQUIRED' })
   const preview = prepare(checked.review)
   assert.equal(preview.mode, mode)
+  assert.equal(Object.hasOwn(preview, 'decisionEgress'), false)
+  assert.equal(preview.decisionModel, mode === 'draft' ? DECISION_MODEL : null, 'the preview names Decisions exactly when it will screen')
   exactJson(preview.excerpts, [EXCERPT, IRRELEVANT], 'preview lists the approved text only')
   noDisclosure(preview, [issued.askCode, requestId, requestDigest, PRIVATE_BOARD, PRIVATE_INSTRUCTIONS, DECISION_KEY, DRAFT_KEY], 'preview leaks private data')
   assert.equal(outgoing.length, 0, 'inspect and preview never invoke a provider')
@@ -189,7 +191,7 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   const siblingPreview = prepare(checked.review)
   const result = await ask.run({ ticket: preview.ticket, confirm: true })
   const answer = mode === 'draft' ? DRAFT_ANSWER : EXCERPT
-  exactJson(result, { mode, answer, source: mode === 'draft' ? 'draft' : 'local', ...(mode === 'extract' ? { omittedCount: 0 } : {}) }, 'confirmed ask yields only an editable reply and disclosure mode')
+  exactJson(result, { mode, answer, source: mode === 'draft' ? 'draft' : 'local', ...(mode === 'extract' ? { omittedCount: 0 } : { screening: 'decision' }) }, 'confirmed ask yields only an editable reply and disclosure mode')
   assert.equal(ask.policy({ boardId: hostBoard.id, action: 'get' }).policy.codeActive, false)
   for (const ticket of [preview.ticket, siblingPreview.ticket]) await assert.rejects(ask.run({ ticket, confirm: true }), { code: 'BOARD_AGENT_ASK_STALE' })
   assert.throws(() => prepare(checked.review), { code: 'BOARD_AGENT_ASK_CODE_INVALID' })

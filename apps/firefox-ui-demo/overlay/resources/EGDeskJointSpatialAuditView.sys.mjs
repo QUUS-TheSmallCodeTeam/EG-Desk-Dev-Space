@@ -1,0 +1,13 @@
+import {readSpatialAudit} from './EGDeskSpatialAudit.sys.mjs';
+// This local, opt-in read performs no clipboard writes, saved audits, server posts or model calls.
+export function createJointAudit(h){
+ const {document:d,el}=h;let last=null,anchor=null;
+ function close(restore=false){const n=d.getElementById('egd-joint-spatial-audit');n?.remove();last=null;if(restore&&anchor?.isConnected)anchor.focus({preventScroll:true});anchor=null;}
+ const stamp=k=>{const b=h.getBoard(k),p=h.byId(k);return !b||!p||p.jointAccess!==b.epoch?null:JSON.stringify([h.identity(),p.id,b.epoch,b.cards.map(c=>[c.id,c.access,c.version,c.layoutVersion??0,c.app?.editStamp||''])]);};
+ function sync(){if(last&&stamp(last.k)!==last.stamp)close();}
+ function open(k){const oldAnchor=anchor;close();const b=h.getBoard(k),p=h.byId(k),initial=stamp(k);if(!b||!p||!initial)return;anchor=d.getElementById(p.id)?.querySelector('.egd-board-region-menu-button')||oldAnchor;
+  const items=b.cards.flatMap(c=>{const m=p.members.find(x=>x.sourceId===c.id),root=m&&d.getElementById(m.viewId);if(!root||root.dataset.jointLease!==c.access||root.dataset.projectionId!==p.id)return [];const controls=[];const roles=[['title','.egd-desk-window-titlebar'],['claim','[data-testid="joint-claim"]'],['reply','[data-testid="joint-draft"]'],['manage','[data-testid="joint-item-manage"]'],['open','[data-testid="joint-relation-target"]'],['change','[data-testid="joint-app-change"]']];for(const [role,q]of roles)for(const [i,node] of [...root.querySelectorAll(q)].entries())controls.push({role:i&&role==='change'?'change-alternate':role,node});return [{root,controls}];});
+  const report=readSpatialAudit({document:d,items,isCurrent:()=>stamp(k)===initial});if(!report||stamp(k)!==initial)return;const lines=h.describe(report);const detail=el('details',{},el('summary',{},'구조화된 관찰값'),el('pre',{data:{testid:'joint-audit-json'}},JSON.stringify(report,null,2)));
+  const again=el('button',{type:'button',onclick:()=>open(k)},'다시 측정');const done=el('button',{type:'button',data:{testid:'joint-audit-close'},onclick:()=>close(true)},'닫기');const box=el('section',{id:'egd-joint-spatial-audit',class:'egd-edge egd-frosted',role:'dialog','aria-label':'이 보드의 화면 판정',data:{testid:'joint-audit'}},el('header',{},el('strong',{},'이 보드의 화면 판정'),done),el('p',{},'방금 보이던 화면 기준입니다. 검사 창 자신은 제외합니다. 겹침 자체는 오류가 아닙니다.'),el('div',{role:'status',data:{testid:'joint-audit-summary'}},...lines.map(t=>el('p',{},t))),detail,again);box.addEventListener('keydown',e=>{if(e.key==='Escape'){e.stopPropagation();close(true);}});d.documentElement.append(box);last={k,stamp:initial};done.focus({preventScroll:true});}
+ return {open,sync,close,isOpen:()=>!!last};
+}

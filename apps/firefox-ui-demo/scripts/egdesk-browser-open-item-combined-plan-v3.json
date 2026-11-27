@@ -1,0 +1,520 @@
+{
+ "set": "browser-open-item-combined-v3",
+ "description": "LIVE, c43 (Decisions only): the combined measure a third time, after the c64 result of combined-v2 (4 requests changed by the summary change, 0 wrong: 3 correct, 7 safe_miss of 10, predicted 6 correct (4 to 8)). The browser task's referent for the short replies stayed under the 0.85 bar even with the question the person was asked in the summary: \"했어\" 0.40 (was 0.01), \"다시 해줘\" 0.30 (was 0.68), \"그만해\" 0.84 (same), \"그 페이지에 뭐 있어?\" 0.00, the changed request 0.09, and \"응 실행해\" referred BOTH the command and the browser task at 0.99. The L1 referent question asks whether a message SETTLES the item (answers, accepts, refuses, goes on, stops, confirms) and the model answers it strictly; the browser task's own option predicates, asked in the same request, read the same short replies well (c59: 8 correct, 0 wrong). Change under test: when the browser task is the ONLY open item the referent has nothing to arbitrate, so a referent below the bar no longer vetoes the options (the provider reads the option answers of the same request); with another open item the referent still arbitrates. Pre-registered BEFORE the change. Sent once.",
+ "task": {
+  "goal": "내 다음 공연 예매 내역 알려줘",
+  "pause": {
+   "kind": "cannot_proceed",
+   "code": "login_required"
+  },
+  "steps": 1,
+  "question": "예매 내역은 로그인이 필요해서 제가 볼 수 없었어요. 직접 로그인해 주시면 이어서 확인할게요.",
+  "change": true
+ },
+ "others": {
+  "approval": {
+   "command": "git push --force origin main"
+  },
+  "memory": {}
+ },
+ "maxRequests": 16,
+ "tokenCeiling": 16000,
+ "passRule": "No reply is WRONG (hard). Counts per verdict are reported; a safe miss never fails the plan. The run stops at the first failed request, the request limit or the token ceiling.",
+ "dropOrder": [
+  "typo",
+  "again2",
+  "stop2",
+  "compound",
+  "okok",
+  "offtopic"
+ ],
+ "replies": [
+  {
+   "id": "ack",
+   "message": "했어",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "browser:continue": 0.85,
+    "none": 0.05,
+    "browser:uncertain": 0.08,
+    "wrong": 0.02
+   },
+   "note": "The commonest reply. Referent: it answers the open item (tells it to go on): expected yes.",
+   "predictedV1Summary": {
+    "browser:continue": 0.8,
+    "browser:uncertain": 0.1,
+    "none": 0.08,
+    "wrong": 0.02
+   },
+   "predictedV2": {
+    "browser:continue": 0.7,
+    "none": 0.22,
+    "browser:uncertain": 0.06,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "typo",
+   "message": "로그인햇어",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "browser:continue": 0.75,
+    "browser:uncertain": 0.1,
+    "none": 0.13,
+    "wrong": 0.02
+   },
+   "note": "A typo of the same.",
+   "predictedV1Summary": {
+    "browser:continue": 0.75,
+    "browser:uncertain": 0.1,
+    "none": 0.13,
+    "wrong": 0.02
+   },
+   "predictedV2": {
+    "browser:continue": 0.75,
+    "browser:uncertain": 0.1,
+    "none": 0.13,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "okok",
+   "message": "ㅇㅇ",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "none",
+   "wantOption": null,
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "none": 0.55,
+    "browser:uncertain": 0.25,
+    "browser:continue": 0.15,
+    "wrong": 0.05
+   },
+   "note": "An acknowledgement: not an answer to the open item. Referent probably unsure (between 0.5 and 0.85) -> not settled. Settling it to continue is tolerated, anything else is wrong.",
+   "predictedV1Summary": {
+    "none": 0.55,
+    "browser:uncertain": 0.25,
+    "browser:continue": 0.15,
+    "wrong": 0.05
+   },
+   "predictedV2": {
+    "none": 0.55,
+    "browser:uncertain": 0.25,
+    "browser:continue": 0.15,
+    "wrong": 0.05
+   }
+  },
+  {
+   "id": "again",
+   "message": "다시 해줘",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "retry",
+   "acceptable": [
+    "retry",
+    "continue"
+   ],
+   "predicted": {
+    "browser:retry": 0.8,
+    "browser:continue": 0.05,
+    "browser:uncertain": 0.13,
+    "wrong": 0.02
+   },
+   "note": "\"Tells it to go on\": referent yes; options as in v2 (retry .98).",
+   "predictedV1Summary": {
+    "browser:retry": 0.7,
+    "browser:uncertain": 0.1,
+    "none": 0.18,
+    "wrong": 0.02
+   },
+   "predictedV2": {
+    "browser:retry": 0.5,
+    "browser:continue": 0.05,
+    "none": 0.4,
+    "browser:uncertain": 0.03,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "again2",
+   "message": "다시 시도해봐",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "retry",
+   "acceptable": [
+    "retry",
+    "continue"
+   ],
+   "predicted": {
+    "browser:retry": 0.7,
+    "browser:uncertain": 0.1,
+    "none": 0.18,
+    "wrong": 0.02
+   },
+   "note": "Same.",
+   "predictedV1Summary": {
+    "browser:retry": 0.7,
+    "browser:uncertain": 0.1,
+    "none": 0.18,
+    "wrong": 0.02
+   },
+   "predictedV2": {
+    "browser:retry": 0.7,
+    "browser:uncertain": 0.1,
+    "none": 0.18,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "stop",
+   "message": "그만해",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "abandon",
+   "acceptable": [
+    "abandon"
+   ],
+   "predicted": {
+    "browser:abandon": 0.85,
+    "browser:uncertain": 0.13,
+    "wrong": 0.02
+   },
+   "note": "\"Refuses it / tells it to stop\": referent yes.",
+   "predictedV1Summary": {
+    "browser:abandon": 0.85,
+    "browser:uncertain": 0.05,
+    "none": 0.09,
+    "wrong": 0.01
+   },
+   "predictedV2": {
+    "browser:abandon": 0.65,
+    "none": 0.3,
+    "browser:uncertain": 0.03,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "stop2",
+   "message": "됐어 안 할래",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "abandon",
+   "acceptable": [
+    "abandon"
+   ],
+   "predicted": {
+    "browser:abandon": 0.8,
+    "browser:uncertain": 0.05,
+    "none": 0.14,
+    "wrong": 0.01
+   },
+   "note": "Same.",
+   "predictedV1Summary": {
+    "browser:abandon": 0.8,
+    "browser:uncertain": 0.05,
+    "none": 0.14,
+    "wrong": 0.01
+   },
+   "predictedV2": {
+    "browser:abandon": 0.8,
+    "browser:uncertain": 0.05,
+    "none": 0.14,
+    "wrong": 0.01
+   }
+  },
+  {
+   "id": "page",
+   "message": "그 페이지에 뭐 있어?",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "ask_page",
+   "acceptable": [
+    "ask_page"
+   ],
+   "predicted": {
+    "browser:ask_page": 0.8,
+    "browser:uncertain": 0.18,
+    "wrong": 0.02
+   },
+   "note": "THE HYPOTHESIS TO MEASURE: the resolver's own rules say an open item is settled by a message that answers, accepts, refuses, tells it to go on or stop, or confirms it, and \"a message about something else ... does not settle it\". A question ABOUT the task's page is none of those, so the referent is expected NOT to reach 0.85 and ask_page would be unreachable through the resolver.",
+   "predictedV1Summary": {
+    "none": 0.55,
+    "browser:ask_page": 0.35,
+    "browser:uncertain": 0.08,
+    "wrong": 0.02
+   },
+   "predictedV2": {
+    "none": 0.88,
+    "browser:ask_page": 0.08,
+    "browser:uncertain": 0.02,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "notyet",
+   "message": "아직",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "none",
+   "wantOption": null,
+   "acceptable": [],
+   "predicted": {
+    "browser:uncertain": 0.88,
+    "none": 0.05,
+    "wrong": 0.07
+   },
+   "note": "The person says the step is not done: the open item is not settled by it. Settling it to an option is wrong.",
+   "predictedV1Summary": {
+    "none": 0.65,
+    "browser:uncertain": 0.3,
+    "wrong": 0.05
+   },
+   "predictedV2": {
+    "none": 0.9,
+    "browser:uncertain": 0.08,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "offtopic",
+   "message": "오늘 날씨 어때?",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "none",
+   "wantOption": null,
+   "acceptable": [],
+   "predicted": {
+    "none": 0.97,
+    "wrong": 0.03
+   },
+   "note": "Unrelated: not referred.",
+   "predictedV1Summary": {
+    "none": 0.95,
+    "wrong": 0.05
+   },
+   "predictedV2": {
+    "none": 0.97,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "change",
+   "message": "아 그거 말고 지난달 공연으로 알려줘",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "change",
+   "acceptable": [
+    "change"
+   ],
+   "predicted": {
+    "browser:change": 0.35,
+    "browser:uncertain": 0.62,
+    "wrong": 0.03
+   },
+   "note": "A new request about the same task: the resolver may count it as something else (a new request). Option as v2 (change 1.0, ask_page .74 in v2, perhaps lower with the c41 wording).",
+   "predictedV1Summary": {
+    "none": 0.4,
+    "browser:change": 0.3,
+    "browser:uncertain": 0.28,
+    "wrong": 0.02
+   },
+   "predictedV2": {
+    "none": 0.6,
+    "browser:change": 0.25,
+    "browser:uncertain": 0.13,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "compound",
+   "message": "로그인했어, 근데 지금 화면 뭐야?",
+   "items": [
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "continue",
+   "acceptable": [
+    "continue",
+    "ask_page"
+   ],
+   "uncertainOk": true,
+   "predicted": {
+    "browser:uncertain": 0.65,
+    "none": 0.15,
+    "browser:continue": 0.17,
+    "wrong": 0.03
+   },
+   "note": "Two things: referent yes, options two yes -> not settled (the right outcome).",
+   "predictedV1Summary": {
+    "browser:uncertain": 0.65,
+    "none": 0.15,
+    "browser:continue": 0.17,
+    "wrong": 0.03
+   },
+   "predictedV2": {
+    "browser:uncertain": 0.65,
+    "none": 0.15,
+    "browser:continue": 0.17,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "ctl-appr",
+   "message": "응 실행해",
+   "items": [
+    "approval",
+    "browser"
+   ],
+   "wantItem": "approval",
+   "wantOption": null,
+   "acceptable": [],
+   "predicted": {
+    "none": 0.7,
+    "approval": 0.27,
+    "wrong": 0.03
+   },
+   "note": "Control: a command waits for yes or no AND a browser task is open: the message belongs to the command. Settling it to the browser task is wrong.",
+   "predictedV1Summary": {
+    "approval": 0.85,
+    "none": 0.12,
+    "wrong": 0.03
+   },
+   "predictedV2": {
+    "approval": 0.55,
+    "none": 0.42,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "ctl-appr-browser",
+   "message": "로그인했어",
+   "items": [
+    "approval",
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "browser:continue": 0.95,
+    "none": 0.03,
+    "wrong": 0.02
+   },
+   "note": "Control: the same pair of items, the message is about the login: the browser task. Referring it to the command is wrong.",
+   "predictedV1Summary": {
+    "browser:continue": 0.7,
+    "none": 0.25,
+    "wrong": 0.05
+   },
+   "predictedV2": {
+    "browser:continue": 0.85,
+    "none": 0.12,
+    "wrong": 0.03
+   }
+  },
+  {
+   "id": "ctl-mem",
+   "message": "맞아 그렇게 기억해줘",
+   "items": [
+    "memory",
+    "browser"
+   ],
+   "wantItem": "memory",
+   "wantOption": null,
+   "acceptable": [],
+   "predicted": {
+    "memory": 0.92,
+    "none": 0.06,
+    "wrong": 0.02
+   },
+   "note": "Control: a note waits for confirmation AND a browser task is open: the memory item.",
+   "predictedV1Summary": {
+    "memory": 0.85,
+    "none": 0.12,
+    "wrong": 0.03
+   },
+   "predictedV2": {
+    "memory": 0.92,
+    "none": 0.06,
+    "wrong": 0.02
+   }
+  },
+  {
+   "id": "ctl-mem-page",
+   "message": "그 페이지에 뭐 있어?",
+   "items": [
+    "memory",
+    "browser"
+   ],
+   "wantItem": "browser",
+   "wantOption": "ask_page",
+   "acceptable": [
+    "ask_page"
+   ],
+   "predicted": {
+    "none": 0.9,
+    "browser:ask_page": 0.05,
+    "wrong": 0.05
+   },
+   "note": "Control: with a memory item beside it: again the page question (see the hypothesis above): the memory item must NOT take it.",
+   "predictedV1Summary": {
+    "none": 0.55,
+    "browser:ask_page": 0.35,
+    "browser:uncertain": 0.05,
+    "wrong": 0.05
+   },
+   "predictedV2": {
+    "none": 0.88,
+    "browser:ask_page": 0.07,
+    "wrong": 0.05
+   }
+  }
+ ],
+ "prediction": {
+  "correct": "6 of 10 (range 5 to 8)",
+  "wrong": "0 wrong with probability 0.85",
+  "hypothesis": "with one open item, the options of the same request settle ack, again, stop and page (0.80 to 0.85 each); with two open items nothing changes: \"응 실행해\" stays unsettled (0.70), the memory and \"로그인했어\" controls stay correct",
+  "v2Result": {
+   "correct": 3,
+   "safeMiss": 7,
+   "wrong": 0,
+   "expectedBefore": "6 of 10 correct (4 to 8); hypothesis ack referred 0.70: referent was 0.40"
+  }
+ },
+ "preRegistrationNote": "Written before the c43 change of the reading path. Replies, wants and acceptable sets are v1's and v2's, unchanged. The drop order is v2's (10 requests, about 15.2k real tokens).",
+ "dropOrderNote": "combined-v1 ran at +2.5% of the typed estimate (1,382 against 1,348), and stopped on the token ceiling after 10 of 11 requests; the summary now adds about 40 tokens per request. So offtopic is dropped as well (notyet already shows that an unreferred message settles nothing, and v1 read offtopic 0.00). Kept: ack, again, stop, page, notyet, change and the four controls: 10 requests."
+}

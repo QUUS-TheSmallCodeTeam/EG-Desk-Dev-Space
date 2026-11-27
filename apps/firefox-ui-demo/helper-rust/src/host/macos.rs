@@ -46,7 +46,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNotification, NSOperationQueue, NSString};
 
 use super::protocol::{
-    bounded_text, AppInfo, AppRef, HostEvent, Observer, Permissions, ServiceStatus, WindowBounds, WindowInfo,
+    bounded_text, AppInfo, AppRef, CaptureQuery, CaptureResult, ElementsQuery, ElementsResult, HostEvent, ObserveError, Observer, Permissions, ServiceStatus, WindowBounds, WindowInfo,
     WindowList, WindowQuery, MAX_APPS, MAX_WINDOWS, SERVICE_BUNDLE_ID,
 };
 use super::{mono_ms, HostObserveArgs, ServiceTracker};
@@ -65,21 +65,22 @@ extern "C" {
     fn CGPreflightListenEventAccess() -> bool;
 }
 
-fn screen_recording_preflight() -> bool {
+pub(super) fn screen_recording_preflight() -> bool {
     // SAFETY: no arguments, no side effects beyond reading TCC state.
     unsafe { CGPreflightScreenCaptureAccess() }
 }
 
 pub struct MacObserver {
     bundled: bool,
+    content: bool,
 }
 
 impl MacObserver {
-    pub fn new() -> Self {
+    pub fn new(content: bool) -> Self {
         let bundled = std::env::current_exe()
             .map(|path| path.to_string_lossy().contains(".app/Contents/MacOS/"))
             .unwrap_or(false);
-        MacObserver { bundled }
+        MacObserver { bundled, content }
     }
 }
 
@@ -114,20 +115,20 @@ fn service_status() -> ServiceStatus {
     })
 }
 
-type RawDict = CFDictionary<*const c_void, *const c_void>;
+pub(super) type RawDict = CFDictionary<*const c_void, *const c_void>;
 
-fn raw_value(dict: &RawDict, key: CFStringRef) -> Option<*const c_void> {
+pub(super) fn raw_value(dict: &RawDict, key: CFStringRef) -> Option<*const c_void> {
     dict.find(key as *const c_void).map(|value| *value).filter(|value| !value.is_null())
 }
 
-fn number(dict: &RawDict, key: CFStringRef) -> Option<CFNumber> {
+pub(super) fn number(dict: &RawDict, key: CFStringRef) -> Option<CFNumber> {
     let value = raw_value(dict, key)?;
     // SAFETY: value is a live CF object owned by the dictionary; the type id
     // check makes the wrap correct.
     unsafe { (CFGetTypeID(value) == CFNumber::type_id()).then(|| CFNumber::wrap_under_get_rule(value as _)) }
 }
 
-fn text(dict: &RawDict, key: CFStringRef) -> Option<String> {
+pub(super) fn text(dict: &RawDict, key: CFStringRef) -> Option<String> {
     let value = raw_value(dict, key)?;
     // SAFETY: as in number().
     unsafe {
@@ -136,7 +137,7 @@ fn text(dict: &RawDict, key: CFStringRef) -> Option<String> {
     }
 }
 
-fn flag(dict: &RawDict, key: CFStringRef) -> bool {
+pub(super) fn flag(dict: &RawDict, key: CFStringRef) -> bool {
     raw_value(dict, key)
         // SAFETY: as in number().
         .map(|value| unsafe {
@@ -145,7 +146,7 @@ fn flag(dict: &RawDict, key: CFStringRef) -> bool {
         .unwrap_or(false)
 }
 
-fn bounds(dict: &RawDict) -> WindowBounds {
+pub(super) fn bounds(dict: &RawDict) -> WindowBounds {
     // SAFETY: kCGWindowBounds is an immutable framework constant.
     let inner = raw_value(dict, unsafe { kCGWindowBounds }).and_then(|value| unsafe {
         (CFGetTypeID(value) == RawDict::type_id()).then(|| RawDict::wrap_under_get_rule(value as _))
@@ -260,6 +261,7 @@ impl Observer for MacObserver {
                 screen_recording: CGPreflightScreenCaptureAccess(),
                 input_monitoring: CGPreflightListenEventAccess(),
                 requested: false,
+                screen_locked: super::macos_content::session_blocked(),
                 bundled: self.bundled,
             }
         }
@@ -267,6 +269,24 @@ impl Observer for MacObserver {
 
     fn service(&self) -> ServiceStatus {
         service_status()
+    }
+
+    fn content_enabled(&self) -> bool {
+        self.content
+    }
+
+    fn capture(&self, query: &CaptureQuery) -> Result<CaptureResult, ObserveError> {
+        if !self.content {
+            return Err(ObserveError::observe_only());
+        }
+        autoreleasepool(|_| super::macos_content::capture(query))
+    }
+
+    fn read_elements(&self, query: &ElementsQuery) -> Result<ElementsResult, ObserveError> {
+        if !self.content {
+            return Err(ObserveError::observe_only());
+        }
+        autoreleasepool(|_| super::macos_content::read_elements(query))
     }
 }
 
@@ -334,7 +354,7 @@ fn install_workspace_observers(events: EventSender, tracker: Arc<ServiceTracker>
 }
 
 pub fn run(args: HostObserveArgs) -> i32 {
-    let observer = Arc::new(MacObserver::new());
+    let observer = Arc::new(MacObserver::new(args.observe_content));
     let (events, receiver) = sync_channel::<(u64, HostEvent)>(256);
     if let Err(code) = super::launch(&args, observer, receiver) {
         return code;

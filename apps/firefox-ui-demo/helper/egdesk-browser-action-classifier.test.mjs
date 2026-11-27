@@ -134,7 +134,9 @@ test('access vocabulary is grant, and an affirmative label on a consent page', (
   assert.equal(activate('확인', { url: 'https://kauth.kakao.com/oauth/authorize' }), 'grant')
   assert.equal(activate('동의하고 계속하기', { url: 'https://shop.example/terms' }), 'submit')
   assert.equal(activate('네', { url: 'https://id.example/consent' }), 'grant')
-  assert.equal(activate('네이버 로그인', { url: 'https://id.example/consent' }), 'none', "'네' only as a whole label")
+  // c17: "네이버 로그인" is a sign-in action now (grant by sign-in vocabulary); the intent here stays: '네' is affirmative only as a whole label
+  assert.notEqual(classifyAction({ mode: 'activate', label: '네이버 로그인', role: 'button', url: 'https://id.example/consent' }).reason, 'consent-affirmative', "'네' only as a whole label")
+  assert.equal(activate('네이버 지도', { url: 'https://id.example/consent' }), 'none', "'네' only as a whole label")
   assert.equal(activate('Allow', { url: 'not a url' }), 'none')
 })
 
@@ -211,4 +213,51 @@ test('gates: today every classified action is allowed; the D-B3 preset hands pay
   assert.equal(actionGate(undefined), 'user-step')
   for (const gate of ACTION_GATES) assert.ok(Object.hasOwn(ACTION_GATE_TEXT, gate))
   for (const category of ACTION_CATEGORIES) assert.ok(ACTION_CATEGORY_TEXT[category].ko)
+})
+
+// ---- L8 C4: same-site dangerous classes the c3 measurement missed (label and address paths) ----
+test('ordering, permission grants, session end, account closure and contract cancellation are never "none" (English and Korean)', () => {
+  const classes = {
+    pay: ['Place order', '주문하기', '주문 하기', '결제하기', 'Order now', 'order place', 'orders place', 'Proceed to checkout'],
+    grant: ['Allow notifications', 'Allow location access', '알림 허용', '위치 허용', '카메라 허용', '권한 부여', '권한 허용', 'Grant access', 'grant allow', 'Authorize'],
+    delete: ['Log out', 'Logout', 'Sign out', 'signout', '로그아웃', '로그 아웃', '로그오프', '탈퇴', '회원 탈퇴', 'Close my account', 'account close', '계정 폐쇄',
+      '구독 취소', '구독 해지', 'subscriptions cancel', 'Cancel my plan', 'Terminate contract', '계약 해지', 'membership cancel', 'plan cancel', 'contract cancellation'],
+  }
+  for (const [category, labels] of Object.entries(classes)) for (const label of labels) assert.equal(activate(label), category, label)
+})
+test('bare Allow stays a cookie banner outside consent pages for a button, but names a grant as a link destination', () => {
+  assert.equal(activate('Allow', { url: 'https://shop.example/' }), 'none')
+  assert.equal(activate('모두 허용', { url: 'https://shop.example/' }), 'none')
+  assert.equal(classifyAction({ label: 'permissions allow', role: 'link', href: true, url: 'https://shop.example/' }).category, 'grant')
+  assert.equal(classifyAction({ label: 'permissions allow', role: 'link', url: 'https://shop.example/' }).category, 'none', 'only the destination flag changes it')
+})
+test('benign labels that share a word stay ordinary', () => {
+  // c17: signing in is the person's step (see the sign-in table below); labels ABOUT signing in stay ordinary
+  for (const label of ['Show details', 'Cancel', 'Orders', 'My orders', '주문 내역', '다음', '취소', '닫기', 'Close', '로그인 도움말', 'Sign-in help', 'Settings', 'Search']) {
+    assert.equal(activate(label), 'none', label)
+  }
+  for (const label of ['Sign in', '로그인', 'Log in']) assert.equal(activate(label), 'grant', label)
+})
+
+// ---- L8 c17: sign-in and single sign-on are the person's step (grant); labels and links ABOUT signing in stay ordinary ----
+const SIGN_IN_ACTIONS = ['로그인', '로그인하기', '로그인 하기', '로그인 후 이용하기', '카카오로 로그인', '카카오 로그인', '카카오톡으로 로그인', '카카오 계정으로 로그인', '네이버 아이디로 로그인',
+  '네이버로 로그인', '구글 로그인', '애플로 로그인', '간편 로그인', '인증서 로그인', '공동인증서 로그인', '휴대폰 로그인', 'SNS 로그인', 'Sign in', 'Sign-in', 'Signin', 'Log in', 'Login', 'Log on',
+  'Sign in with Google', 'Log in with Apple', 'Sign in with Kakao account', 'Continue with Google', 'Continue with Naver', 'Sign in to your account', 'Log in to continue', 'Log in.', '  로그인  ']
+const ABOUT_SIGN_IN = ['로그인 도움말', '로그인이 안 될 때', '로그인이 안 되나요?', '로그인 문제 해결', '로그인 정보 수정', '로그인 기록', '최근 로그인 기기', '아이디 찾기', '비밀번호 찾기',
+  'Sign-in help', 'Sign in options', 'Trouble signing in?', 'Forgot your login?', 'Login history', 'Blog in Korean', 'Continue reading', 'Continue with this order list', '세금계산서 조회', '사업자 987-65-43210']
+test('c17 sign-in table: every whole-label sign-in or SSO action is grant (never offered); a label that only mentions signing in is ordinary', () => {
+  for (const label of SIGN_IN_ACTIONS) {
+    const judged = classifyAction({ mode: 'activate', label, role: 'button' })
+    assert.deepEqual([judged.category, judged.reason], ['grant', 'sign-in-vocabulary'], label)
+    assert.equal(classifyAction({ mode: 'activate', label, role: 'link', tag: 'a' }).category, 'grant', `${label} as a link`)
+  }
+  for (const label of ABOUT_SIGN_IN) assert.equal(activate(label), 'none', label)
+})
+test('c17 sign-in destinations (fail-closed, as every address since C4): a whole word login/signin/logon/sso/oauth/로그인 in path or query is grant; a word that merely contains it is not', () => {
+  const href = words => classifyAction({ mode: 'activate', label: words, role: 'link', tag: 'a', href: true })
+  for (const words of ['login', 'members login', 'auth signin', 'sso start', 'oauth2 authorize', 'account log in', 'help faq topic 로그인', 'help login trouble'])
+    assert.equal(href(words).category, 'grant', words)
+  // the last two are the accepted false exclusions: a help page reached through a sign-in word in its address is withheld too
+  for (const words of ['invoices', 'blog in', 'loginhistory', 'catalog index', 'design signing', 'biz 2'])
+    assert.equal(href(words).category, 'none', words)
 })

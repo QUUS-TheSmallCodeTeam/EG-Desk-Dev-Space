@@ -1,11 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
+import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
 
 function harness({ createError = null } = {}) {
   const calls = []
   const registry = {
+    authorizeLocal: () => null,
     snapshot: id => ({ ok: true, sessionId: id, status: 'RUNNING', transport: 'conpty',
       usePty: true, degraded: false, shellId: 'powershell', cols: 80, rows: 24 }),
     read: id => ({ ok: false, code: 'UNKNOWN_SESSION', sessionId: id, status: 'UNKNOWN' }),
@@ -72,4 +74,63 @@ test('ConPTY failure is an explicit unavailable error rather than a false sessio
   assert.equal(response.body.code, 'WINDOWS_PTY_UNAVAILABLE')
   assert.equal(response.body.usePty, false)
   assert.ok(!response.body.sessionId)
+})
+
+test('local lifecycle HTTP scopes the original PTY data channel without opening sockets', async () => {
+  const { randomUUID } = await import('node:crypto')
+  const registry = new TerminalSessionRegistry()
+  let spawns = 0, kills = 0, onOutput, onExit
+  const writes = []
+  const handler = createTerminalHttpHandler({ registry, port: 39218, factory: {
+    catalog: () => ({}), create: async () => {
+      spawns++
+      return registry.register({ id: 'original-pty', shellId: 'default', usePty: true, cols: 80, rows: 24,
+        process: { onData(fn) { onOutput = fn }, onExit(fn) { onExit = fn }, kill() { kills++ }, write(text) { writes.push(text) } } })
+    },
+  } })
+  const owner = randomUUID(), other = randomUUID(), first = randomUUID(), second = randomUUID()
+  const request = async (route, body, scope, view, extras = {}) => {
+    const req = Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), {
+      url: `/terminal/${route}`, method: 'POST', socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:39218', 'content-type': 'application/json',
+        ...(scope ? { 'x-egdesk-terminal-owner': scope, 'x-egdesk-terminal-view': view } : {}), ...extras.headers }, ...extras.request,
+    })
+    const res = { setHeader() {}, writeHead(status) { this.status = status }, end(text) { this.data = JSON.parse(text) } }
+    assert.equal(await handler(req, res), true)
+    return { status: res.status, ...res.data }
+  }
+  const spawned = await request('spawn', {}, owner, first)
+  const ref = { sessionId: spawned.sessionId, bridgeInstance: spawned.bridgeInstance }
+  const session = { sessionId: ref.sessionId }
+  assert.equal(spawned.detachSupported, true)
+  assert.ok(!JSON.stringify(spawned).includes(owner) && !JSON.stringify(spawned).includes(first))
+  assert.equal((await request('detach', ref)).code, 'TERMINAL_SCOPE_REQUIRED')
+  assert.equal((await request('detach', ref, owner, first, { headers: { origin: 'http://127.0.0.1:39218' } })).code, 'TERMINAL_SCOPE_REQUIRED')
+  const held = await request('detach', ref, owner, first)
+  assert.equal(held.ok, true); assert.equal(held.exitConfirmed, false)
+  onOutput('synthetic output')
+  assert.equal((await request('read', session, owner, first)).code, 'TERMINAL_NOT_ATTACHED')
+  assert.equal((await request('attach', ref, other, second)).code, 'TERMINAL_IDENTITY_CHANGED')
+  assert.equal((await request('attach', ref, owner, second, { request: { socket: { remoteAddress: '192.0.2.7' } } })).code, 'LOOPBACK_REQUIRED')
+  assert.equal((await request('attach', ref, owner, second)).sessionId, ref.sessionId)
+  assert.equal((await request('write', { ...session, data: 'stale input' }, owner, first)).code, 'TERMINAL_IDENTITY_CHANGED')
+  assert.equal((await request('read', session, owner, second)).data, 'synthetic output')
+  assert.deepEqual(writes, [])
+  assert.equal((await request('write', { ...session, data: 'explicit input' }, owner, second)).ok, true)
+  assert.deepEqual(writes, ['explicit input'])
+  assert.equal(spawns, 1); assert.equal(kills, 0)
+  assert.equal((await request('kill', session, owner, second)).exitConfirmed, false)
+  onExit({ exitCode: 0 })
+  assert.equal((await request('read', session, owner, second)).exitConfirmed, true)
+  assert.equal(registry.active.size, 0)
+})
+
+test('c35: the shell catalog tells the card that addresses may open in a Browser Card only when the open-url flag is on', async () => {
+  const mk = urlOpen => {
+    const registry = { authorizeLocal: () => null, snapshot: id => ({ ok: true, sessionId: id }), read: id => ({ ok: true, sessionId: id }) }
+    const factory = { catalog: () => ({ ok: true, platform: 'darwin', defaultShellId: 'default', shells: [], transport: 'pty', ptyRequired: false }), create: async () => ({ id: 'x' }) }
+    const handle = createTerminalHttpHandler({ registry, factory, port: () => 41001, ...(urlOpen ? { urlOpen } : {}) })
+    return async () => { let out; const req = Object.assign(Readable.from([]), { url: '/terminal/shells', method: 'GET', headers: { host: '127.0.0.1:41001' } }); await handle(req, { setHeader() {}, writeHead() {}, end(text) { out = JSON.parse(text) } }, new URL('/terminal/shells', 'http://127.0.0.1:41001')); return out }
+  }
+  assert.equal((await mk(null)()).openUrl, undefined); assert.equal((await mk({ accept: () => ({ ok: true }) })()).openUrl, true)
 })

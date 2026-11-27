@@ -1,0 +1,169 @@
+{
+  "set": "l2-all-on-s3-faithful-fill",
+  "tokenCeiling": 6000,
+  "productBars": {
+    "slot_P#_r#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs:19 SKELETON_BARS { yes .7, no .3 }"
+    },
+    "slot_P#_r#_left": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "SKELETON_BARS"
+    },
+    "slot_P#_r#_right": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "SKELETON_BARS"
+    },
+    "step_P#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "SKELETON_BARS"
+    },
+    "onboard_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "SKELETON_BARS (coverage, L4 c20)"
+    }
+  },
+  "passRule": "PASS when every slot, explanation and fact is judged supported/shown at the product bar (yes >= .7): then s3 of the all-on journey reaches the board with the materials-faithful scripted fill. The bodies are the exact ones the product builds on int/c14 26c5b9f in an offline replay of the c17 run (place, fit and order answered with the recorded c17 answers, bodies unchanged).",
+  "requests": [
+    {
+      "id": "fill-check",
+      "file": "requests/fill-check.json",
+      "sha256": "ccdf25f62c2a8ce20e564ce715dfc3d282012a42ef575759595776af7c9e49b0",
+      "estInputTokens": 3664,
+      "expect": [
+        {
+          "name": "slot_P2_r1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P2_r2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P2_r3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P2_r4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "step_P2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P1_r1_left",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P1_r1_right",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P1_r2_left",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P1_r2_right",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "step_P1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P3_r2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "slot_P3_r3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "step_P3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        }
+      ]
+    },
+    {
+      "id": "coverage",
+      "file": "requests/coverage.json",
+      "sha256": "7b9d4ce6af99ea770e5e7ac2885704bf9ac9f6b35b8b58bd214bd759ec1691ed",
+      "estInputTokens": 952,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "acted on at the product bar (SKELETON_BARS.yes); the line or value copies the cited material, or the fact is on the board"
+        }
+      ]
+    }
+  ]
+}

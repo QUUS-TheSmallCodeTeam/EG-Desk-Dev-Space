@@ -1,0 +1,206 @@
+{
+  "set": "l1-remeasure-c13",
+  "tokenCeiling": 5000,
+  "passRule": "Same matter (requests pl-*): A request passes when every hard check holds: an expected yes has probability >= 0.8 (the product's bar for acting on a yes) and an expected no has probability <= 0.799. The set passes when all 8 requests pass. Near misses (same company or same kind of document, another matter) are soft: a miss is reported, never a failure. The note of every check starts with its kind. The two isolations are scored separately: requests pl-same-matter-quote and pl-same-matter-report (one card per question) against pl-*-R# (one card per request). Arrangement (requests ask-*-now): A request passes when every hard check holds. Relevance requests (cN): each clearly relevant excerpt >= 0.6 (the product's bar: it is selected), each clearly irrelevant one <= 0.599. Arrangement requests (cN_now, asked only for the excerpts the relevance answers select, on the date the question is about): each current excerpt >= 0.5 (it is not dropped as dated) and each wrong-time/version excerpt <= 0.499 (HARD: below the bar it is dated and never offered as the current answer). The set passes when all 2 requests pass. Near-miss relevance (<= 0.599) is soft: a miss is reported, never a failure. The note of every check starts with its kind.",
+  "requests": [
+    {
+      "id": "pl-same-matter-quote",
+      "file": "requests/pl-same-matter-quote.json",
+      "sha256": "9d9b797131fc18137306931eccb22f04c396b62d974cc11cd95b7315eafc6a6c",
+      "estInputTokens": 722,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "yes: the earlier version of the same quote"
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "hard",
+          "note": "no: another matter altogether"
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "soft",
+          "note": "near_miss: another client's document"
+        }
+      ]
+    },
+    {
+      "id": "pl-same-matter-report",
+      "file": "requests/pl-same-matter-report.json",
+      "sha256": "564fdbf3e48da570b32ae27066023089974ae08c84a9c403333cb015afa25e75",
+      "estInputTokens": 719,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "soft",
+          "note": "near_miss: same company, another matter"
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "yes: the figures for that report"
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "soft",
+          "note": "near_miss: the same kind of report, another company"
+        }
+      ]
+    },
+    {
+      "id": "pl-same-matter-quote-R1",
+      "file": "requests/pl-same-matter-quote-R1.json",
+      "sha256": "2d303380148ddd7e0ce97fb1a1b3ed0126d6f200ce5969fc70b8555a612233ea",
+      "estInputTokens": 310,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "yes: the earlier version of the same quote"
+        }
+      ]
+    },
+    {
+      "id": "pl-same-matter-quote-R2",
+      "file": "requests/pl-same-matter-quote-R2.json",
+      "sha256": "2056482d00be94eff189c20c8b108205eb03938b5287c62323ee6e0e8b7149a4",
+      "estInputTokens": 313,
+      "expect": [
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "hard",
+          "note": "no: another matter altogether"
+        }
+      ]
+    },
+    {
+      "id": "pl-same-matter-quote-R3",
+      "file": "requests/pl-same-matter-quote-R3.json",
+      "sha256": "bb2f6f3aac23ef6546d439f65b6a92dadbf278247b46bb693fcdc7f4fa01526e",
+      "estInputTokens": 308,
+      "expect": [
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "soft",
+          "note": "near_miss: another client's document"
+        }
+      ]
+    },
+    {
+      "id": "pl-same-matter-report-R1",
+      "file": "requests/pl-same-matter-report-R1.json",
+      "sha256": "8335f00930431e8e54f9ec97fd428548f59ac5a835b40fbf8c9cbc50dfd68ef6",
+      "estInputTokens": 308,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "soft",
+          "note": "near_miss: same company, another matter"
+        }
+      ]
+    },
+    {
+      "id": "pl-same-matter-report-R2",
+      "file": "requests/pl-same-matter-report-R2.json",
+      "sha256": "9a38741210460f8e84ba1cef24e3997571c281a9109144698f3f09991e927f70",
+      "estInputTokens": 307,
+      "expect": [
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "yes: the figures for that report"
+        }
+      ]
+    },
+    {
+      "id": "pl-same-matter-report-R3",
+      "file": "requests/pl-same-matter-report-R3.json",
+      "sha256": "9fc630ca8346fcc283c9f1a2247aec2d80ade388fdad060aefc70e9640225ec8",
+      "estInputTokens": 307,
+      "expect": [
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "soft",
+          "note": "near_miss: the same kind of report, another company"
+        }
+      ]
+    },
+    {
+      "id": "ask-visitor-parking-now",
+      "file": "requests/ask-visitor-parking-now.json",
+      "sha256": "31fed0a63951b404c26e9cfb17d163802e5cabef8c5320b99911150afd40c17c",
+      "estInputTokens": 713,
+      "expect": [
+        {
+          "name": "c2_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, still applies: where visitors park"
+        },
+        {
+          "name": "c4_now",
+          "kind": "predicate",
+          "max": 0.499,
+          "severity": "hard",
+          "note": "wrong_time, no longer applies: last year's visitor parking, closed since"
+        },
+        {
+          "name": "c5_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, still applies: the lot's hours on the day"
+        }
+      ]
+    },
+    {
+      "id": "ask-workshop-refund-now",
+      "file": "requests/ask-workshop-refund-now.json",
+      "sha256": "b39a68e886add838b87e12ee87a3bd8bbccfab11ebb5f63dbee25994525f421c",
+      "estInputTokens": 510,
+      "expect": [
+        {
+          "name": "c1_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, still applies: the full-refund deadline"
+        },
+        {
+          "name": "c4_now",
+          "kind": "predicate",
+          "max": 0.499,
+          "severity": "hard",
+          "note": "wrong_time, no longer applies: last year's refund rule, abolished"
+        }
+      ]
+    }
+  ]
+}

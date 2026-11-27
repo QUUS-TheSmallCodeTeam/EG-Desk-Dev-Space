@@ -1,0 +1,246 @@
+{
+ "set": "heartbeat-c15",
+ "tokenCeiling": 10059,
+ "passRule": "Pass: every hard expectation holds. Speak cases: the named yes/no question must reach 0.8 (the product's bar for acting). Silent cases: it must be 0.5 or less. In need-silence-25s and need-reasoning-70s the product speaks when EITHER message__note or message__stalled is yes; the hard check is on message__note, so read message__stalled as well before calling those two a failure. Soft expectations are findings and never fail the set. No retries; one request per pattern.",
+ "requests": [
+  {
+   "id": "need-quick-3s",
+   "file": "requests/need-quick-3s.json",
+   "sha256": "df3c633764be41bf7a2efb4994d9f03faf6ae48db067c1fbdffffa0de80702f1",
+   "estInputTokens": 488,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "Control: three seconds in, a progress note is noise. A question that says yes here says yes to everything."
+    }
+   ]
+  },
+  {
+   "id": "need-thinking-12s",
+   "file": "requests/need-thinking-12s.json",
+   "sha256": "064faf6c22484e27a9b3226447a62af22af4ee9ead92b2cb67e9b0301e78cfbf",
+   "estInputTokens": 490,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "soft",
+     "note": "Reasoning is visibly going on and no step has run: the design waits until 20 s."
+    }
+   ]
+  },
+  {
+   "id": "need-thinking-20s",
+   "file": "requests/need-thinking-20s.json",
+   "sha256": "78699a2fe28d3de30fccdb0082105412e6f9072ebd804de170a433847ae51938",
+   "estInputTokens": 481,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "soft",
+     "note": "Twenty seconds without a word to the person is twice the attention limit the design rests on."
+    }
+   ]
+  },
+  {
+   "id": "need-command-40s",
+   "file": "requests/need-command-40s.json",
+   "sha256": "72dc5a2ca614a3f45b97512a55d1c409dae80d42950f0fb8b94154554c89ed26",
+   "estInputTokens": 537,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "The case the progress note exists for: a long command, and the person has heard nothing for 40 s."
+    }
+   ]
+  },
+  {
+   "id": "need-objective-40s",
+   "file": "requests/need-objective-40s.json",
+   "sha256": "69c9f5f788abd1d58f9cd6cebd68f72cea6fc321bf902e62fe1ba24a70b3f8a1",
+   "estInputTokens": 499,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "A multi-step task that will clearly go on: the person should hear that it is under way."
+    }
+   ]
+  },
+  {
+   "id": "need-missing-10s",
+   "file": "requests/need-missing-10s.json",
+   "sha256": "7220a0209f73f8a872455030a5fe33a045dcbb4449ee1e9a97c032375c26ed1f",
+   "estInputTokens": 668,
+   "expect": [
+    {
+     "name": "message__ask",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "The early question exists for this: only the person knows the environment, and asking now saves a wasted wait."
+    }
+   ]
+  },
+  {
+   "id": "need-silence-25s",
+   "file": "requests/need-silence-25s.json",
+   "sha256": "16bab8a91c9b70a0ed0e66904461ea3e793a672c4e79525095a7d375a64308c7",
+   "estInputTokens": 584,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "True silence: the person must be told something. (The product also speaks when message__stalled is yes.)"
+    },
+    {
+     "name": "message__stalled",
+     "kind": "predicate",
+     "min": 0.5,
+     "severity": "soft",
+     "note": "Nothing for 24 s after \"checking the material\" leans towards a stall."
+    }
+   ]
+  },
+  {
+   "id": "need-reasoning-70s",
+   "file": "requests/need-reasoning-70s.json",
+   "sha256": "3750175dd4237cfb3ed497a69ebd2f9320dd4f94d81d1ed8db222d3556508a0e",
+   "estInputTokens": 603,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "Seventy seconds without a word: the person must be told something. (The product also speaks when message__stalled is yes.)"
+    },
+    {
+     "name": "message__stalled",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "soft",
+     "note": "Reasoning is known to be in progress, so this is a long wait rather than a stall."
+    }
+   ]
+  },
+  {
+   "id": "need-just-posted-8s",
+   "file": "requests/need-just-posted-8s.json",
+   "sha256": "bf8479951c0bdb9eb4c6f2e9f0c85103d5c7bc654401fedb42886e243469315b",
+   "estInputTokens": 543,
+   "expect": [
+    {
+     "name": "message__note",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "Eight seconds after speaking, another note is noise."
+    }
+   ]
+  },
+  {
+   "id": "pointer-owner-elsewhere",
+   "file": "requests/pointer-owner-elsewhere.json",
+   "sha256": "5eba6e931ff9990d2a4ec3d07ad07909fb6078480bf16cfb3cfd7b0077bc5236",
+   "estInputTokens": 546,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "The pointer exists for this: nothing is moved, so the note is the only way the owner learns where the result is."
+    }
+   ]
+  },
+  {
+   "id": "pointer-requester-present",
+   "file": "requests/pointer-requester-present.json",
+   "sha256": "82d4e94441a2ab38e090c21ff851f494da2bd20850876f045ce6f9534d06c6c4",
+   "estInputTokens": 522,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "The requester is waiting right here, the answer did not say where the result is, and nothing was moved into their view."
+    }
+   ]
+  },
+  {
+   "id": "pointer-already-told",
+   "file": "requests/pointer-already-told.json",
+   "sha256": "ca4a082a8049911a90a0a1cd3dece35f4ee0d9b886efcf32b8c4d276ee719e3d",
+   "estInputTokens": 549,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "soft",
+     "note": "They were just told where it is: a second note adds nothing."
+    }
+   ]
+  },
+  {
+   "id": "pointer-nobody-waiting",
+   "file": "requests/pointer-nobody-waiting.json",
+   "sha256": "425f8563dae6ec68f41c0567be519922b62483b737eab521220eff6609eb1c61",
+   "estInputTokens": 492,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "Nobody is there to read it."
+    }
+   ]
+  },
+  {
+   "id": "pointer-new-run",
+   "file": "requests/pointer-new-run.json",
+   "sha256": "2f39435f7d4894b477edaed5169485d08bde1ee34be820aba9f1c46b448d9426",
+   "estInputTokens": 543,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "soft",
+     "note": "They are here and writing; telling them now costs one line."
+    }
+   ]
+  },
+  {
+   "id": "pointer-held-3min",
+   "file": "requests/pointer-held-3min.json",
+   "sha256": "fc6f8b91a26874705f5cd4446665c6fa22cc06f08370e6889d519e55e469fa3d",
+   "estInputTokens": 502,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "soft",
+     "note": "It is the first chance to tell them, and three minutes is recent."
+    }
+   ]
+  }
+ ]
+}

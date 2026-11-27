@@ -1,0 +1,210 @@
+{
+  "set": "real-engine-planted-tense-v1",
+  "description": "The draft check's REWRITE with a PLANTED draft (L6 c28), case tense: the recorded draft is the CORRECT sentence the real judge's tense question read as done-now in the v7 run (.91/.92). A finding is a false positive; what the rewrite does to a correct answer is what is measured. Expectation by code: no unknown number reaches the person. Needs --decisions and --persisted-with-cleanup.",
+  "conversations": [
+    {
+      "id": "planted-tense-1",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "plant": {
+            "draft": "A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다."
+          },
+          "expect": {
+            "rewrite": {
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "planted-tense-2",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "plant": {
+            "draft": "A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다."
+          },
+          "expect": {
+            "rewrite": {
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "planted-tense-3",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "plant": {
+            "draft": "A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다."
+          },
+          "expect": {
+            "rewrite": {
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "planted-tense-4",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "plant": {
+            "draft": "A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다."
+          },
+          "expect": {
+            "rewrite": {
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

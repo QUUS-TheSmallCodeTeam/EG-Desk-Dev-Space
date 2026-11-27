@@ -227,11 +227,15 @@ test('the bridge opens the workflow runtime after Chat, mounts its routes behind
   const auth = at('const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })')
   assert.ok(at('const chat = new CodexChatRuntime({') < auth && auth < open)
   assert.ok(auth < at('const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)'))
-  at("  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,")
+  at("  ensureAuth: hints => ensureChatAuth(hints), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,")
   // CODE-06 added the typed-command watch: it shares the workflow bus and owner scope, and the registry still feeds exits to the runtime.
   const runWatch = at('const terminalRunWatch = createTerminalRunWatch({ bus: workflow?.bus ?? null, owner: WORKFLOW_OWNER })')
   assert.ok(open < runWatch, 'the watch reads workflow.bus, so the runtime opens first')
-  assert.ok(runWatch < at('const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt), runWatch: terminalRunWatch })'))
+  // The registry still publishes every confirmed exit to the workflow bus; the run watch is reached through the terminal state watch
+  // (a pass-through wrapper that is inert unless EGDESK_TERMINAL_JUDGE is set), which wraps exactly that run watch.
+  const stateWatch = at('const terminalStateWatch = createTerminalStateWatch({ runWatch: terminalRunWatch, flag: () => process.env.EGDESK_TERMINAL_JUDGE,')
+  assert.ok(runWatch < stateWatch)
+  assert.ok(stateWatch < at('const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => { terminalStateWatch.noteExit(receipt); workflow?.publishTerminalExit(receipt) }, runWatch: terminalStateWatch })'))
   const update = source.slice(at('function updateAuthState(patch, { broadcastStatus = true } = {}) {'), at('function authStatusTextFor(snapshot) {'))
   assert.match(update, /workflow\?\.observeAuth\(\{ signedIn: authState\.isLoggedIn === true, accountKey: modelAccountKey\(authState\) \}\)\n {2}engineStatus\.check\(\)\n\}/)
   const mount = at('if (await workflow.handle(req, res, url)) return')
@@ -330,4 +334,12 @@ test('a written gate answer is kept bound to its gate, Board and owner; secret-l
   await reopened.recordAnswer({ ...gate, text: 'second' })
   await reopened.recordAnswer({ ...gate, text: 'third' })
   assert.throws(() => reopened.answerText({ textRef, ...gate }), { code: 'TASK_INPUT_UNRESOLVED' }, 'the oldest answer is dropped past the bound')
+})
+
+test('child-load witness excludes past, unrelated, merely navigated and query-dependent destinations',async t=>{
+  const {runtime}=await bridge(t), url='https://example.org/windows/new'
+  const emit=(openerCardId,path,topic='browser.loaded')=>runtime.bus.publish({owner:'egdesk-local',topic,payload:{cardId:'child',openerCardId,origin:'https://example.org',path}})
+  emit('parent','/windows/new');const check=runtime.watchPopupLoad('parent',url)
+  emit('other','/windows/new');emit('parent','/else');emit('parent','/windows/new','browser.navigated');assert.equal(check(),false)
+  emit('parent','/windows/new');assert.equal(check(),true);assert.equal(runtime.watchPopupLoad('parent',url+'?q=1'),null)
 })

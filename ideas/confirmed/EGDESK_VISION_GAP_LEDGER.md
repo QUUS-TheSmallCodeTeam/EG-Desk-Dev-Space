@@ -10,6 +10,11 @@
 
 ## 진행 기록
 
+<a id="checkpoint-local-20261119"></a>
+**2026-11-19 로컬 기능판 보충 (`4c78406`).** 위 11월 18일 통합 집계와 별도다. ‘Codex 추가 계정 준비 중’은 당시 화면이다. 이후 전용 Codex 계정의 공식 로그인·Agent 귀속, 선택한 Claude 계정의 로그인·상태·일반 채팅 경로가 연결됐다. 지원되는 Codex Board에서는 같은 발송의 다른 Agent가 공개한 발언을 진행 중인 턴에서 받을 수 있다. 일반 DM은 파일 버전·줄 및 별도로 동의한 이후의 발언을 같은 소유자·Agent·방에서만 재사용한다. [현재 사용법과 제한](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-guide) 참조. 이 기준의 격리 회귀는 6,140 통과·0 실패·14 건너뜀이다. 격리 Firefox의 합성 계정·공급자 결과이지 실제 계정 로그인, 모델의 판단 정확도, 모든 현장 자료의 진위 또는 원격 직원 초대의 검증이 아니다. 여기서 95개 항목의 상태를 일괄 승격하지 않는다.
+
+**2026-11-20 같은 세션의 토픽 배정·종속 경로: 일반 Codex Agent DM의 별도 동의 경로로 연결.** 부모 관계를 저장하는 것과 새 요청에 필요한 원문을 골라 전달하는 것은 별개다. 기존에 연결한 Codex 일반 DM에서 Decisions `[사용]`과 API 키에 더해 같은 DM의 별도 허용이 있어야 후자를 사용한다. 허용 이후 완료·확정된 사용자 메시지와 최종 답변 쌍을 최대 96개까지 참조하며 소급 등록하지 않는다. 최근 발언·파일 허용은 별도이며, 이 경로는 일반 Chat 이력을 바꾸지 않고 Board·Claude에는 적용되지 않는다. [일반 DM 사용법](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-topic-tree) · [Decisions에 전달되는 내용](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#membrain-turn-wire) · [같은 세션 토픽 트리와 권한 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-session-topic-tree). 이 기능판의 격리 회귀는 **6,229 통과 · 0 실패 · 14 건너뜀**이다. 실제 채팅·Decisions 클라이언트의 직렬화·SQLite는 사용하되 API와 답변 공급자는 합성으로 대체했다. 최종 질문이 같아도 앞선 정정에 따라 8권/21권이 달라졌고, 재시작과 12발언 창 밖 복귀를 확인했다. 이 시험은 실계정·실모델 품질 또는 실제 배포 검증이 아니며 비전 항목 전체의 상태 집계를 바꾸지 않는다.
+
 **2026-10-29 검증 환경**: UI 검사는 사용자 프로필과 분리한 임시 프로필·합성 자료·headless Firefox로 수행했다. 실제 계정 로그인·provider 호출·전면 OS 입력·Windows/Linux 실행을 확인한 것은 아니다. 외부 OS 격리에서 개인 자료와 외부 네트워크를 차단했으나, 일부 선행 Firefox 시험은 중첩 실행을 위해 내부 content/RDD/socket/GMP sandbox를 비활성화한 조건이었다. 이는 설치된 사용자 앱의 설정 변경이나 기본 보안 설정에서의 제품 검증을 뜻하지 않는다. 마지막 Browser 제목줄 후보는 내부 보호를 유지한 채 재시도했으나 화면 측정 전 `sandbox_init() failed`·자식 `signal 11`·browsing context 소실로 종료됐다. 정확한 원인은 확정하지 않았으며 이 실행을 화면 통과로 집계하지 않는다. 소유 Firefox·fixture는 2026-10-29 06:49:52 KST에 종료했고 사용자 앱은 변경하지 않았다.
 
 **최종 중앙 회귀 — `c4944fd` 코드 기준**: helper·scripts 전체 4,249건 중 4,235 통과·실패 0·제외 14. 제외에는 별도 native 바이너리, opt-in 실환경 관찰, 특정 설치된 Codex 스키마, Windows 및 다운로드 경로 등이 포함된다. 제외 항목을 통과로 집계하지 않는다. 테스트 의존성 연결 보완 뒤 재실행한 수치이며, 아래 UI 인수 범위를 대체하지 않는다.
@@ -22,8 +27,20 @@
 
 **2026-11-01 08:01 KST 운영 점검**: 합성 자료·격리 headless의 개별 근거만 반영하며 상태·총계는 유지한다. 날짜가 붙은 과거 '남은 것'은 당시 기록이고, 현재 확인 범위와 미해결 경계는 이번 점검과 구분해 읽는다.
 
+<a id="decision-memory-gap-20261125"></a>
+
+**2026-11-25 기억 기반 현재 상태 (사실 기록, 결정 아님).** 아래 행은 Agent 중심 기억·턴 처리 순서 목표와 현재 구현의 차이를 코드에서 확인한 것이다. 상태 열은 목표 대비이며 다른 항목의 상태를 바꾸지 않는다.
+
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-11-25 | 기억의 소유·범위 (Agent·조직 소유 없음, DM 외 범위 걸림) | Agent 중심 기억(Contract Memory 소유) 목표 대비 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. scope 실제 값은 `dm:<id>`·`board:<id>`·null뿐(`helper/egdesk-wiki-adapter.mjs:32,225`)이고 현재 DM 외 범위 페이지는 스냅숏에서 버려진다(`:243`). Agent·조직 소유 필드는 없다. 조직·가족·Agent 범위는 계약 문서에만 있다(Contract `Memory·instruction 검증 record`). 자료 `memory-substrate-audit-20261125` 항목 D |
+| 2026-11-25 | 기억 쓰기 경로 (채팅에서만, 사건 기반 작성자 없음) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 쓰기는 채팅 또는 채팅에서 시작한 브라우저 과제뿐(`helper/codex-chat-runtime.mjs:7579,8115`; turnMemory 기본 off `helper/egdesk-bridge-settings.mjs:44`; 발언 동의 필요, 본문은 본인 메시지 2000자 이내 `helper/egdesk-turn-memory.mjs:382,430`; 브라우저 결과는 DM 범위 필요 `helper/egdesk-browser-entry-wiring.mjs:36`). 사건 버스(`helper/egdesk-event-bus.mjs:20-24`)는 terminal.exit·file.changed·browser.navigated/loaded·auth.changed·user.action만 있고 내용이 없으며(터미널 종료는 sessionId·exitCode뿐) 구독자는 게이트·출처 stale 훅뿐이다. HTTP는 `/ontology/*` GET만(`helper/egdesk-ontology-http.mjs:291`) |
+| 2026-11-25 | 시간 상태 (마감·만료·놓침, 열린 항목 비영속) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 페이지 시간은 `time.at` 하나뿐이다. 열린 항목 6종(approval, question, browser_task, run, memory, proposal)에 마감 필드가 없고 레지스트리는 프로세스 메모리다(`helper/egdesk-open-items.mjs:13`). `expiresAt`는 작업 그래프 게이트에만 있다(최대 7일, `helper/egdesk-task-graph.mjs:215`). planned→done 전이는 `planTimelineTransition`(`helper/egdesk-context-setup.mjs:579`)이 제안만 하고 호출처가 없다. 정리·공고화 데몬 없음 |
+| 2026-11-25 | 파일 참조 (경로 참조·이동 추적) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. ref 페이지는 본문이 저장되지 않고(`helper/egdesk-wiki-adapter.mjs:115`) ref가 채팅 메시지일 때만 보인다(`:245`). 파일 위치는 맥락 저장소 수집 출처(rootId+relativePath)이고 파일이 바뀌면 stale 표시만 한다(`helper/egdesk-context-runtime.mjs:373-390`). 경로 갱신·이동 추적 없음. Google Drive 연동 없음 |
+| 2026-11-25 | 기억 관계 (사본·백업 관계, 같은 건 합치기) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 관계는 닫힌 집합 same_task·follows_from·decided_in·supersedes·refers_to뿐이다(`helper/egdesk-wiki-reconstruction.mjs:18-24`). 사본·백업 관계가 없고, 같은 건 묶기는 읽기 시점의 예/아니오(`helper/egdesk-turn-memory.mjs:331-337`)이며 합치기·중복 제거는 없다 |
+| 2026-11-25 | 기억 저장 한도 (200쪽 상한이 오래된 것부터 밀어냄) | 일부 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 실행 중 쓰는 기억은 `egdesk-wiki-writes.json` 하나(0600)이며 pages·readings 각 200개·256KB 한도다(`helper/egdesk-wiki-adapter.mjs:102-135`). 한도에서 오래된 것부터 밀려나므로 "잊지 않음"과 충돌한다. pending→accepted는 사람 확인으로만 된다(`helper/egdesk-turn-memory.mjs:459`) |
+| 2026-11-25 | Ontology 저장소 (가져오기 1회, 읽기 전용) | 일부 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. `ontology.sqlite`는 프로필당 1회 가져오기이며 재가져오기는 `ONTOLOGY_ALREADY_INITIALIZED`로 거부된다(`helper/egdesk-ontology-store.mjs:154-169,284-300`). 쓰기 API가 없다. 이 사용자 프로필 A는 2026-10-27에 이미 가져왔다(개념 102·관계 383·스냅숏 2·원문 58). 페이지 가져오기 HTTP 없음 |
+| 2026-11-25 | 턴 처리 순서 (기록 쓰기 판단이 엔진 답 뒤) | Contract Decision Model 책임 경계와 순서가 다른 곳 있음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 같은 턴의 기억 기록 판단(`startTurnMemoryWrite`, `helper/codex-chat-runtime.mjs:8398`)이 엔진 응답(`engine.startTurn`) 뒤에 있다. 층 감사 `l1-c31b-layer-audit`(base `6c4a861` 기준 줄 번호, 이후 이동 가능)의 M1 실측: 엔진이 먼저 확정을 말한 뒤 기록 판단이 이루어졌다. 이 사실은 결정이 아니며 수정은 별도 작업 |
 | 2026-11-18 | CNV-04 라벨 격리 Firefox 재검증 | 완료 유지 | 새 프로필의 Browser 전체화면이 캔버스를 숨긴 채 검사기가 입력해 라벨이 삭제됐다. 제품 변경 없이 Desk 표시를 확인한 뒤 편집·재편집·복원 검사: 도형 7/7, 새 도형 왕복 4/4, 라벨 `로그인 버튼` 유지. 별도 구형 호환 Board 저장·닫기·재열기도 확인. 신규 Board UI 선택·프로세스 재시작·실제 IME 입력은 미검증 |
 | 2026-11-18 | (조사) BRW-08 headless 포커스 탐침(`dc3f61d`) | 상태 유지(일부) | Reveal 클릭 직후 콘텐츠 `document.hasFocus()`는 false, 클릭 처리기 안의 `query.focus()` 직후에도 `activeElement`가 body라서 포커스 호출 자체가 거부된다. 카드 `<browser>`는 `docShellIsActive=true`인데 하네스의 `browserEl.focus()` 뒤에도 chrome 포커스는 body에 머물고 `focusedContentBrowsingContext`가 없다. 카드 `<browser>`가 chrome 포커스를 못 받는 이유(카드 컨테이너나 `-moz-user-focus` 추정)는 미확인이고, 실화면에서도 사람이 카드를 누르기 전에는 같은지 확인이 필요하다. CNV-04 라벨은 이번에 조사하지 못했다 |
 | 2026-11-18 | (회귀) 통합 `dc3f61d` 전체 `scripts`·`helper` | 기록 | 227파일 5817 통과 · 0 실패 · 14 건너뜀(37초, 동시성 4). 부하 타이밍 시험 3개는 `501bc4a`에서 고정 여유 대신 이벤트 대기로 바꿈 |
@@ -542,6 +559,16 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 
 ## 진행 순서
 
+<a id="agent-memory-build-plan-20261125"></a>
+### Agent 중심 기억 구축 순서 (계획, 확정 사양 아님)
+
+2026-11-25 Main 제안이며 소유자가 계획으로 문서화해도 된다고 했다. 확정된 사양이나 승인된 일정이 아니고, 순서·범위는 바뀔 수 있다. 목표 원칙은 Contract [Memory 소유](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-memory-agent-owner)·[사용 모드 분리](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-usage-modes)·[Decision Model 책임 경계](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-decision-boundary)이고, 현재 차이는 [2026-11-25 현재 상태 행](#decision-memory-gap-20261125)이다.
+
+1. Agent를 기억 소유자로 만든다.
+2. Agent별 소유 설정(조직/개인)을 둔다.
+3. Ontology를 Agent가 사건과 Decision Model을 통해 쓸 수 있게 한다(대체, 사본, 파일 위치, 마감, 만료 포함).
+4. 대화 상대를 고를 때 두 사용 모드가 분명히 구분되게 한다.
+
 <a id="org-delivery-priority"></a>
 ### 조직 사용을 위한 개발 전달 순서
 
@@ -556,6 +583,13 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 추가가 필요하면 별도 승인을 받으며, 외부 전송·계정 조작은 기존 승인 범위를 넘지 않는다.
 아래 설계만으로 승인되거나 구현된 것으로 보지 않는다.
 
+**구분해서 인수할 항목(조직·Linux 항목은 미실행):**
+
+- **같은 Mac의 Firefox 두 프로필:** 실제 로컬 Board 서버·저장소를 연결해 초대, 카드 공개·회수, 개인 배치, 겹친 카드의 조작을 확인하는 UI/UX 중심 기능 통합 회귀다. 화면만 흉내 낸 시험은 아니지만 사람의 발견성, 서로 다른 망의 연결, 조직 배포를 증명하지 않는다.
+- **조직 개설·권한:** 승인된 기존 환경에 내장 툴킷으로 협업 서비스를 준비한 뒤 첫 관리자와 조직을 만들고, 다른 사용자가 자기 기기에서 조직 초대를 수락하는지 확인한다. 가입만으로 Board·화면·입력 권한이 생기지 않아야 한다. 개별 Board 초대만 성공하면 이 항목은 미확인이다.
+- **원격 전송 비교:** 사내망과 외부망의 실제 두 기기에서 조직 인증, 연결 정보 교환, 실제 화면 수신을 따로 관찰한다. 허용된 직결과 조직 중계 각각에 대해 실제 경로, 첫 화면 도달, 지연·중계 트래픽, 철회 후 새 화면 전송 중단, 단절·재접속을 비교한다. 연결 표시나 권한 응답만으로 영상 성공을 세지 않는다. 실측과 보안 정책으로 기본 경로를 정하며, 현재 어느 방식을 사용자가 확정한 것으로 보지 않는다.
+- **헤드리스 Linux판:** 모니터·그래픽 로그인 없는 지원 Linux에서 EG-Desk 자체를 배치하고 재부팅 후 동작과 상태 확인을 검증한다. 조직용 툴킷과 독립된 배포 시험이다. 한쪽 통과를 다른 쪽 통과로 세지 않는다.
+
 다중 OS는 기존 제품 방향이다. 정확한 OS·버전 조합과 연결·인증 구현은 별도 제품 정책
 선택이 아니라 기술 조사·검증 항목이며, 회사별 PC 목록은 배포 설정으로 관리한다. 이 조직
 사용에서 사용자 선택이 필요한 정책 범위는 개별·상시 위임 범위, 직원 대화의 공유·보관,
@@ -567,6 +601,8 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 | **2. 부서 간 최소 공유** | 1의 신원·기기·읽기·복구 경계 위에서 생산 부서가 승인한 날짜·수량·제약만 요청 부서의 기존 Board에 공유한다. 선행: 소유 범위의 위임과 수신자별 공개 권한, 최소 결과 검토. | 원본을 못 보는 직원에게 원문·제목·첨부·비공개 존재가 새지 않고, 공개된 사실의 열람이 원본 열람·수정 권한으로 바뀌지 않는다. 요청자·승인자·수신자, 전송과 실제 수락·열람을 구분한다. 철회 뒤 도달 가능한 정책 검사 경계에서는 새 접근을 막고, 오프라인 대상의 전달·적용은 확인 전까지 미확인으로 남긴다. 오프라인 보존은 허용된 정책 범위를 따르며 이미 전달된 사본의 회수는 보장하지 않는다. | 기존 협업 설계와 일부 로컬 객체는 있으나 이 조직 간 공유 흐름·권한 집행·운영은 미검증이다. 초대 UI나 공유 계획만으로 권한 격리를 주장하지 않는다. |
 | **3. 외부·파일 실행과 결과 재확인** | 공통 신원·권한·기록 경계에서 지정된 실행 PC와 사이트 계정으로 ERP 정정·삭제 또는 메일 초안을 처리하고, 정확한 PC의 기존 업무 워크북도 제안·검토 후 원본에 저장한다. 선행: 대상 식별, 현재 revision·행동별 위임, 실제 실행 준비, 필요한 승인과 재확인 경로. 실제 부서 간 자료를 쓰는 경우에만 2의 최소 공유 조건도 선행한다. 분리된 adapter 개발·로컬 모의 검사는 병렬 가능하다. | 고객·대상·계정 불일치를 차단하고 정정 전후와 외부 서비스의 확인 증거를 구분한다. 워크북은 Chat 요청 → 정확한 PC·기존 File 선택 → Agent 변경 제안·비교·적용 → 원본 저장 → 같은 File 재조회까지 확인한다. 수식·서식·템플릿·기존 기록의 보존을 보장할 수 없거나 충돌하면 원본 저장을 차단한다. 메일 초안·다른 프로그램의 표시·발송을 혼동하지 않고, 불명확한 외부 쓰기는 확인 없이 재전송하지 않는다. 배포 전 해당 시나리오의 조건을 모두 인수한다. | Browser·로컬 File 도구와 확인 설계에는 일부 구현이 있으나 실제 조직 계정·외부 시스템의 전체 실행과 워크북 보존·원본 저장·재조회 흐름은 이 문서에서 검증하지 않았다. 기존 격리 시험은 실서비스 인수가 아니다. |
 | **4. 인계·복구 확장** | 1–3의 기본 백업·복원을 유지하면서 다른 승인 PC로 업무 인계, 재연결·복구 절차와 장애 대응을 확장한다. 자동 호스트 승계는 별도 후순위다. 선행: 기존 시도·결과 상태 조회, 이전 writer의 중지 또는 격리 확인, 새 기기·계정·권한 재확인. | 인계문 생성·전달·수락·실제 실행을 따로 확인하고, 인계문만으로 다른 PC의 실행을 완료 처리하지 않는다. 단절이 원격 프로세스 종료나 외부 효과 취소를 뜻하지 않으며, 늦은 결과로 현재 실행을 덮거나 중복 전송하지 않는다. 이전 writer 격리가 불확실하면 새 writer를 열지 않는다. | 로컬 복구·가져오기에는 부분 구현이 있으나 원격 인계·호스트 전환·자동 승계의 운영 검증은 없다. 첫 호스트의 수동 백업·복원은 이 단계까지 미루지 않는다. |
+
+**같은 Board·상호 Agent 위임: 추가 인수 범위, 미실행.** 위 순서를 바꾸지 않는다. 두 사람이 각자의 카드에서 같은 업무를 볼 때, 호스트에 결과만 맡길 때, 살아 있는 카드 보기/입력권을 주거나 회수할 때를 구분한다. 민재가 서윤의 Agent를 부르고 서윤이 민재의 Agent를 동시에 부르는 두 요청에서 카드·업무 계정·처리처/비용·답변 수신자가 서로 뒤섞이지 않아야 한다. 한쪽 회수, 다른 수신자에게 재위임, 호스트 단절 뒤 이미 일어났을 수 있는 저장도 따로 인수한다. [사용자 흐름](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-shared-card-agents) · [시나리오별 기대·거부 결과](../../apps/firefox-ui-demo/docs/BOARD_COLLABORATION_AND_CROSS_AGENT_DESIGN.md#collab-checks). 로컬 파일 교환·격리 Agent 라우팅은 이 원격 기능을 검증한 것이 아니다.
 
 **공용 Engine 계정의 직원별 권한 인수 사례 — 미실행**
 

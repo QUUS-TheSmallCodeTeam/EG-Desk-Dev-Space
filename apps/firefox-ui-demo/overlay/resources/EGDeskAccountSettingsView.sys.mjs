@@ -291,7 +291,7 @@ const CLAUDE_LOGIN_LINES = Object.freeze({ claudeai: 'claude auth login --claude
  * Returns { phase: 'started' | 'error', text }.
  */
 export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, terminalApi = card => card?._termBrowser?.contentWindow?.terminalAPI ?? null,
-  sleep = null, now = Date.now, method = 'claudeai', timeoutMs = 15000,
+  sleep = null, now = Date.now, method = 'claudeai', timeoutMs = 15000, quietMs = 400, readyTimeoutMs = 8000, signinCardMs = 0,
   isCurrent = () => true,
   checkLine = command => Object.hasOwn(CLAUDE_LOGIN_LINES, method) && command?.method === method && command.line === CLAUDE_LOGIN_LINES[method] ? command.line : null,
   startedText = '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' } = {}) {
@@ -322,10 +322,39 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
     if (card.isConnected === false || !wait) break;
     try { await wait(50); } catch { break; }
   }
+  // c35 / u1: a line typed before the shell's line editor is up is echoed twice (by the tty, then again by the editor). c35 waited for 400 ms of silence after the first output; a real shell
+  // proved that wrong: the first output is often a start-up file's warning (e.g. nvm's), followed by silence while the rest of the start-up runs, and the line went in too early.
+  // The signal is the editor itself: it switches bracketed paste on when it starts reading a line (see shellReadyToType). Bounded by readyTimeoutMs; a terminal API that reports neither
+  // output timing nor the editor is typed to at once, as before.
+  if (api && (typeof api.outputIdleMs === 'function' || typeof api.lineEditorReady === 'function') && wait) {
+    const readyStarted = now();
+    while (now() - readyStarted < readyTimeoutMs) {
+      if (!isCurrent()) return changed();
+      let idle = null, editor = null;
+      try { idle = api.outputIdleMs?.() ?? null; } catch { idle = null; }
+      try { editor = api.lineEditorReady?.() ?? null; } catch { editor = null; }
+      if (shellReadyToType({ idleMs: idle, editorReady: editor }, { quietMs })) break;
+      if (card.isConnected === false) break;
+      try { await wait(50); } catch { break; }
+    }
+  }
   if (!isCurrent()) return changed();
   if (!api) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
   try { await api.write(`${line}\r`); } catch {
     return { phase: 'error', text: `터미널에 입력하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
+  }
+  // c36 (flag, capability terminal-open-url): the CLI opens its sign-in page within a second or two; when no Browser Card was opened for this terminal within `signinCardMs`, say so now
+  // (the existing "terminal not ready" sentence: the line is to be run by hand) instead of leaving the person with nothing to do for minutes.
+  if (signinCardMs > 0 && wait && typeof card._linkedSigninCount === 'function') {
+    const typedAt = now();
+    let opened = false;
+    while (now() - typedAt < signinCardMs) {
+      if (!isCurrent()) return changed();
+      try { opened = card._linkedSigninCount() > 0; } catch { opened = false; }
+      if (opened || card.isConnected === false) break;
+      try { await wait(100); } catch { break; }
+    }
+    if (!opened) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
   }
   return { phase: 'started', text: startedText };
 }
@@ -344,6 +373,12 @@ const PROFILE_ID = /^(codex|claude)-[a-z0-9]{1,40}$/;
  * engineProfilesView(engines, engineId, { connected }) → { engineId, rows, canAdd, note }
  * rows: [{ id, label, marker, owned, active, status, authText, canActivate, canRemove, canLogin }]
  */
+export const ENGINE_PROFILE_LABEL_ERROR = '계정 이름을 1~60자로 입력해 주세요.';
+export function engineProfileLabel(value) {
+  const label = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  return label && label.length <= 60 && !/[\u0000-\u001f\u007f]/.test(label) ? label : null;
+}
+
 export function engineProfilesView(engines, engineId, { connected = false } = {}) {
   const name = ENGINE_NAMES[engineId] || engineId;
   const row = connected === true ? (Array.isArray(engines) ? engines : []).find(candidate => object(candidate) && candidate.id === engineId) : null;
@@ -368,7 +403,8 @@ export function engineProfilesView(engines, engineId, { connected = false } = {}
       };
     });
   return {
-    engineId, rows, canAdd: connected === true && Boolean(row),
+    engineId, rows, canAdd: row?.profileAddAndLogin === true,
+    addUnavailable: row && row.profileAddAndLogin !== true ? '지금은 이 엔진에 새 계정을 추가해 로그인할 수 없습니다.' : null,
     note: engineId === 'codex'
       ? '추가한 ChatGPT 계정은 Agent별로 선택할 수 있습니다. 이 컴퓨터의 기본 로그인은 바뀌지 않습니다.'
       : '계정을 바꾸면 새 대화부터 적용됩니다. 진행 중인 대화는 시작한 계정에서 끝나고, 다른 계정으로 옮겨지지 않습니다.',
@@ -407,12 +443,12 @@ export function engineProfileErrorText(error) {
   const code = text(error?.code);
   return {
     ENGINE_PROFILE_BUSY: '진행 중인 대화가 있어 계정을 바꾸지 않았습니다. 끝난 뒤 다시 선택해 주세요.',
-    ENGINE_PROFILE_NOT_YET: 'Codex는 아직 계정을 하나만 쓸 수 있습니다.',
+    ENGINE_PROFILE_NOT_YET: '지금은 이 엔진에 새 계정을 추가해 로그인할 수 없습니다.',
     ENGINE_PROFILE_ACTIVE: '사용 중인 계정은 지울 수 없습니다. 다른 계정을 먼저 선택해 주세요.',
     ENGINE_PROFILE_DEFAULT: '이 컴퓨터 로그인은 지울 수 없습니다.',
     ENGINE_PROFILE_IN_USE: '이 계정으로 진행 중인 대화가 있어 지우지 않았습니다.',
     ENGINE_PROFILE_LIMIT: '이 엔진에는 계정을 더 추가할 수 없습니다.',
-    INVALID_PROFILE_LABEL: '이름은 1~60자로 적어 주세요.',
+    INVALID_PROFILE_LABEL: ENGINE_PROFILE_LABEL_ERROR,
     ENGINE_PROFILES_UNAVAILABLE: '이 컴퓨터에 계정 설정을 저장할 수 없습니다.',
   }[code] || `계정 설정을 바꾸지 못했습니다: ${text(error?.message) || '연결 프로그램 오류'}`;
 }
@@ -425,19 +461,31 @@ export function engineProfileErrorText(error) {
 // only the bridge's hint (…끝 4자) is ever shown.
 export const DECISION_SECTION_TITLE = '결정 모델 · OpenAI Decisions';
 export const DECISION_MODES = Object.freeze([
-  Object.freeze({ value: 'off', label: '끔', note: '지금처럼 추론 모델만 씁니다.' }),
-  Object.freeze({ value: 'advisory', label: '기록만', note: '결정 모델이 고른 자료를 활동 기록에만 남기고 붙이지 않습니다.' }),
-  Object.freeze({ value: 'on', label: '사용', note: '결정 모델이 고른 자료를 메시지와 함께 붙입니다.' }),
+  Object.freeze({ value: 'off', label: '끔', note: '자동 선별에 OpenAI Decisions를 사용하지 않습니다.' }),
+  Object.freeze({ value: 'advisory', label: '기록만', note: '지원되는 요청에서 메시지와 후보 설명을 OpenAI에 보낼 수 있습니다. API 비용이 들 수 있으며, 결과는 해당 실행의 활동 기록에만 남기고 답변 입력에는 붙이지 않습니다.' }),
+  Object.freeze({ value: 'on', label: '사용', note: '지원되는 요청에서 메시지와 후보 설명을 OpenAI에 보낼 수 있습니다. API 비용이 들 수 있으며, 선별에 성공하면 허용된 선택 자료를 답변 입력에 붙입니다. Codex DM의 이전 대화 원문을 주제 선별에 보내려면 그 DM의 기억 근거에서 별도로 허용해야 합니다.' }),
 ]);
 export const DECISION_CREDIT_NOTE = 'ChatGPT Pro·Business 요금제의 API 크레딧은 연결한 API 조직의 project key에만 적용됩니다. Plus는 대상이 아닙니다.';
 const DECISION_VERIFICATION_TEXT = Object.freeze({
   verified: '확인됨',
   no_credit: '크레딧 없음 · 키는 저장했습니다. 크레딧이 생기면 바로 쓸 수 있습니다.',
-  rate_limited: '요청 한도에 걸림 · 키는 저장했습니다. 잠시 뒤 다시 확인됩니다.',
+  spend_limit_reached: '지출·사용 한도에 도달 · 키는 저장했습니다. OpenAI에서 한도를 올리거나 다음 달 초기화 뒤에 쓸 수 있습니다.',
+  rate_limited: '요청 한도에 걸림 · 키는 저장했습니다. 잠시 뒤 다시 시도하세요.',
   invalid_key: '키가 올바르지 않습니다',
+  not_verified: 'OpenAI가 키 확인 질문에 통과시키지 않았습니다',
+  server_error: 'OpenAI 서버 오류입니다. 잠시 뒤 다시 시도하세요',
+  bad_response: 'OpenAI의 답을 해석하지 못했습니다',
+  budget_exceeded: '이번 달 로컬 사용 한도에 도달해 확인하지 못했습니다',
   model_unavailable: '이 키로는 결정 모델(gpt-6-luna)을 쓸 수 없습니다',
   unreachable: 'OpenAI에 연결하지 못했습니다',
   timeout: 'OpenAI가 제때 답하지 않았습니다',
+});
+
+// Why a new key was not swapped in while a saved key exists (it could be saved on its own).
+const DECISION_NOT_REPLACED_TEXT = Object.freeze({
+  no_credit: '새 키에 크레딧이 없습니다',
+  spend_limit_reached: '새 키가 지출·사용 한도에 막혀 있습니다',
+  rate_limited: '새 키가 요청 한도에 걸렸습니다',
 });
 
 /** Korean line for a /decision/credential verification status. */
@@ -452,11 +500,14 @@ export function decisionVerificationText(status) {
 export function decisionSettingsView(status, { connected = false } = {}) {
   const known = connected && object(status);
   const configured = known && status.configured === true;
-  const mode = known && DECISION_MODES.some(choice => choice.value === status.mode) ? status.mode : 'off';
+  const mode = known && DECISION_MODES.some(choice => choice.value === status.mode) ? status.mode : null;
   const storeBroken = known && ['unreadable', 'unsupported', 'unavailable'].includes(status.store);
   const hint = configured && typeof status.keyHint === 'string' ? status.keyHint : null;
   const budget = known && object(status.budget) && Number.isSafeInteger(status.budget.inputTokens) ? status.budget : null;
   return {
+    scopeNote: '일반 대화나 Board에서 일부 자동 선별에 쓰는 별도 API입니다. 이 설정과 관계없이 자료를 직접 고르거나 로컬 기록을 볼 수 있습니다.',
+    invocationNote: '저장된 모드와 키는 실행 기록이 아닙니다. 실제 선별 기록이 있으면 해당 실행의 활동 기록에서 볼 수 있습니다.',
+    keyActionNote: '확인 후 저장을 누르면 키 확인을 위해 OpenAI에 요청을 보냅니다.',
     status: !known ? 'unknown' : configured ? 'configured' : 'empty',
     keyLine: !known ? '확인할 수 없음 · 브리지 연결이 준비되면 다시 확인합니다.'
       : configured ? `저장된 키 ${hint || ''}`.trim() : '저장된 키 없음',
@@ -467,9 +518,10 @@ export function decisionSettingsView(status, { connected = false } = {}) {
     // Without a key only '끔' applies; the choice is kept for when one is saved.
     modeEnabled: known && status.mode !== null && status.mode !== undefined,
     modes: DECISION_MODES.map(choice => ({ ...choice, selected: choice.value === mode })),
-    modeNote: (DECISION_MODES.find(choice => choice.value === mode) || DECISION_MODES[0]).note
-      + (mode !== 'off' && known && !configured ? ' 키를 저장하면 적용됩니다.' : ''),
-    budgetLine: budget ? `이번 달 입력 ${budget.inputTokens.toLocaleString('en-US')} 토큰${Number.isSafeInteger(budget.cap) ? ` / 상한 ${budget.cap.toLocaleString('en-US')}` : ''}` : null,
+    modeNote: !mode ? '저장된 모드를 확인할 수 없습니다.' : DECISION_MODES.find(choice => choice.value === mode).note
+      + (mode !== 'off' && !configured ? ' 저장된 키가 없어 지금은 요청하지 않습니다.'
+        : mode !== 'off' && budget?.cap != null && budget.inputTokens + (Number.isSafeInteger(budget.estimatedInputTokens) ? budget.estimatedInputTokens : 0) >= budget.cap ? ' 이번 달 설정한 한도에 도달해 새 선별 요청을 보내지 않습니다.' : ''),
+    budgetLine: budget ? `이번 달 집계된 입력 ${budget.inputTokens.toLocaleString('en-US')} 토큰${budget.estimatedInputTokens > 0 ? ` + 응답 없이 보낸 요청 ${budget.unmeteredRequests}건 추정 ${budget.estimatedInputTokens.toLocaleString('en-US')}` : ''}${Number.isSafeInteger(budget.cap) ? ` / 상한 ${budget.cap.toLocaleString('en-US')}` : ''}` : null,
     creditNote: DECISION_CREDIT_NOTE,
   };
 }
@@ -482,7 +534,15 @@ export function decisionSettingsView(status, { connected = false } = {}) {
 export function decisionCredentialOutcome({ result = null, error = null } = {}) {
   if (result && !error) {
     const verification = typeof result.verification === 'string' ? result.verification : 'verified';
-    return { phase: verification === 'verified' ? 'done' : 'warning', verification, text: decisionVerificationText(verification) };
+    // A key alone does nothing while the mode is 끔: say so next to the switch the person has to use.
+    const base = decisionVerificationText(verification);
+    const modeHint = result.mode === 'off' ? `${/[.。]$/.test(base) ? ' ' : ' · '}모드가 ‘끔’이라 아직 쓰이지 않습니다. 아래에서 ‘사용’을 고르면 쓸 수 있습니다.` : '';
+    return { phase: verification === 'verified' ? 'done' : 'warning', verification, text: base + modeHint };
+  }
+  if (error?.code === 'DECISION_KEY_NOT_REPLACED') {
+    const verification = typeof error.verification === 'string' ? error.verification : 'unreachable';
+    const why = DECISION_NOT_REPLACED_TEXT[verification] || decisionVerificationText(verification);
+    return { phase: 'error', verification, text: `${why} · 새 키로 바꾸지 않았습니다. 지금 쓰는 키는 그대로입니다. 기존 키를 지운 뒤에는 이 키도 저장할 수 있습니다.` };
   }
   if (error?.code === 'DECISION_KEY_REJECTED') {
     const verification = typeof error.verification === 'string' ? error.verification : 'unreachable';
@@ -491,4 +551,41 @@ export function decisionCredentialOutcome({ result = null, error = null } = {}) 
   if (error?.code === 'DECISION_KEY_INVALID') return { phase: 'error', verification: null, text: 'API 키 형식이 아닙니다. sk-로 시작하는 키를 붙여 넣어 주세요.' };
   if (error?.code === 'DECISION_STORE_UNAVAILABLE' || error?.code === 'DECISION_STORE_FAILED') return { phase: 'error', verification: null, text: '이 컴퓨터에서 키를 저장하지 못했습니다.' };
   return { phase: 'error', verification: null, text: '브리지에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.' };
+}
+
+// c36 (flag): after the login line was typed the Claude section waits visibly and the screen checks the engine itself, so a successful sign-in shows at once and a login that ended without
+// success shows an error at once. watchClaudeLogin polls `refresh()` every pollMs (the bridge coalesces checks), for at most boundMs:
+//   'signedIn' (isSignedIn() true), 'ended' (sessionEnded() true and not signed in: the terminal's session exited or lost its connection), 'changed' (isCurrent() false), 'timeout' (the bound).
+// The words of 'ended' are the existing error form (no new copy); a better sentence is a proposal in the report.
+export const CLAUDE_LOGIN_WATCH = Object.freeze({ pollMs: 3000, boundMs: 300_000, terminalReadyMs: 5000, signinCardMs: 10_000 });
+export const CLAUDE_LOGIN_ENDED_TEXT = 'Claude 상태를 바꾸지 못했습니다: 연결 프로그램 오류';
+export async function watchClaudeLogin({ refresh, isSignedIn, sessionEnded, isCurrent = () => true, wait, now = Date.now, pollMs = CLAUDE_LOGIN_WATCH.pollMs, boundMs = CLAUDE_LOGIN_WATCH.boundMs } = {}) {
+  const started = now();
+  while (now() - started < boundMs) {
+    try { await refresh(); } catch { /* a failed check is tried again at the next poll */ }
+    // u1: signed in is checked first: once the login worked, the Settings row no longer offers a login (isCurrent turns false) and that is not "the account changed"
+    let signed = false;
+    try { signed = isSignedIn() === true; } catch { signed = false; }
+    if (signed) return 'signedIn';
+    if (!isCurrent()) return 'changed';
+    let ended = false;
+    try { ended = sessionEnded() === true; } catch { ended = false; }
+    if (ended) return 'ended';
+    try { await wait(pollMs); } catch { return 'changed'; }
+  }
+  return 'timeout';
+}
+
+// u1: may a login line be typed now? `editorReady` is the terminal's report of the shell's line editor (true while it reads a line; false before; null when unknown), `idleMs` the time since
+// the shell last printed (null: nothing yet).
+//  - editor up (true): yes, once the prompt has settled (PROMPT_SETTLE_MS) - the exact moment, however long the start-up files took.
+//  - editor not up (false): the shell may be a slow start-up (wait on) or a shell without bracketed paste (bash 3.2: the editor never reports); only a long silence (NO_EDITOR_IDLE_MS) says it is
+//    at its prompt. A start-up silent for longer than that is typed into early, as c35 did for every shell; the caller's bound ends the wait.
+//  - unknown (null): c35's rule: some output, then `quietMs` of silence.
+export const PROMPT_SETTLE_MS = 120;
+export const NO_EDITOR_IDLE_MS = 2500;
+export function shellReadyToType({ idleMs = null, editorReady = null } = {}, { quietMs = 400, settleMs = PROMPT_SETTLE_MS, noEditorIdleMs = NO_EDITOR_IDLE_MS } = {}) {
+  if (editorReady === true) return idleMs === null || idleMs >= settleMs;
+  if (editorReady === false) return idleMs !== null && idleMs >= noEditorIdleMs;
+  return idleMs !== null && idleMs >= quietMs;
 }

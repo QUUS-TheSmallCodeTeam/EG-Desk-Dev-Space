@@ -208,6 +208,7 @@ export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, 
   const store = {
     get status() { return status },
     get writable() { return writable },
+    supportsAddAndLogin: engine => writable && Boolean(enginesDir) && (engine === 'claude' || engine === 'codex' && isolatedCodex === true),
     list(engine = null) {
       const engines = engine == null ? PROFILE_ENGINES : PROFILE_ENGINES.filter(name => name === engine)
       return engines.flatMap(name => [DEFAULT_ENGINE_PROFILE_IDS[name], ...profiles.filter(row => row.engine === name).map(row => row.id)].map(id => view(name, id)))
@@ -220,11 +221,12 @@ export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, 
     },
     ownedCodexHome,
     active: engine => activeId(engine),
-    add({ engine, label } = {}) {
+    add({ engine, label, requireRunnable = false } = {}) {
       if (!PROFILE_ENGINES.includes(engine)) throw profileError('INVALID_ENGINE', 'Unknown AI engine')
       const clean = normalizeProfileLabel(label)
       if (!clean) throw profileError('INVALID_PROFILE_LABEL', 'Label must be 1 to 60 characters')
       if (!writable || !enginesDir) throw profileError('ENGINE_PROFILES_UNAVAILABLE', 'Engine profiles cannot be saved on this computer', 503)
+      if (requireRunnable && !store.supportsAddAndLogin(engine)) throw profileError('ENGINE_PROFILE_NOT_YET', 'A private login is not supported for this engine', 409)
       if (profiles.filter(row => row.engine === engine).length >= MAX_ENGINE_PROFILES - 1) throw profileError('ENGINE_PROFILE_LIMIT', 'Too many profiles for this engine', 409)
       const id = `${engine}-${String(randomId()).toLowerCase()}`
       if (!PROFILE_ID.test(id) || find(id)) throw profileError('ENGINE_PROFILE_ID', 'Could not make a profile id', 500)
@@ -233,7 +235,10 @@ export function openEngineProfiles({ dataDir, log = defaultLog, now = Date.now, 
         say(`engine profile directory could not be made (${errorCode(error)})`)
         throw profileError('ENGINE_PROFILES_UNAVAILABLE', 'The private login folder could not be made', 503)
       }
-      try { commit([...profiles, { id, engine, label: clean, owned: true }], active) }
+      try {
+        if (requireRunnable) assertPrivateDir(target)
+        commit([...profiles, { id, engine, label: clean, owned: true }], active)
+      }
       catch (error) { try { rmSync(target, { recursive: true, force: true }) } catch {} throw error }
       return view(engine, id)
     },

@@ -78,6 +78,10 @@ test('production top bar draws the record status from real saves only', () => {
   assert.doesNotThrow(() => api.noteDeskRecord(true), 'saves before the top bar exists are still remembered');
 
   const rail = topLevelFunction('buildDeskRail');
+  assert.doesNotMatch(rail, /egd-rail-avatar|aria-label': '로컬 Desk'/);
+  assert.match(rail, /buildResourceGadget\(\)/);
+  assert.match(rail, /testid: 'desk-menu'/);
+  assert.match(topLevelFunction('syncViewportAgendaRail'), /railRight\.appendChild\(gadget\)/);
   assert.match(rail, /class: 'egd-rail-record-status', hidden: true/);
   assert.match(rail, /class: 'egd-rail-record-retry', hidden: true, title: '이 PC에 다시 기록', 'aria-label': '이 PC에 다시 기록'/);
   assert.match(rail, /if \(!persistDeskSession\(\{ reason: 'explicit' \}\)\) boardNotice\(/);

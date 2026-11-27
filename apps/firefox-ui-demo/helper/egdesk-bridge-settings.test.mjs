@@ -281,3 +281,19 @@ test('decisionContext defaults to off, is saved beside other settings and read b
   assert.equal(third.status, 'recovered')
   assert.equal(third.decisionContext.mode, 'off')
 })
+
+test('a decision mode write refusal reports the previous mode remains active', t => {
+  const f = fixture(t)
+  const store = f.open()
+  assert.equal(store.writable, true)
+  assert.equal(store.decisionContext.mode, 'off')
+  assert.deepEqual(f.entries(), [])
+  // Remove only this test's empty private directory, so the atomic create fails deterministically.
+  rmSync(f.dataDir, { recursive: true })
+  assert.equal(store.decisionContext.save('on'), false)
+  assert.equal(store.decisionContext.mode, 'off')
+  assert.equal(store.decisionContext.saved, false)
+  assert.deepEqual(f.logs, [
+    `${BRIDGE_SETTINGS_FILE} could not be saved (ENOENT); the previous decision mode remains active`,
+  ])
+})

@@ -327,7 +327,10 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
   let undos = [];
   let redos = [];
 
-  function record({ label = 'move', items = [], groups = null } = {}) {
+  // `extra` ({before, after}, plain JSON owned by the host: e.g. stacking and camera of an arrangement), `token` (host identity of
+  // the step) and `guard(expect)` (host check that the extra is still as the step left it) let one history carry a step whose
+  // effect is more than rects. The history never interprets them.
+  function record({ label = 'move', items = [], groups = null, extra = null, token = null, guard = null } = {}) {
     const byId = new Map();
     for (const item of Array.isArray(items) ? items : []) {
       const id = viewId(item?.id);
@@ -341,8 +344,10 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
     const groupStep = groups && typeof groups === 'object'
       ? { before: normalizeCanvasGroups(groups.before), after: normalizeCanvasGroups(groups.after) } : null;
     const groupsChanged = !!groupStep && JSON.stringify(groupStep.before) !== JSON.stringify(groupStep.after);
-    if (!changed.length && !groupsChanged) return false;
-    undos.push({ label: typeof label === 'string' && LABEL_PATTERN.test(label) ? label : 'move', items: changed, groups: groupsChanged ? groupStep : null });
+    const hostExtra = extra && typeof extra === 'object' && extra.before && extra.after ? JSON.parse(JSON.stringify({ before: extra.before, after: extra.after })) : null;
+    if (!changed.length && !groupsChanged && !hostExtra) return false;
+    undos.push({ label: typeof label === 'string' && LABEL_PATTERN.test(label) ? label : 'move', items: changed, groups: groupsChanged ? groupStep : null,
+      extra: hostExtra, token: token ?? null, guard: typeof guard === 'function' ? guard : null });
     if (undos.length > max) undos = undos.slice(undos.length - max);
     redos = [];
     return true;
@@ -354,10 +359,14 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
     const read = typeof readRect === 'function' ? readRect : () => null;
     const staleIds = entry.items.filter(item => !sameRect(toWorldRect(read(item.id)), item[expect], tolerance)).map(item => item.id);
     if (staleIds.length) return { status: 'stale', label: entry.label, rects: [], staleIds, groups: null };
+    let guarded = true;
+    try { guarded = !entry.guard || entry.guard(expect) === true; } catch { guarded = false; }
+    if (!guarded) return { status: 'stale', label: entry.label, rects: [], staleIds: [], groups: null };
     to.push(entry);
     return {
       status: done, label: entry.label, rects: entry.items.map(item => ({ id: item.id, ...item[apply] })), staleIds: [],
-      groups: entry.groups ? entry.groups[apply].map(group => ({ id: group.id, viewIds: [...group.viewIds] })) : null,
+      extra: entry.extra ? JSON.parse(JSON.stringify(entry.extra[apply])) : null, token: entry.token,
+      groups: entry.groups ? entry.groups[apply].map(group => ({ id: group.id, viewIds: [...group.viewIds], ...(group.groupIds ? { groupIds: [...group.groupIds] } : {}) })) : null,
     };
   }
 
@@ -381,6 +390,14 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
     },
     undo(readRect) { return step(undos, redos, 'after', 'before', readRect, 'undone'); },
     redo(readRect) { return step(redos, undos, 'before', 'after', readRect, 'redone'); },
+    // Identity of the newest undoable step, so a host can tell whether its own step is the latest one.
+    top: () => (undos.length ? { label: undos.at(-1).label, token: undos.at(-1).token } : null),
+    drop(token) {
+      if (token == null) return false;
+      const n = undos.length + redos.length;
+      undos = undos.filter(entry => entry.token !== token); redos = redos.filter(entry => entry.token !== token);
+      return undos.length + redos.length !== n;
+    },
     canUndo: () => undos.length > 0,
     canRedo: () => redos.length > 0,
     size: () => ({ undo: undos.length, redo: redos.length }),
@@ -471,7 +488,7 @@ export function arrangeInVisibleArea({
   const blocks = [];
   const blockOf = new Map();
   for (const view of views) {
-    const group = canvasGroupOf(groups, view.id);
+    const group = canvasRootGroup(groups, canvasGroupOf(groups, view.id));
     const key = group ? `group:${group.id}` : view.id;
     let block = blockOf.get(key);
     if (!block) {
@@ -518,117 +535,192 @@ export function arrangeInVisibleArea({
 }
 
 // ---------------------------------------------------------------------------
-// UX-05 groups ([그룹으로 묶기]/[그룹 해제]): a visual bundle of Views that
-// move and select together. A group is { id, viewIds } with two or more
-// Views; a View is in one group at most. Groups are separate from Board
-// membership (D-V1) and are saved with the Desk, not with a Board.
-
+// Group and View identities inhabit different namespaces. Legacy flat
+// records remain valid; parent links are typed explicitly as groupIds.
 export const CANVAS_GROUP_MAX_VIEWS = 200;
+export const CANVAS_GROUP_MAX_DEPTH = 8;
 
 export function normalizeCanvasGroups(value) {
-  const out = [];
-  const seenGroups = new Set();
-  const seenViews = new Set();
+  const byId = new Map(), ownedViews = new Set(), parent = new Map();
   for (const item of Array.isArray(value) ? value : []) {
     const id = viewId(item?.id);
-    if (!id || seenGroups.has(id)) continue;
-    const viewIds = [];
-    for (const raw of Array.isArray(item.viewIds) ? item.viewIds : []) {
-      const key = viewId(raw);
-      if (!key || seenViews.has(key) || viewIds.includes(key)) continue;
-      viewIds.push(key);
-      if (viewIds.length >= CANVAS_GROUP_MAX_VIEWS) break;
-    }
-    if (viewIds.length < 2) continue;
-    seenGroups.add(id);
-    for (const key of viewIds) seenViews.add(key);
-    out.push({ id, viewIds });
+    if (!id || byId.has(id) || byId.size >= 1000) continue;
+    const viewIds = [...new Set((Array.isArray(item.viewIds) ? item.viewIds : []).map(viewId).filter(Boolean))].slice(0, CANVAS_GROUP_MAX_VIEWS);
+    const groupIds = [...new Set((Array.isArray(item.groupIds) ? item.groupIds : []).map(viewId).filter(Boolean))].slice(0, CANVAS_GROUP_MAX_VIEWS);
+    if (viewIds.length + groupIds.length >= 2) byId.set(id, { id, viewIds, groupIds });
   }
-  return out;
+  for (const group of byId.values()) {
+    if (group.viewIds.filter(id => !ownedViews.has(id)).length + group.groupIds.length < 2) {
+      byId.delete(group.id); continue;
+    }
+    group.viewIds = group.viewIds.filter(id => !ownedViews.has(id));
+    group.viewIds.forEach(id => ownedViews.add(id));
+  }
+  for (const group of byId.values()) {
+    group.groupIds = group.groupIds.slice(0, CANVAS_GROUP_MAX_VIEWS - group.viewIds.length).filter(id => {
+      if (!byId.has(id) || id === group.id || parent.has(id)) return false;
+      let above = 1, cursor = group.id;
+      while (parent.has(cursor)) { cursor = parent.get(cursor); above++; }
+      if (cursor === id) return false;
+      // Inspect only already accepted links, not raw (possibly cyclic) input.
+      let below = 1;
+      const pending = [[id, 1]];
+      while (pending.length) {
+        const [node, depth] = pending.pop(); below = Math.max(below, depth);
+        for (const child of byId.get(node).groupIds) if (parent.get(child) === node) pending.push([child, depth + 1]);
+      }
+      if (above + below > CANVAS_GROUP_MAX_DEPTH) return false;
+      parent.set(id, group.id); return true;
+    });
+  }
+  // Collapse groups with fewer than two direct children. Their remaining
+  // children become independent, never dragged or repositioned implicitly.
+  let changed;
+  do {
+    changed = false;
+    for (const group of byId.values()) {
+      group.groupIds = group.groupIds.filter(id => byId.has(id));
+      if (group.viewIds.length + group.groupIds.length < 2) { byId.delete(group.id); changed = true; }
+    }
+  } while (changed);
+  return [...byId.values()].map(({ id, viewIds, groupIds }) => ({ id, viewIds, ...(groupIds.length ? { groupIds } : {}) }));
 }
 
 export function canvasGroupOf(groups, id) {
   const key = viewId(id);
   if (!key) return null;
-  return (Array.isArray(groups) ? groups : []).find(group => Array.isArray(group?.viewIds) && group.viewIds.includes(key)) || null;
+  return (Array.isArray(groups) ? groups : []).find(group => group.viewIds?.includes(key)) || null;
 }
 
-// Every View that moves or selects with the given ones: the ids themselves
-// plus the rest of each one's group, in the order first seen.
+export function canvasRootGroup(groups, group) {
+  if (!group) return null;
+  const seen = new Set();
+  while (!seen.has(group.id)) {
+    seen.add(group.id);
+    const parent = groups.find(item => item.groupIds?.includes(group.id));
+    if (!parent) return group;
+    group = parent;
+  }
+  return null;
+}
+
+export function canvasGroupLeaves(groups, groupId) {
+  const byId = new Map(groups.map(group => [group.id, group]));
+  const seen = new Set(), leaves = new Set();
+  const visit = (id, depth) => {
+    if (seen.has(id) || depth > CANVAS_GROUP_MAX_DEPTH) return;
+    const group = byId.get(id);
+    if (!group) return;
+    seen.add(id);
+    for (const view of group.viewIds || []) leaves.add(view);
+    for (const child of group.groupIds || []) visit(child, depth + 1);
+  };
+  visit(groupId, 1);
+  return [...leaves];
+}
+
 export function expandCanvasGroupSelection(groups, ids) {
-  const out = [];
-  const add = key => { if (key && !out.includes(key)) out.push(key); };
+  const out = new Set(), roots = new Set();
   for (const raw of Array.isArray(ids) ? ids : []) {
     const key = viewId(raw);
     if (!key) continue;
-    add(key);
-    const group = canvasGroupOf(groups, key);
-    if (group) for (const member of group.viewIds) add(member);
+    out.add(key);
+    const group = canvasRootGroup(groups, canvasGroupOf(groups, key));
+    if (group && !roots.has(group.id)) {
+      roots.add(group.id);
+      for (const member of canvasGroupLeaves(groups, group.id)) out.add(member);
+    }
   }
-  return out;
+  return [...out];
 }
 
-// [그룹으로 묶기]: the chosen Views form one group. Each leaves its previous
-// group, and a previous group left with one View dissolves.
-export function createCanvasGroup(groups, ids, { id = null } = {}) {
+export function createCanvasGroup(groups, ids, { id = null, groupIds = [] } = {}) {
   const current = normalizeCanvasGroups(groups);
   const members = [...new Set((Array.isArray(ids) ? ids : []).map(viewId).filter(Boolean))].slice(0, CANVAS_GROUP_MAX_VIEWS);
-  if (members.length < 2) return { groups: current, group: null, changed: false };
   const taken = new Set(current.map(group => group.id));
+  const reject = { groups: current, group: null, changed: false };
+  if (new Set(groupIds).size !== groupIds.length || groupIds.some(key => !taken.has(key) || key === id
+      || current.some(group => group.groupIds?.includes(key)))) return reject;
+  if (members.length + groupIds.length < 2 || members.length + groupIds.length > CANVAS_GROUP_MAX_VIEWS) return reject;
+  if (groupIds.length && members.some(key => canvasGroupOf(current, key))) return reject;
   let groupId = viewId(id) && !taken.has(id) ? id : null;
   for (let n = 1; !groupId; n += 1) {
     const candidate = `egd-group-${n}`;
     if (!taken.has(candidate)) groupId = candidate;
   }
   const memberSet = new Set(members);
-  const kept = current.map(group => ({ id: group.id, viewIds: group.viewIds.filter(key => !memberSet.has(key)) }))
-    .filter(group => group.viewIds.length >= 2);
-  const group = { id: groupId, viewIds: members };
-  return { groups: [...kept, group], group, changed: true };
+  const kept = current.map(group => ({ ...group, viewIds: group.viewIds.filter(key => !memberSet.has(key)) }));
+  const next = normalizeCanvasGroups([...kept, { id: groupId, viewIds: members, groupIds }]);
+  const group = next.find(item => item.id === groupId);
+  if (!group || (group.groupIds?.length || 0) !== groupIds.length) return reject;
+  return { groups: next, group, changed: true };
 }
 
-// [그룹 해제]: every group that holds one of the Views dissolves.
-export function dissolveCanvasGroups(groups, ids) {
+export function changeCanvasGroupParent(groups, childId, parentId, { remove = false } = {}) {
+  const current = normalizeCanvasGroups(groups);
+  const fail = { groups: current, changed: false };
+  const parent = current.find(group => group.id === parentId);
+  if (!parent || childId === parentId || !current.some(group => group.id === childId)) return fail;
+  const owner = current.find(group => group.groupIds?.includes(childId));
+  if (remove ? owner !== parent : !!owner) return fail;
+  if (!remove && canvasGroupLeaves(current, childId).length === 0) return fail;
+  const descendants = [childId];
+  while (descendants.length) {
+    const id = descendants.pop();
+    if (!remove && id === parentId) return fail;
+    descendants.push(...(current.find(group => group.id === id)?.groupIds || []));
+  }
+  const next = normalizeCanvasGroups(current.map(group => group === parent ? { ...group, groupIds: remove
+    ? group.groupIds.filter(id => id !== childId) : [...(group.groupIds || []), childId] } : group));
+  if (!remove && (!next.find(group => group.id === parentId)?.groupIds?.includes(childId)
+      || current.some(group => group.groupIds?.some(id => !next.find(item => item.id === group.id)?.groupIds?.includes(id))))) return fail;
+  return { groups: next, changed: true };
+}
+
+export function dissolveCanvasGroups(groups, ids, { groupIds = [] } = {}) {
   const current = normalizeCanvasGroups(groups);
   const keys = new Set((Array.isArray(ids) ? ids : []).map(viewId).filter(Boolean));
-  const dissolved = current.filter(group => group.viewIds.some(key => keys.has(key))).map(group => group.id);
+  const explicit = new Set(groupIds);
+  const dissolved = current.filter(group => explicit.has(group.id) || group.viewIds.some(key => keys.has(key))).map(group => group.id);
   if (!dissolved.length) return { groups: current, dissolved: [], changed: false };
-  return { groups: current.filter(group => !dissolved.includes(group.id)), dissolved, changed: true };
+  return { groups: normalizeCanvasGroups(current.filter(group => !dissolved.includes(group.id))), dissolved, changed: true };
 }
 
-// Closed Views leave their groups; a group left with one View dissolves.
 export function pruneCanvasGroups(groups, liveIds) {
   const live = new Set((Array.isArray(liveIds) ? liveIds : []).map(viewId).filter(Boolean));
   const current = normalizeCanvasGroups(groups);
-  const next = normalizeCanvasGroups(current.map(group => ({ id: group.id, viewIds: group.viewIds.filter(key => live.has(key)) })));
+  const next = normalizeCanvasGroups(current.map(group => ({ ...group, viewIds: group.viewIds.filter(key => live.has(key)) })));
   return { groups: next, changed: JSON.stringify(next) !== JSON.stringify(current) };
 }
 
-// Restored Views may come back under new ids (saved id -> live id).
-export function remapCanvasGroups(groups, idMap) {
-  const map = idMap instanceof Map ? idMap : new Map(Object.entries(idMap && typeof idMap === 'object' ? idMap : {}));
-  return normalizeCanvasGroups((Array.isArray(groups) ? groups : []).map(group => ({
-    id: group?.id, viewIds: (Array.isArray(group?.viewIds) ? group.viewIds : []).map(key => map.get(key) ?? key),
+export function remapCanvasGroups(groups, idMap, mapGroupId = id => id) {
+  const lookup = key => {
+    try { return Map.prototype.get.call(idMap, key); }
+    catch { return idMap && Object.hasOwn(idMap, key) ? idMap[key] : undefined; }
+  };
+  return normalizeCanvasGroups(normalizeCanvasGroups(groups).map(group => ({
+    id: mapGroupId(group.id), viewIds: group.viewIds.map(key => lookup(key) ?? key),
+    groupIds: (group.groupIds || []).map(mapGroupId),
   })));
 }
 
-// The frame drawn around each group: the union of its members' rects plus a
-// padding, in world px. `rectById` is a function or a Map/object of rects;
-// a group with fewer than two members on the Canvas draws nothing.
 export function canvasGroupFrames(groups, rectById, { padding = 8 } = {}) {
   let read = typeof rectById === 'function' ? rectById : id => rectById?.[id];
   try {
-    // Native Map branding works across globals without reading user hooks.
     Map.prototype.has.call(rectById, null);
     read = id => Map.prototype.get.call(rectById, id);
-  } catch {} // Non-Maps keep the existing function/property lookup.
+  } catch {}
   const pad = Number.isFinite(padding) && padding >= 0 ? padding : 8;
+  const valid = normalizeCanvasGroups(groups);
   const out = [];
-  for (const group of normalizeCanvasGroups(groups)) {
-    const rects = group.viewIds.map(id => toWorldRect(read(id))).filter(Boolean);
+  for (const group of valid) {
+    const rects = canvasGroupLeaves(valid, group.id).map(id => toWorldRect(read(id))).filter(Boolean);
     const union = unionRect(rects);
     if (!union || rects.length < 2) continue;
-    out.push({ id: group.id, count: rects.length, x: union.x - pad, y: union.y - pad, width: union.width + pad * 2, height: union.height + pad * 2 });
+    // An outer frame has a larger margin than its child frames.
+    const depth = (id) => 1 + Math.max(0, ...(valid.find(item => item.id === id)?.groupIds || []).map(depth));
+    const margin = pad * depth(group.id);
+    out.push({ id: group.id, count: rects.length, x: union.x - margin, y: union.y - margin, width: union.width + margin * 2, height: union.height + margin * 2 });
   }
   return out;
 }

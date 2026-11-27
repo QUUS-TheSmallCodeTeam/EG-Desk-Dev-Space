@@ -1,4 +1,5 @@
-import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { BROWSER_INPUT_DENIED_REASONS, BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_STALE_REASONS, BROWSER_TARGET_REASONS, BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { chatError } from './codex-chat-values.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { fixtureSnapshotMatches } from './codex-browser-fixture-qa.mjs'
@@ -28,10 +29,14 @@ const HOST_PATTERN = /^[a-z0-9.:\[\]-]{1,253}$/i
 function publicBrowserErrorDetail(error) {
   if (!error || typeof error !== 'object') return {}
   const detail = {}
+  if (error.code === 'INVALID_BROWSER_TOOL' && error.invalidBy === 'navigation-postcondition-kind') detail.invalidBy = error.invalidBy
   if (DISPATCH_PHASES.has(error.dispatchPhase)) detail.dispatchPhase = error.dispatchPhase
   if ([true, false, 'unknown'].includes(error.dispatched)) detail.dispatched = error.dispatched
   if (typeof error.obscuredBy === 'string' && /^[A-Za-z0-9 #._=:/-]{1,160}$/.test(error.obscuredBy)) detail.obscuredBy = error.obscuredBy
   if (DIALOG_TYPES.has(error.dialog?.type)) detail.dialog = { type: error.dialog.type }
+  if (BROWSER_STALE_REASONS.includes(error.staleBy)) detail.staleBy = error.staleBy // L6 a1 (D25): which observed fact made it "not sent", one closed word
+  if (BROWSER_INPUT_DENIED_REASONS.includes(error.inputDeniedBy)) detail.inputDeniedBy = error.inputDeniedBy
+  if (BROWSER_TARGET_REASONS.includes(error.targetBy)) detail.targetBy = error.targetBy
   if (error.navigation && typeof error.navigation === 'object' && NAVIGATION_REASONS.has(error.navigation.reason)) {
     detail.navigation = { reason: error.navigation.reason,
       ...(typeof error.navigation.host === 'string' && HOST_PATTERN.test(error.navigation.host) ? { host: error.navigation.host } : {}) }
@@ -45,6 +50,8 @@ function publicBrowserErrorDetail(error) {
   }
   return detail
 }
+// a1 (Main 16:33, L3's D27 finding): the fixed English error sentences read like guidance for the person and were passed on to them; the result says they are not (the harness rule of the page tools)
+export const BROWSER_ERROR_NOTE = 'Not for the person: the error code and message are EG-Desk\'s own markings. Say what happened in everyday words.'
 const SUCCESS_STATUSES = new Set(['observed', 'postcondition-observed', 'wait-condition-met',
   'cards-listed', 'site-allowed', 'card-opened', 'card-closed', 'history-dispatched', 'screenshot-observed'])
 // DECISION_MODEL_CONTEXT_SETUP.md §3.3: the reflex tool is appended after the
@@ -54,28 +61,50 @@ function reflexEnabled(decision) {
   try { return Boolean(decision) && decision.mode?.() === 'on' && decision.configured?.() === true }
   catch { return false }
 }
-function reflexStepError(text) {
-  let code = 'TOOL_FAILED'
-  try { const parsed = JSON.parse(text); if (typeof parsed?.error?.code === 'string') code = parsed.error.code } catch {}
+function reflexStepError(text, tool) {
+  let code = 'TOOL_FAILED', staleBy = null, targetBy = null
+  try {
+    const parsed = JSON.parse(text)
+    if (typeof parsed?.error?.code === 'string') code = parsed.error.code
+    // A returned navigation receipt with an unmatched condition is not a refused call.
+    else if (!parsed?.error && tool === 'egdesk_browser_navigate' && parsed?.status === 'postcondition-unverified') code = 'POSTCONDITION_UNVERIFIED'
+    if (BROWSER_STALE_REASONS.includes(parsed?.error?.staleBy)) staleBy = parsed.error.staleBy
+    if (BROWSER_TARGET_REASONS.includes(parsed?.error?.targetBy)) targetBy = parsed.error.targetBy
+  } catch {}
   const error = new Error('Browser reflex step failed')
   error.code = code
+  if (staleBy) error.staleBy = staleBy // L6 a1b: which observed fact made the step "not sent" (one closed word), for the loop's same-document retry
+  if (targetBy) error.targetBy = targetBy // L6c a2: which element check refused it (one closed word): a field refused as not-editable leaves the task's fields
   return error
 }
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
   'dom-value-setter', 'dom-editor-replace', 'chrome-load-uri', 'chrome-history', 'trusted-pointer', 'trusted-text-input'])
 
-export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
+// Process-local evidence, not part of the native tool response or public Activity.
+const reflexHandoffs = new WeakMap()
+const cancelledBrowserRuns = new WeakSet()
+export function isCurrentBrowserReflexHandoff(response, run, event) {
+  const handoff = reflexHandoffs.get(response)
+  return handoff?.run === run && handoff.event === event && !cancelledBrowserRuns.has(run)
+}
+
+// `ownerKeyFor(engineProfileId)` (L1 c24): the account of the slot running the room; default = the one sign-in `getOwnerKey()` answers, as before.
+export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKeyFor = () => getOwnerKey(), schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, watchPopupLoad = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey, ownerKeyFor }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
   let resetting = 0
   const fixtureAttestations = new Map()
   const provider = {
     providerId: 'egdesk-browser',
-    prepare(body) {
+    // Working-memory gate (flag, default off): in these results only the visible page text array is free text.
+    // Card ids, observation ids, element refs and receipts are never touched.
+    workingMemory: Object.freeze(Object.fromEntries(['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_wait']
+      .map(name => [name, Object.freeze({ kind: 'page', jsonTextArray: Object.freeze(['snapshot', 'text']) })]))),
+    prepare(body, route) {
       const selectedSources = body.selectedSources ?? []
       if (!Array.isArray(selectedSources)) throw chatError('INVALID_BROWSER_SELECTION', 'Browser selection must be an array', 400)
       if (body.effectiveExecutionPolicy === FIXTURE_BROWSER_QA && !selectedSources.length) throw chatError('BROWSER_FIXTURE_REQUIRED', 'Fixture Browser QA requires one selected local Card', 400)
       if (!selectedSources.length) return null
-      if (!schemaReady()) throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'Native Browser tool contract is not verified', 503)
+      if (!schemaReady(route)) throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'Native Browser tool contract is not verified', 503)
       if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
       const policy = body.effectiveExecutionPolicy
       if (![READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(policy)) throw chatError('BROWSER_POLICY_REQUIRED', 'Browser tools require an explicit bounded native execution policy', 409)
@@ -118,15 +147,15 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         throw chatError('BROWSER_FIXTURE_UNAVAILABLE', 'Fixture Browser QA requires the exact opted-in local fixture and an interaction selection', 403)
       }
       let selection
-      try { selection = service.prepare({ selectedSources, ownerKey: getOwnerKey() }) }
+      try { selection = service.prepare({ selectedSources, ownerKey: ownerKeyFor(route?.engineProfileId), engineProfileId: route?.engineProfileId }) }
       catch (error) { const failure = classifyPublicToolError(error, { browser: true }); throw chatError(failure.code, failure.message, 400) }
       return { selection, transportId, policy, interactionRequested }
     },
     // Advertise available specs; runtime narrows the original native catalog
     // using its safety envelope and first explicit selection. A later send
     // cannot expand that catalog. Per-run UI binding remains actual authority.
-    specs() {
-      if (!schemaReady()) return []
+    specs(route) {
+      if (!schemaReady(route)) return []
       return reflexEnabled(decision) ? [...BROWSER_TOOL_SPECS, BROWSER_REFLEX_TOOL_SPEC] : BROWSER_TOOL_SPECS
     },
     requireThread(threadId, prepared) {
@@ -135,10 +164,12 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       }
     },
     registerThread(threadId) { this.runtime.browserRegisteredThreads.add(threadId) },
+    // A pre-turn run object (quiet: true) never publishes Activity; its events belong to no run yet.
+    emit(run, ...args) { if (run?.quiet === true) return undefined; return this.runtime.emit(run, ...args) },
     async bindRun(run, prepared) {
       if (!prepared) return
       if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
-      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId)
+      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId, prepared.selection?.engineProfileId)
       try {
         const receipt = await service.bind(run, prepared.selection)
         run.browserBinding = { cards: receipt.cards.map(card => {
@@ -147,7 +178,23 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
             ...(typeof selected?.sourceId === 'string' ? { sourceId: selected.sourceId } : {}),
             ...(typeof selected?.cardEpoch === 'string' ? { cardEpoch: selected.cardEpoch } : {}) }
         }) }
-        this.runtime.emit(run, 'browser.bound', run.browserBinding)
+        this.emit(run, 'browser.bound', run.browserBinding)
+      } catch (error) {
+        transport.unbindRun(run.runId)
+        const failure = classifyPublicToolError(error, { browser: true })
+        throw chatError(failure.code, failure.message, 409)
+      }
+    },
+    // C9: the direct entry's pre-turn binding (bindRun with a quiet pre-run) becomes the turn's run. Same binding, same grants.
+    async adoptRun(run, prepared, preRun) {
+      if (!prepared || !preRun) return
+      if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
+      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId, prepared.selection?.engineProfileId)
+      try {
+        service.adopt(preRun, run)
+        run.browserBinding = { cards: (preRun.browserBinding?.cards || []).map(card => ({ ...card })) }
+        run.adoptedFrom = preRun.runId
+        this.emit(run, 'browser.bound', run.browserBinding)
       } catch (error) {
         transport.unbindRun(run.runId)
         const failure = classifyPublicToolError(error, { browser: true })
@@ -206,20 +253,20 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
             !run.browserBinding.cards.some(item => item.cardId === result.cardId)) {
           run.browserBinding.cards.push({ cardId: result.cardId, permission: result.permission, cardEpoch: result.cardEpoch,
             openedByAgent: true, openedFrom: result.openedFrom })
-          this.runtime.emit(run, 'browser.card.opened', { callId: event.callId, cardId: result.cardId, openedFrom: result.openedFrom,
+          this.emit(run, 'browser.card.opened', { callId: event.callId, cardId: result.cardId, openedFrom: result.openedFrom,
             permission: result.permission, targetCardEpoch: result.cardEpoch, originalProviderId: this.providerId,
             namespace: event.namespace || null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null }, event.callId)
         }
         if (result.status === 'card-closed' && Array.isArray(run.browserBinding?.cards)) {
           run.browserBinding.cards = run.browserBinding.cards.filter(item => item.cardId !== result.cardId)
-          this.runtime.emit(run, 'browser.card.closed', { callId: event.callId, cardId: result.cardId, originalProviderId: this.providerId,
+          this.emit(run, 'browser.card.closed', { callId: event.callId, cardId: result.cardId, originalProviderId: this.providerId,
             namespace: event.namespace || null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null }, event.callId)
         }
         const selected = run.browserBinding?.cards?.find(card => card.cardId === result.cardId)
         // The route the actor reported, from a fixed set; never a success claim.
         const inputRoute = [result.dispatchReceipt?.inputRoute, result.dispatchReceipt?.clickInputRoute]
           .find(route => PUBLIC_INPUT_ROUTES.has(route))
-        this.runtime.emit(run, success ? 'browser.tool.completed' : 'browser.tool.unverified', {
+        this.emit(run, success ? 'browser.tool.completed' : 'browser.tool.unverified', {
           callId: event.callId, cardId: result.cardId, status: result.status,
           originalProviderId: this.providerId, namespace: event.namespace || null,
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
@@ -238,14 +285,66 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       } catch (error) {
         if (run.executionPolicy?.mode === FIXTURE_BROWSER_QA) fixtureAttestations.delete(run.answerId)
         const failure = classifyPublicToolError(error, { browser: true })
+        const detail = publicBrowserErrorDetail(error)
         const selected = run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
-        this.runtime.emit(run, 'browser.tool.failed', { callId: event.callId, code: failure.code, cardId: selected?.cardId || null,
+        this.emit(run, 'browser.tool.failed', { callId: event.callId, code: failure.code, cardId: selected?.cardId || null,
+          ...(detail.invalidBy ? { invalidBy: detail.invalidBy } : {}),
+          ...(BROWSER_STALE_REASONS.includes(error?.staleBy) ? { staleBy: error.staleBy } : {}),
+          ...(BROWSER_INPUT_DENIED_REASONS.includes(error?.inputDeniedBy) ? { inputDeniedBy: error.inputDeniedBy } : {}),
+          ...(BROWSER_TARGET_REASONS.includes(error?.targetBy) ? { targetBy: error.targetBy } : {}),
           originalProviderId: this.providerId, namespace: event.namespace || null,
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
           ...(selected?.sourceId ? { sourceId: selected.sourceId } : {}),
           ...(selected?.cardEpoch ? { targetCardEpoch: selected.cardEpoch } : {}) }, event.callId)
-        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...publicBrowserErrorDetail(error) } }) }] }
+        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { ...failure, ...detail }, forYouOnly: BROWSER_ERROR_NOTE }) }] }
       }
+    },
+    // Each reflex step goes through this provider's own dispatch for the same
+    // run with a fresh callId, so grants, the action gate and receipts apply.
+    // The authority one reflex execution runs under, shared by the model-called tool and the direct chat entry:
+    // the recipient/key, run binding and Card grant are captured once and rechecked at every send.
+    // actor (a1, optional): 'decision' | 'model', who chose the actions this scope sends; carried on each act request to the Card (lane L1 shows it), never otherwise used.
+    reflexScope(run, event, cardId, { actor = null } = {}) {
+      // Snapshot the existing recipient/run scope; do not adopt a replacement
+      // credential or Browser binding while an observation is pending.
+      const currentRecipient = () => {
+        try { return reflexEnabled(decision) ? decision.recipient?.() ?? null : null }
+        catch { return null }
+      }
+      const recipient = currentRecipient()
+      const generation = decision.generation?.()
+      const binding = transport.runs.get(run.runId)
+      const card = run.browserBinding?.cards?.find(item => item.cardId === cardId)
+      const isDecisionCurrent = () => Boolean(recipient && binding && !resetting &&
+        !cancelledBrowserRuns.has(run) && run.status === 'inProgress' && run.executionPolicy?.mode === BROWSER_BOUNDED &&
+        binding.ownerKey === ownerKeyFor(binding.engineProfileId) && binding.clientThreadId === run.clientThreadId &&
+        transport.runs.get(run.runId) === binding && transport.hasClient(binding.transportId) &&
+        card?.permission === 'interact' && run.browserBinding?.cards?.includes(card) && currentRecipient() === recipient &&
+        Number.isSafeInteger(generation) && decision.generation?.() === generation)
+      const authorizeDispatch = selectedRecipient => selectedRecipient === recipient && isDecisionCurrent()
+      let step = 0
+      const callTool = async (name, toolArgs) => {
+        if (typeof name !== 'string' || !name.startsWith('egdesk_browser_') || name === BROWSER_REFLEX_TOOL_NAME) {
+          const error = new Error('Browser reflex may call only Browser tools'); error.code = 'BROWSER_REFLEX_SCOPE'; throw error
+        }
+        step++
+        const output = await this.dispatch(run, { tool: name, arguments: toolArgs,
+          callId: `${event.callId || 'reflex'}.reflex-${step}-${randomUUID()}`, namespace: event.namespace || null, ...(actor === 'decision' || actor === 'model' ? { actor } : {}) })
+        const text = output?.contentItems?.[0]?.text ?? ''
+        if (!output?.success) {
+          // A negative D25 answer is a closed receipt, not a protocol error. Only the waiting reflex consumes it.
+          if (name === 'egdesk_browser_request_site') {
+            let receipt
+            try { receipt = JSON.parse(text) } catch { /* handled as a tool error below */ }
+            if (!receipt?.error && ['site-refused', 'site-pending'].includes(receipt?.status)) return { status: receipt.status }
+          }
+          throw reflexStepError(text, name)
+        }
+        return JSON.parse(text)
+      }
+      // Page text reaches the decision model only where it may reach this run's models: the Agent tool ceiling and the selected Card grant.
+      const gate = createEgressGate(modelDataPermissions({ toolCeiling: run.toolCeiling ?? null, browserGranted: Boolean(card) && card.permission !== 'none' }))
+      return { callTool, authorizeDispatch, isDecisionCurrent, client: decision.client ? gate.guardClient(decision.client, ['page_text']) : null }
     },
     // Each reflex step goes through this provider's own dispatch for the same
     // run with a fresh callId, so grants, the action gate and receipts apply.
@@ -254,40 +353,52 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: 'BROWSER_REFLEX_UNAVAILABLE', message: 'The Browser reflex is not enabled' } }) }] }
       }
       const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
-      let step = 0
-      const callTool = async (name, toolArgs) => {
-        if (typeof name !== 'string' || !name.startsWith('egdesk_browser_') || name === BROWSER_REFLEX_TOOL_NAME) {
-          const error = new Error('Browser reflex may call only Browser tools'); error.code = 'BROWSER_REFLEX_SCOPE'; throw error
-        }
-        step++
-        const output = await this.dispatch(run, { tool: name, arguments: toolArgs,
-          callId: `${event.callId || 'reflex'}.reflex-${step}-${randomUUID()}`, namespace: event.namespace || null })
-        const text = output?.contentItems?.[0]?.text ?? ''
-        if (!output?.success) throw reflexStepError(text)
-        return JSON.parse(text)
-      }
+      const { callTool, authorizeDispatch, isDecisionCurrent, client } = this.reflexScope(run, event, args.cardId)
       let result
       try {
         result = await runReflex({ cardId: args.cardId, goal: args.goal,
           ...(args.values !== undefined ? { values: args.values } : {}),
           ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
-          callTool, client: decision.client || null })
+          callTool, client, authorizeDispatch, isDecisionCurrent })
       } catch (error) {
         const failure = classifyPublicToolError(error, { browser: true })
         return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
       }
-      return { success: result?.outcome !== 'invalid', contentItems: [{ type: 'inputText', text: reflexResultForModel(result || {}) }] }
+      const response = { success: result?.outcome !== 'invalid', contentItems: [{ type: 'inputText', text: reflexResultForModel(result || {}) }] }
+      if (result?.outcome === 'handoff') reflexHandoffs.set(response, { run, event })
+      return response
+    },
+    // The same gate as the model-called tool: a key and mode 'on'. Off means the direct entry calls nothing.
+    directEntryEnabled() { return reflexEnabled(decision) },
+    // The direct chat entry (egdesk-browser-task.mjs): same authority as the tool, but called by EG-Desk itself with
+    // the user's own message as the goal. Returns the raw reflex result (outcome, steps, state), never the model text.
+    // Reflex and Decisions gating is identical to the tool: mode on and a key, or nothing is called.
+    // The account the run belongs to (history records are scoped to it).
+    currentOwnerKey() { const key = getOwnerKey(); return typeof key === 'string' && key ? key : null },
+    // a1 (the task tool, egdesk-browser-task-tool.mjs): `values` the conversation model named (typed into the fields they match; joined to a resumed task's pending ones) and
+    // `textComboboxes` (a search box that announces itself as a combobox on a <textarea>, as Google's does, is a text field, as it is for the page tools), `valuesFirst` (the given values are typed
+    // where they belong before each step's choice) and `onPage` (the page each step is on). None is given by the direct entry.
+    async runDirectTask(run, { cardId, goal, namedButtonRequest, values = null, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null, signal = undefined, textComboboxes = false, onPage = null, firstFieldText = null, valuesFirst = false, pageText = null, actor = null }) {
+      if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
+      const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId, actor === 'decision' ? { actor } : {})
+      const result = await runReflex({ cardId, goal, namedButtonRequest, ...(firstFieldText && watchPopupLoad ? { watchPopupLoad } : {}), ...(values && typeof values === 'object' && Object.keys(values).length ? { values } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}), ...(typeof onPage === 'function' ? { onPage } : {}), ...(valuesFirst === true ? { valuesFirst: true } : {}), ...(typeof pageText === 'boolean' ? { pageText } : {}),
+        ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(typeof firstFieldText === 'function' ? { firstFieldText } : {}), ...(today ? { today } : {}), ...(signal ? { signal } : {}),
+        callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
+      if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })
+      return result
     },
     async cancelRun(run) {
+      // Fence notices immediately, even while the stop RPC or UI cleanup is pending.
+      cancelledBrowserRuns.add(run)
       fixtureAttestations.delete(run.answerId)
-      if (run.browserBinding?.cards?.length) this.runtime.emit(run, 'browser.cancel.requested', {
+      if (run.browserBinding?.cards?.length) this.emit(run, 'browser.cancel.requested', {
         originalProviderId: this.providerId, namespace: null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
         cards: run.browserBinding.cards.map(({ cardId, sourceId, cardEpoch }) => ({ cardId,
           ...(sourceId ? { sourceId } : {}), ...(cardEpoch ? { targetCardEpoch: cardEpoch } : {}) })),
       })
       try { return await service.cancelRun(run) }
       catch { return [] }
-      finally { transport.unbindRun(run.runId) }
+      finally { transport.unbindRun(run.runId); if (run.adoptedFrom) transport.unbindRun(run.adoptedFrom) }
     },
     disconnect() {
       fixtureAttestations.clear()

@@ -1301,6 +1301,8 @@ RESEARCH-PATTERN`이다. 제품 기본값의 owner 승인을 대신하지 않는
 
 | `ATL-ED-0029` | 2026-09-13 | owner feedback / WM route / PM delta review / Main | 최초 Browser 시작·기본 Codex·선택적 Agent, 실제 작업과 생각 기록의 표시, 산출물 문맥 경계, Agenda의 업무 구성 의미를 기존 문서에 반영. 명칭과 단일 로그인/프로필 자동 준비는 미결 후보로 보존 | 이 작업의 9/12–13 사용자 피드백과 문서 반영만 진행하라는 요청. 원격 f777e67·5d4537f를 fast-forward하여 TRI-02 기록 보존. HUM-AGENT 기본 사용은 결정, OPEN 정책 주제는 15개. 변경된 Q와 문서 지문은 재검토 대기. 시뮬레이션·앱 코드 변경·새 실행·commit/push 없음 | `DOC-REFLECTED / NAMING-OPEN / REVIEW-PENDING / SIMULATION-NOT-RUN` |
 
+| `ATL-ED-0030` | 2026-11-19 | owner request / WM source plan / Main | 한 Agent와 여러 채널, 질문 시점·근거·동의, 판정·생성·쓰기 분업을 비전과 계약에 연결했다. Atlas의 현재 조작과 목표 흐름을 나누고 계정·검토 파일·Board·일반 DM 및 복구로 양방향 탐색을 보완했다. | 로컬 기능판 `4c78406` 기준. 공개 백서는 제품 방향, ECS-07은 설명 예시다. 기존 HUM·Q 승인 상태와 과거 시험 수치를 승격하지 않는다. |
+
 이력 행은 append-only다. 수정이 필요하면 기존 사건을 덮어쓰지 않고 다음 `ATL-ED-*` 행에서 정정·대체 관계를 남긴다.
 
 ## 15. Atlas coverage audit

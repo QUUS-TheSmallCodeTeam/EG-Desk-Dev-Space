@@ -1,0 +1,24 @@
+{
+  "set": "turn-context-idle-v1/run-B",
+  "tokenCeiling": 1400,
+  "transport": "product",
+  "passRule": "Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine. The first request is the measured cold-after-idle case; the others follow immediately. Read with scripts/egdesk-turn-context-latency-plan.mjs analyze-idle.",
+  "requests": [
+    {
+      "id": "B1-small-first",
+      "file": "requests/B1-small-first.json",
+      "sha256": "69be090ffd508e6757a2c57e07fd327074e9723a1b022701e1ef34162b0da34e",
+      "estInputTokens": 656,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "B2-small-next",
+      "file": "requests/B2-small-next.json",
+      "sha256": "177a5c5d568797ee54fcfeadaf5c67a2d3e38851ce0bf4f4434dbbae510ed9c9",
+      "estInputTokens": 655,
+      "expect": [],
+      "recordOnly": true
+    }
+  ]
+}

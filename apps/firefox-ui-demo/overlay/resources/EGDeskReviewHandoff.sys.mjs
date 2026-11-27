@@ -140,7 +140,9 @@ function exportError(code) {
   return '검토 파일 생성 결과를 확인하지 못했습니다. 다시 만들기 전에 내보내기 폴더를 확인해 주세요.';
 }
 
-export function createReviewFlow({ request, pickFile, getContext, isContextCurrent, getBoard, isBoardCurrent, store, onState = () => {}, supported = () => true }) {
+// onRequestExported(review): optional, called once after a request file that carries a Board question code was written (the review as
+// written, with its id and digest). The flow does not depend on it and ignores what it does.
+export function createReviewFlow({ request, pickFile, getContext, isContextCurrent, getBoard, isBoardCurrent, store, onState = () => {}, supported = () => true, onRequestExported = null }) {
   let active = null;
   const view = () => active?.view || null;
   function update(session, delta) {
@@ -260,7 +262,7 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
     update(s, { step: 'reply-draft', review: s.inspected, requestReview: s.inspected, error: null });
     return true;
   }
-  function beginAgentReply(review, board, { answer, decisionEgress, source }) {
+  function beginAgentReply(review, board, { answer, source, screening = null }) {
     const s = active;
     if (!current(s, board) || s.view.step !== 'request-inspected' || s.inspected !== review || !s.inspected?.askCode) return false;
     s.board = board;
@@ -271,7 +273,10 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
       source === 'draft' ? '전용 OpenAI API로 만든 초안입니다. 내용을 검토하고 내 회신으로 편집해 주세요.' :
       'Board의 관련 공개 발췌문입니다. 생성된 답변이 아닙니다. 내용을 검토하고 내 회신으로 편집해 주세요.';
     update(s, { step: 'reply-draft', review: usable ? parsed.review : s.inspected, requestReview: s.inspected, boardTitle: board.title,
-      answerSource: decisionEgress && source !== 'local' ? `${answerSource} 관련성 판단에 별도 Decisions API를 사용했습니다.` : answerSource, error: null });
+      // The note follows what the run reports it did (screening); nothing here is a per-request choice.
+      answerSource: screening === 'advisory' ? `${answerSource} ‘기록만’ 모드라 별도 Decisions API 판단은 선택에 반영하지 않고 이 기기의 단어 일치로 골랐습니다. 질문과 공개 발췌문은 그 API로 전송되었습니다.`
+        : screening === 'fallback' ? `${answerSource} 별도 Decisions API 판단을 완료하지 못해 이 기기의 단어 일치로 골랐습니다. 질문과 공개 발췌문이 그 API로 전송되었을 수 있습니다.`
+        : screening === 'decision' ? `${answerSource} 관련성 판단에 별도 Decisions API를 사용했습니다.` : answerSource, error: null });
     return true;
   }
   function previewReply(answer) {
@@ -316,6 +321,7 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
       catch { warning = '파일은 만들었지만 이 Board의 로컬 요청 기록을 저장하지 못했습니다. 이 파일의 회신을 Board에 추가할 수 없을 수 있습니다.'; }
     }
     s.draft = s.inspected = null;
+    if (review.kind === 'request' && returned.askCode && typeof onRequestExported === 'function') { try { onRequestExported(returned); } catch { /* optional */ } }
     end(s, { step: 'exported', review: null, encrypted: body.encrypted, warning,
       where: typeof body.displayPath === 'string' && body.displayPath.startsWith('~/') ? body.displayPath : null,
       fileName: typeof body.fileName === 'string' ? body.fileName : null });

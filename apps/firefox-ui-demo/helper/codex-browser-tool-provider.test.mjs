@@ -5,7 +5,12 @@ import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { boundedFieldValue, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 
-function fixture() {
+import { browserStepFor } from './egdesk-browser-task-turn.mjs'
+import { taskStepEvent } from './egdesk-browser-task.mjs'
+import { browserStepFrame } from './egdesk-browser-steps-channel.mjs'
+import { browserStepLine } from '../overlay/resources/EGDeskBrowserStepsView.sys.mjs'
+
+function fixture(decision = null) {
   const calls = [], events = []
   const runs = new Map()
   const transport = {
@@ -25,13 +30,37 @@ function fixture() {
     cancelRun: async run => { calls.push(['cancel', run.runId]); return [] },
     reset: async () => { calls.push(['reset']); return [] },
   }
-  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'codex:account-1', service })
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => 'codex:account-1', service, decision })
   provider.runtime = { browserRegisteredThreads: new Set(), currentEpoch: () => 7, emit: (run, event, detail) => events.push({ runId: run.runId, event, detail }) }
   return { provider, calls, events, transport }
 }
 
 const selected = permission => [{ id: 'source-1', kind: 'browser', selectedByUser: true, browserToolPermission: permission,
   browserToolSelection: { token: 'one-time-token', threadId: 'ui-thread-1' }, browserToolIdentity: { cardEpoch: 'epoch-1' }, sourceRef: { viewId: 'card-1' } }]
+
+test('chat distinguishes an unverified navigation receipt from a refused action, without claiming a landing', async () => {
+  const { provider } = fixture({})
+  const run = { clientThreadId: 'thread' }, task = { taskId: 'task', cardId: 'card' }
+  const scope = provider.reflexScope(run, {}, task.cardId)
+  const unmatched = { status: 'postcondition-unverified', postcondition: { matched: false } }
+  for (const [tool, op, receipt, ok, text] of [
+    ['navigate', 'submit', unmatched, null, "'검색' 제출"],
+    ['navigate', 'open', unmatched, null, '검색 열기'],
+    ['navigate', 'submit', { error: { code: 'BROWSER_OBSERVATION_STALE' } }, false, "'검색' 제출 실패"],
+    ['navigate', 'open', { error: { code: 'BROWSER_ACTION_UNVERIFIED' } }, false, '검색 열기 실패'],
+    ['navigate', 'open', {}, false, '검색 열기 실패'],
+    ['fill', 'fill', unmatched, false, '검색에 입력 실패'],
+  ]) {
+    const name = 'egdesk_browser_' + tool
+    provider.dispatch = async () => ({ success: false, contentItems: [{ type: 'inputText', text: JSON.stringify(receipt) }] })
+    await assert.rejects(scope.callTool(name, {}), error => {
+      const event = taskStepEvent(task, { op, failed: name, target: '검색', ok: false, code: error.code }, { seq: 4 })
+      const line = browserStepLine(browserStepFrame(browserStepFor(event, run)))
+      assert.deepEqual([line.ok, line.text], [ok, text])
+      return true
+    })
+  }
+})
 
 test('QA Browser preparation requires an original observe selection and a live UI stream', async () => {
   const f = fixture()
@@ -214,6 +243,48 @@ test('actual Browser provider, actual B service and actual targeted transport bi
   assert.equal(sent[2].selectionToken, 'one-time-token')
   assert.equal(transport.runs.size, 0)
   assert.equal(events.find(event => event.event === 'browser.tool.completed').detail.originalProviderId, 'egdesk-browser')
+})
+
+test('Codex transport records parent and lease refusals without copying free text into the failure event', async () => {
+  const owner = 'codex:chatgpt:fixture-owner', events = []
+  const transport = new BrowserToolTransport({ getOwnerKey: () => owner })
+  let transportId, refusal
+  const url = 'https://example.test/'
+  const client = { chatProtocol: 2, closed: false, send(frame) {
+    const request = JSON.parse(frame.split('data: ')[1])
+    const reply = request.kind === 'bind' ? { status: 'bound', binding: { cardId: 'card-1', cardEpoch: 'epoch-1', profileId: 'firefox-default',
+      accountId: '', userContextId: 0, url, engineAccountKey: owner, authorityEpoch: 1 } }
+      : request.kind === 'observe' ? { status: 'observed', snapshot: { cardId: 'card-1', documentId: 'doc', revision: 1,
+        url, text: [], interactiveElements: [], viewport: { width: 720, height: 480, devicePixelRatio: 1 } } }
+      : request.kind === 'act' ? { status: 'rejected', dispatchPhase: 'not-dispatched', timing: {}, ...refusal } : { status: 'cancelled' }
+    queueMicrotask(() => transport.receive(transportId, { requestId: request.requestId, ...reply }))
+    return true
+  } }
+  transportId = transport.registerClient(client)
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => owner })
+  provider.runtime = { browserRegisteredThreads: new Set(['native-thread']), currentEpoch: () => 1, emit: (_run, event, detail) => events.push({ event, detail }) }
+  const source = { ...selected('interact')[0], browserToolIdentity: { cardEpoch: 'epoch-1', userContextId: 0, engineAccountKey: owner, authorityEpoch: 1 },
+    sourceRef: { viewId: 'card-1', profileId: 'firefox-default', accountId: '', uri: url } }
+  const run = { answerId: 'native-thread/native-turn', runId: 'native-turn', clientThreadId: 'ui-thread-1', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
+  await provider.bindRun(run, provider.prepare({ selectedSources: [source], clientThreadId: run.clientThreadId, effectiveExecutionPolicy: 'browserBounded', browserTransportId: transportId }))
+  const malformed = await provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'wrong-postcondition', arguments: {
+    cardId: 'card-1', observationId: 'seen', expectedRevision: 1, url, postcondition: { kind: 'visible-text', value: 'private-text' } } })
+  assert.equal(JSON.parse(malformed.contentItems[0].text).error.invalidBy, 'navigation-postcondition-kind')
+  assert.equal(events.at(-1).detail.invalidBy, 'navigation-postcondition-kind')
+  assert.ok(!JSON.stringify(events.at(-1)).includes('private-text'))
+  for (const [word, lease, want] of [['missing-authorizer', null, 'missing-authorizer'], ['ui-denied', 'selection-run-mismatch', 'selection-run-mismatch'], ['private-text', 'private-text', undefined]]) {
+    refusal = { error: 'Browser action authority was revoked before input [' + word + ']', inputDeniedBy: lease }
+    const obs = await provider.dispatch(run, { tool: 'egdesk_browser_observe', callId: 'obs-' + word, arguments: { cardId: 'card-1' } })
+    const { observationId } = JSON.parse(obs.contentItems[0].text)
+    const result = await provider.dispatch(run, { tool: 'egdesk_browser_navigate', callId: 'act-' + events.length, arguments: { cardId: 'card-1', observationId,
+      expectedRevision: 1, url: url + 'next', postcondition: { kind: 'url', value: url + 'next' } } })
+    const { error } = JSON.parse(result.contentItems[0].text)
+    assert.deepEqual([error.code, error.staleBy, error.inputDeniedBy], ['BROWSER_OBSERVATION_STALE', 'input-authority', want])
+    const { detail } = events.filter(e => e.event === 'browser.tool.failed').at(-1)
+    assert.deepEqual([detail.originalProviderId, detail.staleBy, detail.inputDeniedBy], ['egdesk-browser', 'input-authority', want])
+    assert.ok(!JSON.stringify(detail).includes('private-text'))
+  }
+  await provider.cancelRun(run)
 })
 
 test('actual provider, B service and transport permit only an attested local fixture button effect', async () => {
@@ -558,4 +629,14 @@ test('egdesk_browser_reflex is appended only with a decision key and mode on; di
   assert.equal(verifiedManifestOwners(recorded, manifestOf(specs), ownersOf(specs)).status, 'verified')
   mode = 'off'
   assert.equal(verifiedManifestOwners(recorded, manifestOf(provider.specs()), ownersOf(provider.specs())).status, 'verified')
+})
+
+test('a waiting reflex can distinguish a refused Card site from an unanswered one; neither authorizes movement', async () => {
+  const { provider } = fixture({})
+  const scope = provider.reflexScope({ clientThreadId: 'thread' }, {}, 'card')
+  for (const status of ['site-refused', 'site-pending']) {
+    provider.dispatch = async () => ({ success: false, contentItems: [{ text: JSON.stringify({ status }) }] })
+    assert.deepEqual(await scope.callTool('egdesk_browser_request_site', { cardId: 'card', site: 'example.org' }), { status })
+    await assert.rejects(scope.callTool('egdesk_browser_navigate', {}), { code: 'TOOL_FAILED' })
+  }
 })

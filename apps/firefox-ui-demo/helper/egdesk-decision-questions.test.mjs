@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { normalizeDecisionResponse } from './egdesk-decision-client.mjs'
 import { DEFAULT_DECISION_THRESHOLDS, choiceQuestion, compactText, decisionThresholds, readChoice, readPredicate, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
 test('options get readable unique values and keep their items', () => {
@@ -40,6 +41,34 @@ test('readers turn refusals into unknown and apply confidence and margin', () =>
   assert.equal(close.state, 'uncertain')
   assert.equal(Math.round(close.margin * 100), 5)
   assert.equal(readChoice(answers, 'refused', { minConfidence: 0.5 }).state, 'unknown')
+})
+
+test('readChoice keeps an exact top tie uncertain at zero margin', () => {
+  const question = choiceQuestion('pick', 'pick', tableOptions({ a: 'first', b: 'second', c: 'third' }))
+  const confidence = 0.95
+  const ranked = [{ value: 'a', probability: 0.5 }, { value: 'b', probability: 0.5 }, { value: 'c', probability: 0 }]
+  const { answers } = normalizeDecisionResponse({ answers: [{ type: 'choice', choice: 'b', confidence,
+    probabilities: [ranked[2], ranked[0], ranked[1]] }] }, [question])
+  for (const thresholds of [{ minConfidence: 0.75 }, { minConfidence: 0.75, minMargin: 0 }]) {
+    assert.deepEqual(readChoice(answers, 'pick', thresholds), {
+      state: 'uncertain', value: 'b', confidence, margin: 0, ranked,
+    })
+  }
+})
+
+test('readChoice still accepts an untied or confidence-only choice at zero margin', () => {
+  const confidence = 0.95
+  for (const probabilities of [
+    [{ value: 'a', probability: 0.500001 }, { value: 'b', probability: 0.499999 }],
+    [{ value: 'a', probability: 0.5 }, { value: 'b', probability: 0.25 }, { value: 'c', probability: 0.25 }],
+    [{ value: 'a', probability: 0 }],
+    [],
+  ]) {
+    const answers = { pick: { type: 'choice', choice: 'a', confidence, probabilities } }
+    const result = readChoice(answers, 'pick', { minConfidence: 0.75, minMargin: 0 })
+    assert.equal(result.state, 'accepted', JSON.stringify(probabilities))
+    assert.equal(result.value, 'a')
+  }
 })
 
 test('threshold overrides accept only probabilities for known keys', () => {

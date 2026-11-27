@@ -21,11 +21,6 @@ export const LOADER_FILES = Object.freeze([
   'utils.sys.mjs',
 ]);
 
-export const DEFAULT_LOADER_SOURCE = path.join(
-  os.homedir(),
-  'Library/Application Support/Firefox/Profiles/egtc3irr.egdesk.default-release/chrome/utils',
-);
-
 export const QA_STAGE1_MODULES = Object.freeze([
   'resources/surface/EGDeskSurfaceOntology.mjs',
   'resources/surface/EGDeskSurfaceFileCard.mjs',
@@ -125,10 +120,10 @@ export function assertQaProfile(profilePath) {
   return canonical;
 }
 
-export function bootstrapQaProfile({ loaderSource = DEFAULT_LOADER_SOURCE, deskRecovery = null } = {}) {
+export function bootstrapQaProfile({ loaderSource, deskRecovery = null } = {}) {
   const recovery = deskRecovery ? deskRecoveryFixture(deskRecovery) : null;
   if (typeof loaderSource !== 'string' || !path.isAbsolute(loaderSource)) {
-    refuse('loader source must be an absolute directory');
+    refuse('an explicit dedicated loader source is required (absolute directory); personal profiles are not searched');
   }
   const source = fs.realpathSync.native(loaderSource);
   const sourceInfo = fs.lstatSync(source);

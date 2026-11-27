@@ -1,0 +1,174 @@
+{
+  "set": "board-reply-screening-v3",
+  "tokenCeiling": 6000,
+  "passRule": "A request passes when every hard check holds. Relevance requests (cN): each clearly relevant excerpt >= 0.6 (the product's bar: it is selected), each clearly irrelevant one <= 0.599. Arrangement requests (cN_now, asked only for the excerpts the relevance answers select, on the date the question is about): each current excerpt >= 0.5 (it is not dropped as dated) and each wrong-time/version excerpt <= 0.499 (HARD: below the bar it is dated and never offered as the current answer). The set passes when all 6 requests pass. Near-miss relevance (<= 0.599) is soft: a miss is reported, never a failure. The note of every check starts with its kind.",
+  "requests": [
+    {
+      "id": "ask-visitor-parking",
+      "file": "requests/ask-visitor-parking.json",
+      "sha256": "4904045cac76fcaaf97056e5ad6c8cc064fbbdf3be401a00b2a9f63ce4da6272",
+      "estInputTokens": 1133,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: canteen menu"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: where visitors park"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "near_miss: parking, but staff permits"
+        },
+        {
+          "name": "c5",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: the lot's hours on the day"
+        }
+      ]
+    },
+    {
+      "id": "ask-visitor-parking-now",
+      "file": "requests/ask-visitor-parking-now.json",
+      "sha256": "31fed0a63951b404c26e9cfb17d163802e5cabef8c5320b99911150afd40c17c",
+      "estInputTokens": 713,
+      "expect": [
+        {
+          "name": "c2_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, still applies: where visitors park"
+        },
+        {
+          "name": "c4_now",
+          "kind": "predicate",
+          "max": 0.499,
+          "severity": "hard",
+          "note": "wrong_time, no longer applies: last year's visitor parking, closed since"
+        },
+        {
+          "name": "c5_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, still applies: the lot's hours on the day"
+        }
+      ]
+    },
+    {
+      "id": "ask-plan-price-version",
+      "file": "requests/ask-plan-price-version.json",
+      "sha256": "1b2f98fd3853d5ce480eabcf75495415f1fead1bc2adf0c34e46d75631b51f13",
+      "estInputTokens": 913,
+      "expect": [
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: support hours"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: the current price and seats"
+        },
+        {
+          "name": "c4",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "near_miss: another plan's price"
+        }
+      ]
+    },
+    {
+      "id": "ask-plan-price-version-now",
+      "file": "requests/ask-plan-price-version-now.json",
+      "sha256": "f35df7f5d2266d868e899bbedfabe59129d41920e7b3fa4be74e0f738d78dc1b",
+      "estInputTokens": 496,
+      "expect": [
+        {
+          "name": "c1_now",
+          "kind": "predicate",
+          "max": 0.499,
+          "severity": "hard",
+          "note": "wrong_time, no longer applies: the discontinued 2024 version"
+        },
+        {
+          "name": "c3_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, still applies: the current price and seats"
+        }
+      ]
+    },
+    {
+      "id": "ask-workshop-refund",
+      "file": "requests/ask-workshop-refund.json",
+      "sha256": "0fa2bfe44ce4c722756aab0fb8a3f6e7ba3d186377f9690273adc44a4ae9ea19",
+      "estInputTokens": 926,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: the full-refund deadline"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "near_miss: same workshop, the sign-up period"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: library hours"
+        }
+      ]
+    },
+    {
+      "id": "ask-workshop-refund-now",
+      "file": "requests/ask-workshop-refund-now.json",
+      "sha256": "b39a68e886add838b87e12ee87a3bd8bbccfab11ebb5f63dbee25994525f421c",
+      "estInputTokens": 510,
+      "expect": [
+        {
+          "name": "c1_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, still applies: the full-refund deadline"
+        },
+        {
+          "name": "c4_now",
+          "kind": "predicate",
+          "max": 0.499,
+          "severity": "hard",
+          "note": "wrong_time, no longer applies: last year's refund rule, abolished"
+        }
+      ]
+    }
+  ]
+}
