@@ -103,10 +103,10 @@
     if (!document.getElementById('egd-canvas-layer')) return; // only the Desk window records
     try {
       if (event.command === 'locate') {
-        // OS-level capture (the bridge runs ffmpeg): the bridge needs this window's rectangle on the screen, in points.
+        // Window-set capture (the bridge runs the ScreenCaptureKit tool): the bridge needs this Firefox process id; only windows of this process are recorded. The geometry is informational.
         const g = { screenX: window.screenX, screenY: window.screenY, outerWidth: window.outerWidth, outerHeight: window.outerHeight, dpr: window.devicePixelRatio,
           screen: { left: window.screen.left, top: window.screen.top, width: window.screen.width, height: window.screen.height } };
-        await fetch('http://127.0.0.1:39218/v1/recording/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: event.id, state: 'located', geometry: g }) });
+        await fetch('http://127.0.0.1:39218/v1/recording/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: event.id, state: 'located', geometry: g, pid: globalThis.Services?.appinfo?.processID ?? null }) });
       } else if (event.command === 'indicator') {
         ChromeUtils.importESModule('chrome://userchrome/content/EGDeskScreenRecorder.sys.mjs').setRecordingDot(document, event.on === true);
       } else if (event.command === 'start') {

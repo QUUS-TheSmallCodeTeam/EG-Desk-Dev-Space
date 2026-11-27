@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { execFile, spawn as spawnProcess } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 
 // Screen recording v1, bridge side (round d, lane L37; flag EGDESK_SCREEN_RECORDING and all names here are temporary names).
@@ -11,12 +12,14 @@ import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.
 //   GET  /v1/recording                                                     -> state + last finished recording
 //   POST /v1/recording/report                                              -> the window's own reports (loopback only)
 // Two capture sources (body.source):
-//   'os' (default): what a person sees. The bridge starts ffmpeg (avfoundation, macOS) on the Desk window's screen rectangle, taken from the window at
-//     the start, so separate windows, dialogs and popups above it are in the video. QA/development path: there is NO mask (the contract's
-//     capture -> mask -> encode order cannot be kept by an OS screen grab), the sidecar says so, and the product path is ScreenCaptureKit with masking.
-//     The rectangle is fixed at start; a window that moves or resizes is not followed. Only the main display is captured.
-//     Stopped by 'q' on ffmpeg's stdin (SIGINT, then SIGKILL as fallbacks); the file is fragmented MP4, so a crash still leaves a playable file.
-//     (macOS screencapture -v was tried first: SIGINT/SIGTERM/SIGHUP kill it without writing a file, only its own -V timeout finalizes.)
+//   'egdesk-windows' (default; temporary name, round d lane L44): what a person sees of EG-Desk, and nothing else. The bridge starts the Swift tool
+//     egdesk-screen-recorder (apps/firefox-ui-demo/helper-native/screen-recorder, ScreenCaptureKit) with the EG-Desk Firefox process id that the window
+//     reports. The tool's filter is SCContentFilter(display:including: windows owned by that pid): the Desk window AND that process's own other windows
+//     and dialogs (e.g. the software-update window) are in the video, every other app's window is not, even when it is in front of the Desk.
+//     The tool follows new/closed windows of that pid (filter refresh every second). The old fixed screen rectangle ('os', ffmpeg avfoundation) is REMOVED:
+//     it recorded whatever app was on top of that rectangle (a real incident). Mask: the tool masks boxes it receives on stdin before encoding;
+//     the window-side producer of those boxes is not connected yet, so the sidecar says mask 'none' unless a window report 'mask' arrives.
+//     Stopped by 'q' on the tool's stdin (SIGINT, then SIGKILL as fallbacks); the file is fragmented MP4. No Screen Recording permission -> a clear refusal.
 //   'window': the Desk window's own drawSnapshot + MediaRecorder (masked, but only the main window; separate windows are not seen).
 // Flag off (default): every route answers 404 {status:'off'}. A recording existing is a record, not proof that any work succeeded.
 // After a stop the bridge re-reads the .webm itself: every segment's sha256 against the sidecar, the total size, and, when ffprobe is
@@ -26,7 +29,9 @@ export const SCREEN_RECORDING_HTTP = Object.freeze({
   ffprobe: '/opt/homebrew/bin/ffprobe', ffprobeTimeoutMs: 60_000,
 })
 const START_KEYS = new Set(['label', 'fps', 'scale', 'timesliceMs', 'maxMs', 'source'])
-export const OS_CAPTURE = Object.freeze({ ffmpeg: '/opt/homebrew/bin/ffmpeg', defaultFps: 10, maxFps: 30, maxWidth: 1280, startupMs: 1500, quitMs: 8000, intMs: 4000 })
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+export const WINDOW_CAPTURE = Object.freeze({ recorder: process.env.EGDESK_SCREEN_RECORDER_BIN || path.join(HERE, '..', '.tmp', 'bin', 'egdesk-screen-recorder'), defaultFps: 5, maxFps: 30, minScale: 0.1, maxScale: 2, startupMs: 12000, quitMs: 10000, intMs: 4000 })
+export const DEFAULT_SOURCE = 'egdesk-windows'
 const LABEL = /^[\p{L}\p{N} ._:/#()+-]{0,120}$/u
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -39,7 +44,7 @@ export async function verifyRecordingFiles({ dir, id, ffprobe = SCREEN_RECORDING
   try { sidecar = JSON.parse(await readFile(sidecarPath, 'utf8')) } catch { return { ...result, error: 'sidecar-unreadable' } }
   const file = path.join(dir, typeof sidecar.file === 'string' ? path.basename(sidecar.file) : `${id}.webm`)
   try { bytes = await readFile(file) } catch { return { ...result, error: 'file-unreadable' } }
-  // An OS capture has no segments (one file written by ffmpeg): size and decode are checked, there are no segment hashes to compare.
+  // A window-set capture has no segments (one file written by the recorder tool): size and decode are checked, there are no segment hashes to compare.
   const wholeFile = !Array.isArray(sidecar.segments)
   const segments = wholeFile ? [] : sidecar.segments
   let expected = 0, hashesMatch = true
@@ -69,23 +74,6 @@ export async function verifyRecordingFiles({ dir, id, ffprobe = SCREEN_RECORDING
   return result
 }
 
-/**
- * The Desk window's rectangle on the main display as an ffmpeg crop (device pixels, even numbers), from the window's report:
- * { screenX, screenY, outerWidth, outerHeight, dpr, screen: { left, top, width, height } } in points. { error } when it cannot be trusted.
- */
-export function osCaptureRegion(g, { maxWidth = OS_CAPTURE.maxWidth } = {}) {
-  const n = v => typeof v === 'number' && Number.isFinite(v)
-  if (!g || ![g.screenX, g.screenY, g.outerWidth, g.outerHeight, g.dpr].every(n) || !g.screen || ![g.screen.left, g.screen.top, g.screen.width, g.screen.height].every(n)) return { error: 'geometry-invalid' }
-  if (g.dpr < 1 || g.dpr > 4 || g.outerWidth < 100 || g.outerHeight < 100) return { error: 'geometry-invalid' }
-  if (g.screen.left !== 0 || g.screen.top !== 0) return { error: 'not-main-display' }
-  const x0 = Math.max(0, g.screenX), y0 = Math.max(0, g.screenY)
-  const x1 = Math.min(g.screen.width, g.screenX + g.outerWidth), y1 = Math.min(g.screen.height, g.screenY + g.outerHeight)
-  if (x1 - x0 < 100 || y1 - y0 < 100) return { error: 'window-off-screen' }
-  const even = v => Math.max(2, Math.floor(v / 2) * 2)
-  const pixels = { x: even(x0 * g.dpr), y: even(y0 * g.dpr), width: even((x1 - x0) * g.dpr), height: even((y1 - y0) * g.dpr) }
-  return { points: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }, pixels, outWidth: even(Math.min(maxWidth, pixels.width)), dpr: g.dpr }
-}
-
 function execFileJson(bin, args, timeout) {
   return new Promise((resolve, reject) => execFile(bin, args, { timeout, maxBuffer: 1 << 20 }, (error, stdout) => {
     if (error) return reject(error)
@@ -97,7 +85,7 @@ function execFileJson(bin, args, timeout) {
  * createScreenRecordingService({ enabled, broadcast, dataDir, now?, verify?, setTimer?, clearTimer?, pid? })
  * -> { start(options), stop(), report(body), snapshot(), handle(req, res, url) }
  */
-export function createScreenRecordingService({ enabled = () => process.env.EGDESK_SCREEN_RECORDING === 'on', broadcast, dataDir, now = Date.now, verify = verifyRecordingFiles, setTimer = setTimeout, clearTimer = clearTimeout, pid = process.pid, port = 39218, startAckMs = SCREEN_RECORDING_HTTP.startAckMs, stopAckMs = SCREEN_RECORDING_HTTP.stopAckMs, spawn = spawnProcess, ffmpegPath = OS_CAPTURE.ffmpeg, exists = p => fs.access(p).then(() => true, () => false), startupMs = OS_CAPTURE.startupMs, quitMs = OS_CAPTURE.quitMs, intMs = OS_CAPTURE.intMs } = {}) {
+export function createScreenRecordingService({ enabled = () => process.env.EGDESK_SCREEN_RECORDING === 'on', broadcast, dataDir, now = Date.now, verify = verifyRecordingFiles, setTimer = setTimeout, clearTimer = clearTimeout, pid = process.pid, port = 39218, startAckMs = SCREEN_RECORDING_HTTP.startAckMs, stopAckMs = SCREEN_RECORDING_HTTP.stopAckMs, spawn = spawnProcess, recorderPath = WINDOW_CAPTURE.recorder, exists = p => fs.access(p).then(() => true, () => false), startupMs = WINDOW_CAPTURE.startupMs, quitMs = WINDOW_CAPTURE.quitMs, intMs = WINDOW_CAPTURE.intMs } = {}) {
   if (typeof broadcast !== 'function' || !dataDir) throw new TypeError('broadcast and dataDir are required')
   const dir = path.join(dataDir, 'recordings')
   let current = null   // { id, label, state, requestedAt, info, waiters, maxTimer }
@@ -115,10 +103,10 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
     if (current && ['starting', 'recording', 'stopping'].includes(current.state)) return { code: 409, body: { status: 'busy', recording: publicOf(current) } }
     const id = `rec-${new Date(now()).toISOString().replace(/[-:T]/g, '').slice(0, 14)}-${randomBytes(3).toString('hex')}`
     const label = typeof body.label === 'string' ? body.label : ''
-    const source = body.source ?? 'os'
-    const rec = { id, label, source, fileName: source === 'os' ? `${id}.mp4` : `${id}.webm`, state: 'starting', requestedAt: new Date(now()).toISOString(), info: null, waiters: {}, verification: null, error: null }
+    const source = body.source ?? DEFAULT_SOURCE
+    const rec = { id, label, source, fileName: source === 'window' ? `${id}.webm` : `${id}.mp4`, state: 'starting', requestedAt: new Date(now()).toISOString(), info: null, waiters: {}, verification: null, error: null }
     current = rec
-    if (source === 'os') return startOs(rec, body)
+    if (source === DEFAULT_SOURCE) return startWindows(rec, body)
     const options = {}
     for (const key of ['fps', 'scale', 'timesliceMs', 'maxMs']) if (body[key] !== undefined) options[key] = body[key]
     command(rec, 'start', { label, dir, owner: { kind: 'bridge-http', label }, bridgePid: pid, ...options })
@@ -132,60 +120,96 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
   }
 
   const alive = proc => proc.exitCode === null && proc.signalCode === null
-  const sidecarOf = (rec, extra = {}) => ({ schema: 'egdesk-screen-recording/1', id: rec.id, label: rec.label, source: 'os-ffmpeg-avfoundation', mask: 'none',
-    maskNote: 'no mask: an OS screen capture cannot be masked before encoding; QA/development path only', owner: { kind: 'bridge-http', label: rec.label },
-    runtime: { app: 'EG-Desk', bridgePid: pid, window: rec.geometry ?? null }, node: { kind: 'egdesk-window-region', surface: 'desk' },
-    region: rec.region ?? null, regionNote: 'fixed at start; a window that moves or resizes is not followed; main display only', fps: rec.fps, maxMs: rec.maxMs,
+  const sidecarOf = (rec, extra = {}) => ({ schema: 'egdesk-screen-recording/1', id: rec.id, label: rec.label, source: 'egdesk-windows-screencapturekit',
+    filter: { kind: 'include-windows-of-pid', pid: rec.firefoxPid ?? null, windowCount: rec.windowIds?.length ?? 0, windowIds: rec.windowIds ?? [],
+      note: 'only windows owned by this process are in the filter (SCContentFilter display:including:); other apps never reach a frame' },
+    mask: rec.maskRevisions?.length ? 'recorder-stdin' : 'none',
+    maskNote: rec.maskRevisions?.length ? 'boxes from the window were painted black in the recorder before encoding' : 'no mask: the recorder supports stdin masks but the window-side producer is not connected yet (next job); a sensitive field of EG-Desk itself is visible',
+    maskRevision: rec.maskRev ?? 0, maskRevisions: rec.maskRevisions ?? [],
+    intervals: (rec.filterLog ?? []).map((e, i, a) => ({ fromMs: e.atMs, toMs: a[i + 1]?.atMs ?? null, windows: e.windows, windowIds: e.windowIds, maskRevision: e.maskRev })),
+    owner: { kind: 'bridge-http', label: rec.label }, runtime: { app: 'EG-Desk', bridgePid: pid, firefoxPid: rec.firefoxPid ?? null }, node: { kind: 'egdesk-owned-windows', surface: 'desk' },
+    recorder: rec.recorderInfo ?? null, frames: rec.frames ?? null, fps: rec.fps, maxMs: rec.maxMs,
     startedAt: rec.startedAt ?? null, endedAt: null, stopReason: null, file: rec.fileName, state: rec.state, error: rec.error ?? null, verification: null, ...extra })
   const writeSidecar = (rec, extra) => fs.writeFile(path.join(dir, `${rec.id}.json`), JSON.stringify(sidecarOf(rec, extra), null, 1))
+  const logFilter = rec => { (rec.filterLog ||= []).push({ atMs: now() - rec.startedMs, windows: rec.windowIds?.length ?? 0, windowIds: rec.windowIds ?? [], maskRev: rec.maskRev ?? 0 }); if (rec.filterLog.length > 200) rec.filterLog.splice(1, 1) }
 
-  async function startOs(rec, body) {
+  /** One JSON line of the recorder's stdout. */
+  function onRecorderEvent(rec, e) {
+    if (!e || typeof e !== 'object') return
+    if (e.event === 'started') { rec.recorderInfo = { video: e.video ?? null, display: e.display ?? null, fps: e.fps ?? null, scale: e.scale ?? null }; rec.windowIds = Array.isArray(e.windowIds) ? e.windowIds : []; logFilter(rec); rec.waiters.recorder?.({ started: true }) }
+    else if (e.event === 'windows') { rec.windowIds = Array.isArray(e.windowIds) ? e.windowIds : []; logFilter(rec) }
+    else if (e.event === 'progress' || e.event === 'stopped') { if (Number.isFinite(e.frames)) rec.frames = { count: e.frames, masked: e.maskedFrames ?? 0 } }
+    else if (e.event === 'error') { rec.recorderError = String(e.reason || 'recorder-error').slice(0, 60); rec.recorderDetail = String(e.detail || '').slice(0, 300); rec.waiters.recorder?.({ error: rec.recorderError }) }
+  }
+
+  async function startWindows(rec, body) {
     const fail = (code, status, reason) => { rec.state = 'failed'; rec.error = reason; last = rec; command(rec, 'indicator', { on: false }); return { code, body: { status, reason, recording: publicOf(rec) } } }
     command(rec, 'locate')
     const where = await waitFor(rec, 'located', startAckMs)
     if (!where) return fail(504, 'no-window-ack', 'no-window-ack')
     if (where.failed) return fail(422, 'refused', where.failed)
-    const region = osCaptureRegion(where.geometry)
-    if (region.error) return fail(422, 'refused', region.error)
-    if (!await exists(ffmpegPath)) return fail(422, 'refused', 'encoder-unavailable')
-    rec.geometry = where.geometry; rec.region = region
-    rec.fps = Math.min(OS_CAPTURE.maxFps, Math.max(1, Number.isFinite(body.fps) ? body.fps : OS_CAPTURE.defaultFps))
+    // The process id comes from the Desk window itself (Services.appinfo.processID): never from the request, so no other app can be named.
+    const firefoxPid = where.pid
+    if (!Number.isInteger(firefoxPid) || firefoxPid <= 1) return fail(422, 'refused', 'no-firefox-pid')
+    if (!await exists(recorderPath)) return fail(422, 'refused', 'recorder-unavailable')
+    rec.firefoxPid = firefoxPid
+    rec.fps = Math.min(WINDOW_CAPTURE.maxFps, Math.max(1, Math.round(Number.isFinite(body.fps) ? body.fps : WINDOW_CAPTURE.defaultFps)))
+    const scale = Number.isFinite(body.scale) ? Math.min(WINDOW_CAPTURE.maxScale, Math.max(WINDOW_CAPTURE.minScale, body.scale)) : 1
     rec.maxMs = Math.min(2 * 60 * 60_000, Math.max(1000, Number.isFinite(body.maxMs) ? body.maxMs : 30 * 60_000))
-    rec.startedAt = new Date(now()).toISOString()
+    rec.startedAt = new Date(now()).toISOString(); rec.startedMs = now(); rec.maskRev = 0; rec.maskRevisions = []; rec.filterLog = []
     const file = path.join(dir, rec.fileName)
     try { await fs.mkdir(dir, { recursive: true }); await writeSidecar(rec) } catch { return fail(500, 'failed', 'sidecar-unwritable') }  // owner, runtime, node first
-    const px = region.pixels
-    const args = ['-hide_banner', '-loglevel', 'error', '-f', 'avfoundation', '-framerate', String(rec.fps), '-capture_cursor', '1', '-i', '2:none',
-      '-vf', `crop=${px.width}:${px.height}:${px.x}:${px.y},scale=${region.outWidth}:-2`, '-c:v', 'h264_videotoolbox', '-b:v', '3M', '-t', String(Math.ceil(rec.maxMs / 1000)),
-      '-movflags', '+frag_keyframe+empty_moov', '-y', file]
+    const args = ['--pid', String(firefoxPid), '--out', file, '--fps', String(rec.fps), '--max-sec', String(Math.ceil(rec.maxMs / 1000)), '--scale', String(scale)]
     let proc
-    try { proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'pipe'] }) } catch { return fail(422, 'refused', 'capture-spawn-failed') }
-    rec.proc = proc; rec.stderr = ''
+    try { proc = spawn(recorderPath, args, { stdio: ['pipe', 'pipe', 'pipe'] }) } catch { return fail(422, 'refused', 'capture-spawn-failed') }
+    rec.proc = proc; rec.stderr = ''; rec.stdoutBuf = ''
     proc.stderr?.on('data', d => { rec.stderr = (rec.stderr + d).slice(-600) })
+    proc.stdout?.on('data', d => {
+      rec.stdoutBuf += d
+      let nl
+      while ((nl = rec.stdoutBuf.indexOf('\n')) >= 0) { const line = rec.stdoutBuf.slice(0, nl); rec.stdoutBuf = rec.stdoutBuf.slice(nl + 1); try { onRecorderEvent(rec, JSON.parse(line)) } catch {} }
+    })
     proc.stdin?.on('error', () => {})
-    rec.exited = new Promise(resolve => proc.once('exit', (code, signal) => { rec.exit = { code, signal }; resolve(rec.exit); if (rec.state === 'recording') { rec.stopReason ||= 'encoder-exited'; stopOs(rec) } }))
-    proc.once('error', () => { rec.exit ||= { code: null, signal: 'spawn-error' } })
-    const early = await Promise.race([rec.exited, new Promise(resolve => setTimer(() => resolve(null), startupMs))])
-    if (early) { rec.error = 'capture-failed: ' + rec.stderr.replace(/objc\[[^\n]*\n?/g, '').trim().slice(0, 200); return fail(422, 'refused', 'capture-failed') }
+    rec.exited = new Promise(resolve => proc.once('exit', (code, signal) => { rec.exit = { code, signal }; resolve(rec.exit); rec.waiters.recorder?.({ exited: true }); if (rec.state === 'recording') { rec.stopReason ||= 'recorder-exited'; stopWindows(rec) } }))
+    proc.once('error', () => { rec.exit ||= { code: null, signal: 'spawn-error' }; rec.waiters.recorder?.({ exited: true }) })
+    const early = await waitFor(rec, 'recorder', startupMs)
+    if (!early?.started) {
+      if (alive(proc)) { try { proc.kill('SIGKILL') } catch {} }
+      const reason = rec.recorderError || (early?.exited ? 'capture-failed' : 'capture-timeout')
+      rec.error = reason + (rec.recorderDetail ? ': ' + rec.recorderDetail : rec.stderr ? ': ' + rec.stderr.trim().slice(0, 200) : '')
+      await writeSidecar(rec, { state: 'failed', endedAt: new Date(now()).toISOString() }).catch(() => {})
+      return fail(422, 'refused', reason)
+    }
     rec.state = 'recording'
     command(rec, 'indicator', { on: true })  // the text-free red dot is in the picture, so nothing records unseen
     await writeSidecar(rec).catch(() => {})
-    rec.maxTimer = setTimer(() => { if (rec.state === 'recording') { rec.stopReason = 'max-length'; stopOs(rec) } }, rec.maxMs + SCREEN_RECORDING_HTTP.graceMs)
+    rec.maxTimer = setTimer(() => { if (rec.state === 'recording') { rec.stopReason = 'max-length'; stopWindows(rec) } }, rec.maxMs + SCREEN_RECORDING_HTTP.graceMs)
     return { code: 200, body: { status: 'recording', recording: publicOf(rec) } }
   }
 
-  async function stopOs(rec, reason) {
+  /** Boxes in display points: [{x, y, width, height}]. Forwarded to the recorder, which paints them black before encoding. */
+  function setMask(boxes) {
+    const rec = current
+    if (!rec || rec.state !== 'recording' || !rec.proc || !alive(rec.proc)) return false
+    const n = v => typeof v === 'number' && Number.isFinite(v)
+    const list = (Array.isArray(boxes) ? boxes : []).slice(0, 200).filter(b => b && [b.x, b.y, b.width, b.height].every(n)).map(b => ({ x: b.x, y: b.y, w: b.width, h: b.height }))
+    rec.maskRev = (rec.maskRev ?? 0) + 1
+    rec.maskRevisions.push({ revision: rec.maskRev, atMs: now() - rec.startedMs, boxes: list.length }); if (rec.maskRevisions.length > 200) rec.maskRevisions.splice(1, 1)
+    try { rec.proc.stdin.write(JSON.stringify({ mask: list, rev: rec.maskRev }) + '\n') } catch { return false }
+    return true
+  }
+
+  async function stopWindows(rec, reason) {
     if (rec.state === 'stopping' && rec.stopping) return rec.stopping
     rec.state = 'stopping'; rec.stopReason ||= reason || 'requested'
     rec.stopping = (async () => {
       clearTimer(rec.maxTimer)
       const waitExit = ms => Promise.race([rec.exited, new Promise(resolve => setTimer(() => resolve(null), ms))])
-      if (alive(rec.proc)) { try { rec.proc.stdin.write('q') } catch {} }
+      if (alive(rec.proc)) { try { rec.proc.stdin.write('q\n') } catch {} }
       if (!await waitExit(quitMs) && alive(rec.proc)) { try { rec.proc.kill('SIGINT') } catch {} }
-      if (!await waitExit(intMs) && alive(rec.proc)) { try { rec.proc.kill('SIGKILL') } catch {}; rec.error ||= 'encoder-killed'; await waitExit(2000) }
+      if (!await waitExit(intMs) && alive(rec.proc)) { try { rec.proc.kill('SIGKILL') } catch {}; rec.error ||= 'recorder-killed'; await waitExit(2000) }
       command(rec, 'indicator', { on: false })
-      const clean = rec.exit && (rec.exit.code === 0 || rec.exit.code === 255 || rec.exit.signal === 'SIGINT')
-      if (!clean) rec.error ||= `encoder-exit-${rec.exit?.code ?? rec.exit?.signal ?? 'unknown'}`
+      if (!(rec.exit && rec.exit.code === 0)) rec.error ||= rec.recorderError || `recorder-exit-${rec.exit?.code ?? rec.exit?.signal ?? 'unknown'}`
       await writeSidecar(rec, { endedAt: new Date(now()).toISOString(), stopReason: rec.stopReason, state: rec.error ? 'failed' : 'finished', error: rec.error ?? null }).catch(() => {})
       await finish(rec, { state: rec.error ? 'failed' : 'finished', error: rec.error ?? null })
     })()
@@ -211,8 +235,8 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
   async function stop() {
     const rec = current
     if (!rec || !['recording', 'starting'].includes(rec.state)) return { code: 409, body: { status: 'not-recording', last: publicOf(last) } }
-    if (rec.source === 'os' && !rec.proc) return { code: 409, body: { status: 'busy', reason: 'starting', recording: publicOf(rec) } }
-    if (rec.source === 'os') { await stopOs(rec); return { code: 200, body: { status: rec.state, recording: publicOf(rec) } } }
+    if (rec.source === DEFAULT_SOURCE && !rec.proc) return { code: 409, body: { status: 'busy', reason: 'starting', recording: publicOf(rec) } }
+    if (rec.source === DEFAULT_SOURCE) { await stopWindows(rec); return { code: 200, body: { status: rec.state, recording: publicOf(rec) } } }
     rec.state = 'stopping'
     const wait = waitFor(rec, 'stopped', stopAckMs)
     command(rec, 'stop', { reason: 'requested' })
@@ -227,7 +251,8 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
     const rec = current
     if (!rec || !body || typeof body !== 'object' || body.id !== rec.id) return false
     if (body.state === 'started') { rec.state = 'recording'; rec.info = body.info ?? null; rec.waiters.started?.({ state: 'started' }); return true }
-    if (body.state === 'located') { rec.waiters.located?.({ geometry: body.geometry }); return true }
+    if (body.state === 'located') { rec.waiters.located?.({ geometry: body.geometry, pid: body.pid }); return true }
+    if (body.state === 'mask') return setMask(body.boxes)
     if (body.state === 'failed') { const reason = String(body.reason || 'failed').slice(0, 60); rec.waiters.started?.({ state: 'failed', reason }); rec.waiters.located?.({ failed: reason }); return true }
     if (body.state === 'stopped') {
       if (rec.waiters.stopped) rec.waiters.stopped({ info: body.info })
@@ -259,7 +284,7 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
     if (sub === '/report') return reply(await report(body) ? 200 : 409, { status: 'ok' })
     if (sub === '/stop') { const r = await stop(); return reply(r.code, r.body) }
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !START_KEYS.has(k))) return reply(400, { status: 'invalid', reason: 'unknown-field' })
-    if (body.source !== undefined && !['os', 'window'].includes(body.source)) return reply(400, { status: 'invalid', reason: 'source' })
+    if (body.source !== undefined && ![DEFAULT_SOURCE, 'window'].includes(body.source)) return reply(400, { status: 'invalid', reason: 'source' })
     if (body.label !== undefined && (typeof body.label !== 'string' || !LABEL.test(body.label))) return reply(400, { status: 'invalid', reason: 'label' })
     for (const key of ['fps', 'scale', 'timesliceMs', 'maxMs']) if (body[key] !== undefined && !(typeof body[key] === 'number' && Number.isFinite(body[key]))) return reply(400, { status: 'invalid', reason: key })
     const r = await start(body)
@@ -268,8 +293,8 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
   /** The bridge is closing: a recording in progress is told to stop and finish its file (no hand-over contract exists). */
   function closing() {
     if (!current || !['starting', 'recording'].includes(current.state)) return
-    if (current.source === 'os') { stopOs(current, 'bridge-closing'); return }
+    if (current.source === DEFAULT_SOURCE) { stopWindows(current, 'bridge-closing'); return }
     command(current, 'stop', { reason: 'bridge-closing' })
   }
-  return { start, stop, report, snapshot, handle, closing }
+  return { start, stop, report, snapshot, handle, closing, setMask }
 }
