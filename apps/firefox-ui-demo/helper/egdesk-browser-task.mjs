@@ -96,7 +96,7 @@ const q = text => `"${String(text).replace(/"/g, "'")}"`
 // 0.19 (decided no), so the entry, as designed, did not enter. Nothing said what the page shows. R1: the card's predicate also quotes the
 // first lines the card shows now (its heading and the next lines, each quoted on its own), where the run may receive page text.
 const shownLines = card => (Array.isArray(card.shows) ? card.shows : []).map(line => compactText(String(line ?? ''), ENTRY_LINE_CHARS)).filter(Boolean).slice(0, ENTRY_LINES)
-// a1: with the page's own text withheld (PAGE_TEXT_FLAG off, the default) a card is quoted by its controls instead of its first lines (bounded control descriptions, not body lines)
+// a1: with the page's own text withheld (PAGE_TEXT_FLAG explicitly off) a card is quoted by its controls instead of its first lines (bounded control descriptions, not body lines)
 export const ENTRY_CARD_CONTROLS = 16, ENTRY_CARD_CONTROL_CHARS = 40
 const shownControls = card => (Array.isArray(card.controls) ? card.controls : []).map(line => compactText(String(line ?? ''), ENTRY_CARD_CONTROL_CHARS + 16)).filter(Boolean).slice(0, ENTRY_CARD_CONTROLS)
 const quoteIdentity = card => ((card.pageTitle || card.title) ? `${q(compactText(card.pageTitle || card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`)
@@ -419,10 +419,10 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
 }
 
 // a1 ('교대' round): the step event contract. One event per page action of a browser task (the direct entry's loop and the task tool alike); lane L1 draws
-// it, lane L5 carries it through the runtime. Closed words, the element's own short name and the NAME of a typed value only: never the text typed, an
+// it, lane L5 carries it through the runtime. Closed metadata plus an optional classified preview for the live frame only; never an
 // address or page text. by: 'decision' (the objective loop decided the step) | 'model' (the conversation model chose it, the task tool's guidance).
 // status: only on the task tool's last event of a call (op 'end'). A wait is part of the step before it: no event of its own.
-export const STEP_EVENT_OPS = Object.freeze(['open', 'submit', 'press', 'fill', 'scroll', 'end'])
+export const STEP_EVENT_OPS = Object.freeze(['open', 'submit', 'press', 'fill', 'select', 'scroll', 'end'])
 const EVENT_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
 export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision', status = null } = {}) {
   if (!task || !info || typeof info !== 'object') return null
@@ -433,9 +433,17 @@ export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision',
   return Object.freeze({ taskId: task.taskId, cardId: cardId ?? task.cardId ?? null, seq: Number.isSafeInteger(seq) ? seq : 0, op: info.op,
     target: typeof info.target === 'string' && info.target ? compactText(info.target, 40) : null,
     valueName: typeof info.valueName === 'string' && info.valueName ? compactText(info.valueName.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) || null : null, // a field's own option value as the name ('[F1] 검색') reads as its label
+    ...(['fill', 'select'].includes(info.op) && typeof info.displayValue === 'string' ? { displayValue: info.ok === true ? info.displayValue : '●●●' } : {}),
     ok: info.ok === true, ms: ms === null ? null : Math.max(0, Math.round(ms)), by: by === 'model' ? 'model' : 'decision',
     ...(typeof info.code === 'string' && EVENT_CODE.test(info.code) ? { code: info.code } : {}),
     ...(typeof status === 'string' && EVENT_CODE.test(status) ? { status } : {}) })
+}
+
+// Card-only live frames: never part of a step list, result, or task record.
+export async function withBrowserTaskActivity(run, task, notify, work) {
+  const signal = phase => { try { notify?.(run, { op: 'activity', phase, taskId: task.taskId, cardId: task.cardId, seq: task.eventSeq ?? 0 }) } catch {} }
+  signal('start')
+  try { return await work() } finally { signal('stop') }
 }
 
 const CANNOT = new Set(['site_not_allowed', 'site_pending', 'blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_limit', 'step_rejected'])
@@ -519,7 +527,7 @@ export function finishedPageFacts(segments, ids = []) {
 const askName = field => compactText(field.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)
 
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], field = null, staleBy = null }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], searchedFor = null, field = null, staleBy = null }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(task.goalChanges > 0 ? { goalChanges: Math.min(task.goalChanges, 9) } : {}), // c23: how many times the person changed the request while it ran
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
@@ -530,6 +538,7 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
     ...(Array.isArray(found) && found.length ? { found: found.slice(0, MAX_FOUND_SEGMENTS) } : {}),
     // c30: with no identifier to locate a status by, the page's own first lines (same gate as found)
     ...(Array.isArray(page) && page.length && !(Array.isArray(found) && found.length) ? { page: page.slice(0, MAX_PAGE_LINES) } : {}),
+    ...(status === 'done' && searchedFor ? { searchedFor } : {}),
     ...(staleBy === 'user-hold' ? { staleBy } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
@@ -619,6 +628,9 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
   }
 
   async function loop(run, task, hosts) {
+    return withBrowserTaskActivity(run, task, onStepEvent, () => loopSegments(run, task, hosts))
+  }
+  async function loopSegments(run, task, hosts) {
     if (!task.cardHost && typeof hosts?.[task.cardId] === 'string') task.cardHost = hosts[task.cardId].toLowerCase() // the card's host, for the brief
     let values = null // a1 fieldText: the chosen text, given to the next segment once (the loop keeps what is still to type in its state)
     // Segments of a few steps; the task's total budget survives pauses.
@@ -693,8 +705,9 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       case 'done': {
         task.status = 'done'; task.pause = null; store.touch(task)
         remember(task, { status: 'done' })
-        const { found, page } = pageTextInNote() === true ? finishedPageFacts(result.text, taskIdentifiers(task)) : { found: [], page: [] }
-        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page }) }
+        const allowPage = pageTextInNote() === true
+        const { found, page } = allowPage ? finishedPageFacts(result.text, taskIdentifiers(task)) : { found: [], page: [] }
+        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page, searchedFor: allowPage ? result.searchedFor : null }) }
       }
       case 'needs_user_context': {
         const candidates = result.candidates || []

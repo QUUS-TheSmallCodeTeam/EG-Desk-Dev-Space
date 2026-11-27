@@ -176,13 +176,13 @@ for (const crowded of [false, true]) {
     const entry = createDirectBrowserEntry({ provider: w.provider, store: createBrowserTaskStore(), fieldText: () => true, onStepEvent: (_run, event) => steps.push(event) })
     const out = await entry.handle({ run: w.run, conversationKey: 'dm', message: MESSAGE, hosts: { card: 'duckduckgo.com' }, titles: { card: 'DuckDuckGo' } })
     assert.equal(out.status, 'done')
-    assert.deepEqual(steps.filter(event => event.op !== 'end').map(event => [event.op, event.target, event.ok]), [['fill', '개인 정보 노출 없이 검색', true], ['submit', '검색', true]])
+    assert.deepEqual(steps.filter(event => event.op !== 'end' && !event.phase).map(event => [event.op, event.target, event.ok]), [['fill', '개인 정보 노출 없이 검색', true], ['submit', '검색', true]])
     assert.equal(new URL(w.cur.url).searchParams.get('q'), QUERY)
     const stepRequests = w.requests.filter(request => request.questions.some(q => q.name === 'next_step'))
     assert.equal(stepRequests.length, 3)
     assert.equal(stepRequests[0].questions.some(q => q.name === 'step_link'), crowded, 'the crowded home is fanned out')
     assert.equal(stepRequests[0].questions.find(q => q.name === 'next_step').choices.some(choice => choice.value === FIELD), true, 'the search box is an option')
-    for (const request of stepRequests) assert.match(request.input[1].content, /the page's own text is not sent/, 'page text off (the default)')
+    assert.match(stepRequests.at(-1).input[1].content, /나무위키/, 'default-on sends result page text')
     assert.equal(w.requests.filter(request => request.questions.some(q => q.name === 'field_text')).length, 1)
   })
 }
@@ -251,9 +251,11 @@ for (const [receipt, code, second] of [['site-allowed', undefined], ['site-refus
     const client = fakeClient(req => {
       const next = req.questions.find(q => q.name === 'next_step')
       if (req.questions.some(q => q.name === 'choice_requested') && !next) return { choice_requested: { type: 'predicate', probability: receipt === 'site-allowed' ? 1 : 0 } }
-      if (!landed && second) {
-        assert.ok(next.choices.every(c => /^\[L\d+\]/.test(c.value) || ['needs_user_context','blocked'].includes(c.value)))
-        assert.ok(!req.questions.some(q => ['open_only','read_here','field_text'].includes(q.name)))
+      if (!landed) {
+        assert.ok(!next && !req.questions.some(q => ['open_only','read_here','field_text'].includes(q.name)))
+        const rows = req.questions.filter(q => q.name.startsWith('result_'))
+        assert.ok(rows.length >= 2)
+        return Object.fromEntries(rows.map(q => [q.name, { type: 'predicate', probability: /나무위키"/.test(q.instructions) ? .99 : .01 }]))
       }
       const picked = next.choices.find(c => c.value.endsWith('] ' + title))
       return { next_step: ranked('next_step', [[landed ? 'goal_met' : picked?.value ?? 'needs_user_context', 0.98]]),
@@ -290,4 +292,27 @@ test('ranked result open: an uncertain link (even a spurious field answer) is no
   const out = await runBrowserReflex({ cardId: 'card', goal: '두 번째 결과 열어줘', firstFieldText: () => { throw new Error('not a typing request') }, textComboboxes: true, valuesFirst: true, client,
     callTool: async name => { calls.push(name); return { observationId: 'o1', snapshot: ddgResultsSnapshot() } } })
   assert.deepEqual(calls, ['egdesk_browser_observe']); assert.equal(out.outcome, 'needs_user_context'); assert.deepEqual(out.candidates, [])
+})
+
+test('ordinal open: an ambiguous or missing earlier result classification cannot shift the requested rank', async () => {
+  const snapshot = ddgResultsSnapshot(), options = buildReflexCandidates(snapshot, { askSite: true }).options
+  for (const earlier of [undefined, .5]) {
+    const client = fakeClient(req => Object.fromEntries(req.questions.filter(q => /^result_/.test(q.name)).flatMap((q, i) => i || earlier !== undefined ? [[q.name, { type: 'predicate', probability: i ? .99 : earlier }]] : [])))
+    const out = await decideReflexStep({ goal: '두 번째 결과 열어줘', resultOnly: true, snapshot, options, thresholds: T, client })
+    assert.equal(out.kind, 'user_context')
+  }
+})
+
+test('entry select: quote each label with the actual request; never resolve missing, competing or intermediate matches', async () => {
+  const goal = '드롭다운에서 Option 2 골라줘'
+  const snapshot = { url: 'https://site.test/dropdown', interactiveElements: [{tag:'select',role:'combobox',ref:'s',label:'dropdown',choice:{},value:'',options:['1','2'].map(value => ({label:'Option '+value,value}))}] }
+  const options = buildReflexCandidates(snapshot).options
+  for (const [scores, want] of [[[.01,.99], 'act'], [[.99,.99], 'user_context'], [[null,.99], 'user_context'], [[.01,.65], 'user_context']]) {
+    const client = fakeClient(req => {
+      const qs = req.questions.filter(q => /^select_/.test(q.name)); assert.equal(qs.length, 2)
+      qs.forEach((q,i) => { assert.ok(q.instructions.includes(JSON.stringify(goal))); assert.ok(q.instructions.includes(JSON.stringify('Option '+(i+1)))) })
+      return { next_step: ranked('next_step', [[options[1].value, want === 'act' ? .73 : .99]]), ...Object.fromEntries(qs.flatMap((q,i) => scores[i] == null ? [] : [[q.name,{type:'predicate',probability:scores[i]}]])) }
+    })
+    const out = await decideReflexStep({ goal, directEntry:true, snapshot, options, thresholds:T, client }); assert.equal(out.kind,want); if(want==='act') assert.equal(out.option.item.desired,'2')
+  }
 })

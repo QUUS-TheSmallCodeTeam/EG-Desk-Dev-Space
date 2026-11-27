@@ -42,6 +42,8 @@ import { DEFAULT_COMPUTER_CONTROL_POLICY, loadComputerControlOffOverrides, norma
 import { RunOutputStore } from './codex-run-outputs.mjs'
 import { claudeRpcThreadId } from './claude-engine-adapter.mjs'
 import { CLAUDE_RATE_LIMIT_WINDOWS } from './claude-stream-translate.mjs'
+import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
+import { pageTextOn } from './egdesk-browser-reflex.mjs'
 import { CLAUDE_BOUNDED_POLICIES, claudeBoundedThreadOverrides, verifyClaudeBoundedThread } from './egdesk-claude-bounded.mjs'
 import { publicEpochMs } from './codex-account-usage.mjs'
 // Read tools work with an observe grant; interaction tools still require the
@@ -161,6 +163,7 @@ import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, pr
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { conversationAuthority } from './egdesk-browser-authority.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
+import { ENTRY_STEP_EVENT, closedEntryStep } from './egdesk-browser-entry-record.mjs'
 import { BROWSER_TASK_TOOL_NAME, browserStepFor, noteWords, withBrowserTaskRule } from './egdesk-browser-task-turn.mjs' // a1 (교대)
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
@@ -2718,11 +2721,15 @@ export class CodexChatRuntime {
     // thread preparation below. It is awaited once, capped, just before the turn is claimed. null when off, advisory or not eligible.
     const memoryTurn = !bounded && this.turnMemoryMode() === 'on' ? this.beginTurnMemory(body, context) : null
     // Nunchi (flag EGDESK_NUNCHI, default off; egdesk-nunchi.mjs): the person's reaction to the assistant's last message is read beside the memory loop
-    const nunchiJob = beginNunchi(this, body, context, { bounded })
+    const browserJudgments = policy === BROWSER_BOUNDED && process.env.EGDESK_DRAFT_CHECK_BROWSER === 'on' && !context.stateless && !context.board && body.boardId == null && [null, undefined, 'direct'].includes(context.channelKind)
+    const skipJudgments = bounded && !browserJudgments
+    const nunchiJob = beginNunchi(this, body, context, { bounded: skipJudgments })
     // Decision model context setup: 'on' attaches the selected items, 'advisory' only records them.
     // The folder the engine works in (own tools: the real folder behind the neutral one), for the prefetch candidates (flag turnMemory.prefetch, default off)
     context.prefetchFolder = bounded ? null : (ownFolder ?? (overrides.cwd && overrides.cwd !== neutralFolder ? overrides.cwd : null))
-    const decision = bounded ? null : await this.prepareDecisionContext(body, context)
+    // Browser context and nunchi start beside thread preparation and direct entry. Neither can start a browser action.
+    const browserContext = browserJudgments ? this.prepareDecisionContext(body, context, { browserOnly: true }) : null
+    let decision = bounded ? null : await this.prepareDecisionContext(body, context)
     // Advisory turn memory (flag decisionContext.turnMemory.mode() === 'advisory', default off): the position is read before the thread is prepared.
     const memoryPosition = !bounded && this.turnMemoryMode() === 'advisory' ? this.turnPosition(context) : null
     const memoryClock = memoryPosition ? performance.now() : null // thread preparation time from here to dispatch is recorded as prepMs
@@ -2987,7 +2994,7 @@ export class CodexChatRuntime {
     if (engine.id === 'codex') this.assertProcessConfiguration(this.threads.get(cid), { model: overrides.model, effort })
     // The only wait turn memory adds: what is left of its cap after preparation. Before the synchronous claim below, never inside it.
     const memoryReady = memoryTurn ? await this.awaitTurnMemory(memoryTurn) : false
-    const nunchiText = bounded ? null : nunchiJob ? await settleNunchi(this, nunchiJob, context) : standingNunchi(this, context)
+    let nunchiText = bounded ? null : nunchiJob ? await settleNunchi(this, nunchiJob, context) : standingNunchi(this, context)
     if (memoryReady && memoryTurn.writeFirst) await this.awaitWriteFirst(memoryTurn)
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
@@ -3001,7 +3008,7 @@ export class CodexChatRuntime {
       : nativePolicyReceipt
     if (bounded && !verifiedPolicyReceipt) throw chatError('QA_POLICY_UNVERIFIED', 'Verified bounded policy receipt was lost before turn/start', 502)
     // Held, completed answers (flag decisionContext.draftCheck.mode() === 'on', default off): the final answer is posted only once, after the check.
-    context.draftHold = !bounded && this.draftHoldEligible(body, context)
+    context.draftHold = !skipJudgments && this.draftHoldEligible(body, context)
     this.startHeartbeat(context, cid)
     const pending = { ...context, conversationId: cid, buffer: [] }
     this.pendingStarts.set(cid, pending)
@@ -3082,10 +3089,10 @@ export class CodexChatRuntime {
       }
       // Completed messages only (the held-answer mode, decisionContext.draftCheck 'on'): the subjective model's message for a browser task
       // (its question to the person, or its final report) is held and posted once, like any held answer. No second mechanism: the same
-      // guard, settle point and post. The draft check itself stays ineligible for a bounded turn, so the original text is posted.
+      // guard, settle point and post. Without D26 this only posts the held original.
       if (browserPre?.note && this.browserTaskHoldEligible()) { context.draftHold = pending.draftHold = true; context.browserTaskTurn = true }
       // Every other turn of a Browser conversation (U8: no streaming, only finished messages; all-on finding A6): the same hold, nothing new.
-      // It only holds: the draft check stays ineligible for a bounded turn (the original is posted whole), and the heartbeat does not start
+      // Without D26 it only holds (the original is posted whole), and the heartbeat does not start
       // speaking in a bounded run because of it (holdOnly; allowIntermediateMessages is still the only way to opt a bounded run in).
       // a1: a Claude browser conversation under the harness holds whatever the check's setting, as its other turns do (u8, claudeHarnessHold): the talk between tool calls is a work note, one answer is posted.
       else if (policy === BROWSER_BOUNDED && !context.draftHold && (this.browserTaskHoldEligible() || this.claudeHarnessHold(body, context))) { context.draftHold = pending.draftHold = true; context.holdOnly = true }
@@ -3112,9 +3119,15 @@ export class CodexChatRuntime {
         : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
+      if (browserJudgments) {
+        decision = await browserContext
+        nunchiText = nunchiJob ? await settleNunchi(this, nunchiJob, context) : standingNunchi(this, context)
+      }
+      const selectedBrowserContext = browserJudgments && decision?.mode === 'on' && decision.result.extraContext?.[DECISION_CONTEXT_KEY]
+        ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: decision.result.extraContext[DECISION_CONTEXT_KEY] } } : null
       const nunchiContext = nunchiText && !(additionalContext && Object.hasOwn(additionalContext, NUNCHI_KEY)) ? { [NUNCHI_KEY]: { kind: 'application', value: nunchiText } } : null
       if (recordRule && memoryTurn?.writeFirst?.inTime === true && recordRule === memoryTurn.writeFirst.text) memoryTurn.writeFirst.sent = true // the settled state went out with this turn
-      const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext || nunchiContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}), ...(nunchiContext || {}) } : additionalContext
+      const turnAdditionalContext = selectedBrowserContext || browserTaskContext || memoryContext || recordingContext || nunchiContext ? { ...(additionalContext || {}), ...(selectedBrowserContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}), ...(nunchiContext || {}) } : additionalContext
       // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
       // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
       // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
@@ -3244,7 +3257,7 @@ export class CodexChatRuntime {
       const memoryCovered = this.memoryKeyCovered(memoryItems, memoryTurn, memoryPacket, memoryNote)
       // c32: the entries the engine would still cut (over its limit, not split) are only partly seen by the answering model; with one packet the memory pages ride in the same entry.
       const cutForCheck = engineShape.spilled.has(DECISION_CONTEXT_KEY) && memoryTurn?.onePacket ? new Set([...engineShape.spilled, TURN_MEMORY_KEY]) : engineShape.spilled
-      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...((memoryPacket || memoryNote) && !memoryCovered ? [TURN_MEMORY_KEY] : [])], memoryItems, cutForCheck)
+      this.noteDraftCheckTurn(run, body, context, decision, skipJudgments, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...((memoryPacket || memoryNote) && !memoryCovered ? [TURN_MEMORY_KEY] : [])], memoryItems, cutForCheck)
       if (decision?.late) this.noteLateDecisionContext(run, decision)
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
@@ -4903,7 +4916,7 @@ export class CodexChatRuntime {
    * under its own AbortController. Never throws: any failure is a fallback
    * (today's behaviour) → { mode, result } or null when nothing ran.
    */
-  async prepareDecisionContext(body, context) {
+  async prepareDecisionContext(body, context, { browserOnly = false } = {}) {
     const setup = this.decisionContext
     if (!setup?.client || typeof setup.collect !== 'function') return null
     let mode
@@ -4929,10 +4942,16 @@ export class CodexChatRuntime {
     if (keepLate) lateTimer = setTimeout(() => controller.abort(), budgetMs + LATE_CONTEXT_MS)
     let speech = null
     const work = (async () => {
-      speech = mode === 'on' ? this.directSpeech(body, context, controller.signal) : null
-      const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
-      const collected = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
-      const prefetch = mode === 'on' ? await this.prefetchCandidates(context) : []
+      speech = !browserOnly && mode === 'on' ? this.directSpeech(body, context, controller.signal) : null
+      const memoryEvidenceFor = !browserOnly && mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
+      // Only this message's explicitly selected cards, never the global graph, folder or Board.
+      const selectedSources = browserOnly && context.toolCeiling?.browser !== 'none' ? (body.selectedSources ?? []).filter(s => ['observe', 'interact'].includes(s?.browserToolPermission)).map(s => {
+        let host = ''; try { host = new URL(s.sourceRef?.uri).host } catch {}
+        return { id: s.id, kind: 'browser', title: s.label || s.title || host }
+      }) : []
+      const collected = browserOnly ? (await collectDecisionCandidates({ body: { selectedSources } })).candidates
+        : await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
+      const prefetch = !browserOnly && mode === 'on' ? await this.prefetchCandidates(context) : []
       if (prefetch.length) collected.push(...prefetch)
       // What code can rule out is not asked (egdesk-context-pruning.mjs): records the model already holds unchanged in this conversation. Only
       // under 'on' and where delivery receipts are trusted: a Codex thread (compaction is reported there and clears them). Advisory records only.
@@ -4942,7 +4961,7 @@ export class CodexChatRuntime {
         this.turnPosition(context).reason === 'live_thread' ? context.conversationId : null
       const { kept: candidates, pruned } = thread ? await pruneContextCandidates(Array.isArray(collected) ? collected : [], {
         sent: this.contextDelivered.get(thread) ?? null, memoryReceipts: this.turnMemoryDelivered.get(thread)?.pages ?? null }) : { kept: Array.isArray(collected) ? collected : [], pruned: [] }
-      const topic = mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
+      const topic = !browserOnly && mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
       if (controller.signal.aborted || !inBudget()) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
       const previousReply = this.previousReplyFor(context, speech)
       const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic, ...(previousReply ? { previousReply } : {}),
@@ -5641,6 +5660,10 @@ export class CodexChatRuntime {
    */
   browserTaskStep(run, event) {
     try {
+      if (run?.entrySteps) {
+        const step = closedEntryStep(event, { callId: run.entrySteps.callId, seq: run.entrySteps.rows.length + 1, completedAt: this.now(), durationMs: event.ms })
+        if (step) run.entrySteps.rows.push(step)
+      }
       const channel = this.decisionContext?.browserSteps
       if (typeof channel?.publish !== 'function' || !run?.clientThreadId || this.deletedConversations.has(run.clientThreadId)) return false
       const step = browserStepFor(event, { clientThreadId: run.clientThreadId })
@@ -5898,6 +5921,7 @@ export class CodexChatRuntime {
     if (!cfg || !provider || !prepared || typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled()) return null
     const id = `pre-${context.requestId}`
     const preRun = { runId: id, answerId: id, requestId: context.requestId, clientThreadId: context.clientThreadId, status: 'inProgress', executionPolicy: { mode: BROWSER_BOUNDED }, quiet: true }
+    if (this.store) preRun.entrySteps = { callId: 'entry-' + randomUUID(), rows: [] }
     await this.callProvider(provider, 'bindRun', preRun, prepared) // a refusal here is a refusal before the native turn starts
     let note = null, handedOff = false
     try {
@@ -5944,6 +5968,15 @@ export class CodexChatRuntime {
         if (verdictRow.verdict.status !== 'settled') { verdictRow.verdict = { status: 'settled', item: browserItem, p: null, calls: verdictRow.verdict.calls, answers: verdictRow.verdict.answers ?? {}, via: 'options' }; verdictRow.record.status = 'settled'; verdictRow.record.reason = null; verdictRow.record.kind = browserItem.kind; verdictRow.record.id = browserItem.id }
       }
     } catch { note = null; handedOff = false }
+    // Durable only: never broadcast these rows or revive a conversation deleted during entry.
+    if (preRun.entrySteps && !this.deletedConversations.has(context.clientThreadId)) {
+      try {
+        for (const step of preRun.entrySteps.rows) this.store.appendEvent({ eventKey: step.callId + ':' + step.seq,
+          clientThreadId: context.clientThreadId, requestId: context.requestId, localRunId: context.localRunId,
+          event: ENTRY_STEP_EVENT, ts: step.completedAt, details: step })
+      } catch { this.storeHealthy = false }
+    }
+    delete preRun.entrySteps
     return { preRun, provider, note, handedOff, adopted: false }
   }
 
@@ -6980,9 +7013,10 @@ export class CodexChatRuntime {
     if (ready.skip) { clearTimeout(timer); controller.abort(); return null }
     let vocabulary = []
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
-    const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal, ready.evidence)
+    const guard = this.browserDraftGuard(run, ready.evidence)
+    const revise = ({ draft, note }) => !guard || guard() ? this.reviseOnFork(run, draft, note, controller.signal, ready.evidence) : null
     const check = checkDraft({ draft: text, evidence: ready.evidence, evidenceIncomplete: ready.incomplete === true, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-      mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.checkEgressFor(run), onStage: stage => this.noteDecisionStage?.(run, stage.stage, { startAt: stage.startAt, endAt: stage.endAt, outcome: stage.outcome }) })
+      mode: 'on', design: this.draftCheckDesign(), client: guard ? { decide: request => setup.client.decide({ ...request, authorizeDispatch: guard }) } : setup.client, revise, signal: controller.signal, egress: this.checkEgressFor(run), onStage: stage => this.noteDecisionStage?.(run, stage.stage, { startAt: stage.startAt, endAt: stage.endAt, outcome: stage.outcome }) })
     void check.catch(() => {})
     try {
       const result = await Promise.race([check, aborted])
@@ -7009,6 +7043,7 @@ export class CodexChatRuntime {
   // ones it ranked in), not only this turn's own records: in v9 the plan page reached the s13 check as a carried record (prev_mem1), so it was not among s13's own records and the
   // chain broke at s14, whose check again had no plan page (byte-identical to v8; "12월 첫째 주에 배포할 예정입니다." read unsupported .08 and was withheld).
   rememberWithheldEvidence(run, result) {
+    if (run.executionPolicy?.mode === BROWSER_BOUNDED) return
     try {
       const entry = this.earlierEvidence?.get(run.clientThreadId)
       if (!entry) return
@@ -7074,6 +7109,8 @@ export class CodexChatRuntime {
       if (fresh.length) now = { ...turn, evidence: [...fresh, ...turn.evidence] }
     }
     now = { ...now, evidence: await this.refreshEditedFiles(run, now.evidence) } // u7: a file this turn's own edit changed is read as it is now
+    // A Browser grant lives for THIS run. Do not carry page evidence to or from the conversation cache.
+    if (run.executionPolicy?.mode === BROWSER_BOUNDED) return { skip: null, evidence: answerEvidence(now, tools), incomplete }
     const own = answerEvidence(now, tools).filter(item => !item.opaque)
     const entry = this.earlierEvidence?.get(run.clientThreadId)
     const earlier = entry ? (entry.withheld ? entry.records : entry.records.slice(0, EARLIER_EVIDENCE_LIMIT)) : []
@@ -7096,6 +7133,14 @@ export class CodexChatRuntime {
   // line, how it ended (exit code) and how long it took, the command check's reading of its output (lane L5's judged state, in its fixed words)
   // and the output's last lines, as one terminal item where the run's models may receive terminal data, else a content-free reference as before.
   // The browser task's closed outcome note where they may receive browser data. Every other tool step stays a content-free reference.
+  browserDraftGuard(run, evidence) {
+    const pages = evidence.filter(e => /^page\d+$/.test(e.id) && e.kind === 'browser')
+    if (!pages.length) return null
+    const provider = this.browserToolProvider(), generation = this.decisionContext?.settingsGeneration?.()
+    return () => process.env.EGDESK_DRAFT_CHECK_BROWSER === 'on' && pageTextOn() && this.decisionEgressFor(run).allows('page_text') &&
+      this.decisionContext?.settingsGeneration?.() === generation && pages.every(e => provider?.draftPages?.(run)?.includes(e.text))
+  }
+
   answerFactsEvidence(run) {
     const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
     const egress = this.decisionEgressFor(run), terminal = egress.allows('terminal_output')
@@ -7124,8 +7169,12 @@ export class CodexChatRuntime {
     })
     if (useOwn) { const quote = egress.allows('command_output'); ownEntries.forEach((entry, i) => out.push(ownCommandEvidence(entry, i, { quoteLine: quote }))) }
     if (useEdits) editEntries.forEach((entry, i) => out.push(ownEditEvidence(entry, i, editEntries)))
+    if (run.executionPolicy?.mode === BROWSER_BOUNDED && process.env.EGDESK_DRAFT_CHECK_BROWSER === 'on' && pageTextOn() && egress.allows('page_text')) {
+      const pages = this.browserToolProvider()?.draftPages?.(run) ?? []
+      pages.forEach((text, i) => out.push({ id: 'page' + (i + 1), kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text }))
+    }
     const note = this.draftCheckTurns.get(run)?.browserNote
-    if (typeof note === 'string' && note.trim() && egress.allows('browser_task_record')) out.push({ id: 'task', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The browser task's outcome note: ${publicText(note, 1000)}` })
+    if (typeof note === 'string' && note.trim() && egress.allows('browser_task_record') && (run.executionPolicy?.mode !== BROWSER_BOUNDED || pageTextOn())) out.push({ id: 'task', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The browser task's outcome note: ${publicText(note, 1000)}` })
     return out
   }
 
@@ -7874,8 +7923,9 @@ export class CodexChatRuntime {
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
       const ready = run ? await this.draftTurnEvidence(run, turn, tools, aborted) : { skip: null, evidence: answerEvidence(turn, tools) }
       if (ready.skip) { record({ fallback: 'evidence_unavailable' }); return }
+      const guard = this.browserDraftGuard(run, ready.evidence)
       const check = checkDraft({ draft: text, evidence: ready.evidence, evidenceIncomplete: ready.incomplete === true, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-        mode: 'advisory', design: this.draftCheckDesign(), client: setup.client, signal: controller.signal, egress: this.checkEgressFor(run) })
+        mode: 'advisory', design: this.draftCheckDesign(), client: guard ? { decide: request => setup.client.decide({ ...request, authorizeDispatch: guard }) } : setup.client, signal: controller.signal, egress: this.checkEgressFor(run) })
       void check.catch(() => {}) // a check that outlives the deadline must not surface later
       const result = await Promise.race([check, aborted])
       const totalMs = performance.now() - t0
@@ -9008,6 +9058,7 @@ export class CodexChatRuntime {
     if (typeof dc?.eligible === 'function') return dc.eligible({ body, context }) === true
     if (context.stateless || context.board || body?.boardId != null) return false
     if (context.channelKind === 'direct') return true
+    if (context.channelKind == null && context.executionPolicy === BROWSER_BOUNDED && process.env.EGDESK_DRAFT_CHECK_BROWSER === 'on') return true
     return context.channelKind == null && context.engine?.id === 'claude' && this.claudeHarness() !== null
   }
 

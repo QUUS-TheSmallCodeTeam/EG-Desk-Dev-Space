@@ -15653,6 +15653,7 @@
     let browserTransportAbort = null;
 
     const clearBrowserToolTransport = ({ revoke = false } = {}) => {
+      if (revoke) for (const card of (globalThis.document?.querySelectorAll('.egd-browser-card[data-egd-task-working]') || [])) card._browserTaskActivity?.(null);
       const hadTransport = !!browserTransportId;
       try { detachBrowserToolTransport?.(); } catch {}
       detachBrowserToolTransport = null;
@@ -16844,8 +16845,12 @@
           return;
         // a1 (L1): one step of a Browser task for this screen (the bridge sends it only with capabilities.browserSteps).
         case 'browser.task.step': {
+          if (event.op === 'activity') {
+            if (state.codex.browserStepsUi === true) document.getElementById(event.cardId)?._browserTaskActivity?.(event);
+            return;
+          }
           const before = state.codex.browserSteps;
-          state.codex.browserSteps = BrowserStepsView.addBrowserStep(before, event);
+          state.codex.browserSteps = BrowserStepsView.addBrowserStep(before, event, { live: true });
           if (state.codex.browserSteps !== before && state.codex.browserStepsUi === true) emit();
           return;
         }
@@ -28052,12 +28057,24 @@
     card._browserState = browserState;
     // ---- BRW-13: Agent activity on this Card (display; authority stays in the transport) ----
     const agentControl = { hold: null, inFlight: 0, count: 0, lastActiveAt: 0, timer: 0, popover: null, prior: null };
+    const activeBrowserTasks = new Set();
+    card._browserTaskActivity = frame => {
+      if (!frame) activeBrowserTasks.clear();
+      else {
+        const key = JSON.stringify([frame.clientThreadId, frame.taskId]);
+        if (frame.phase === 'start' && !agentControl.hold) activeBrowserTasks.add(key);
+        else if (frame.phase === 'stop') activeBrowserTasks.delete(key);
+      }
+      refreshAgentControl();
+    };
     const agentBadgeView = (now) => SurfaceState.browserAgentBadge({ hold: !!agentControl.hold,
-      permission: browserToolCardPermission(card.id), inFlight: agentControl.inFlight,
+      taskWorking: activeBrowserTasks.size > 0, permission: browserToolCardPermission(card.id), inFlight: agentControl.inFlight,
       count: agentControl.count, lastActiveAt: agentControl.lastActiveAt, now });
     const refreshAgentControl = () => {
       if (agentControl.timer) { window.clearTimeout(agentControl.timer); agentControl.timer = 0; }
       const now = Date.now();
+      if (activeBrowserTasks.size) card.dataset.egdTaskWorking = 'true';
+      else delete card.dataset.egdTaskWorking;
       let view = agentBadgeView(now);
       // An open timeline keeps its badge until 대표님 closes it.
       if (view.mode === 'hidden' && agentControl.popover && agentControl.count > 0) {
@@ -28075,7 +28092,7 @@
       if (agentBadge.textContent !== view.label) agentBadge.textContent = view.label;
       // AGENT-05: the Agent chip beside the badge (absent where this block runs alone, as in tests).
       if (typeof codexCardAgentIdentityRender === 'function') codexCardAgentIdentityRender(agentIdentityChip, view, agentControl, card.id);
-      agentBadge.dataset.compactLabel = view.mode === 'user' ? '직접'
+      agentBadge.dataset.compactLabel = activeBrowserTasks.size ? view.label : view.mode === 'user' ? '직접'
         : view.mode === 'operating' ? (view.label === 'Agent 읽는 중' ? '읽기' : '조작') : '';
       const badgeName = view.label ? `${view.label} · Agent 활동 기록 보기` : 'Agent 활동 기록 보기';
       if (agentBadge.title !== badgeName) agentBadge.title = badgeName;
@@ -28220,6 +28237,7 @@
       if (agentControl.hold) return;
       const threads = revokeBrowserToolCard(card.id);
       agentProjection.invalidate();
+      activeBrowserTasks.clear();
       agentControl.hold = { since: Date.now(), noticed: new Set() };
       for (const clientThreadId of threads) noticeAgentHold(clientThreadId);
       refreshAgentControl();

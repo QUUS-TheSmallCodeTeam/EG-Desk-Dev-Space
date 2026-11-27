@@ -92,9 +92,15 @@ export function isCurrentBrowserReflexHandoff(response, run, event) {
 export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKeyFor = () => getOwnerKey(), schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, watchPopupLoad = null, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey, ownerKeyFor }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
   let resetting = 0
+  // One bounded excerpt per granted card object, never serialized. Removing the grant removes access.
+  let pageExcerpts = new WeakMap()
   const fixtureAttestations = new Map()
   const provider = {
     providerId: 'egdesk-browser',
+    draftPages(run) {
+      if (resetting || cancelledBrowserRuns.has(run) || !transport.runs.has(run.runId)) return []
+      return (run.browserBinding?.cards ?? []).map(card => pageExcerpts.get(card)).filter(Boolean)
+    },
     // Working-memory gate (flag, default off): in these results only the visible page text array is free text.
     // Card ids, observation ids, element refs and receipts are never touched.
     workingMemory: Object.freeze(Object.fromEntries(['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_wait']
@@ -192,7 +198,9 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
       transport.bindRun(run.runId, run.clientThreadId, prepared.transportId, prepared.selection?.engineProfileId)
       try {
         service.adopt(preRun, run)
-        run.browserBinding = { cards: (preRun.browserBinding?.cards || []).map(card => ({ ...card })) }
+        run.browserBinding = { cards: (preRun.browserBinding?.cards || []).map(card => {
+          const next = { ...card }; if (pageExcerpts.has(card)) pageExcerpts.set(next, pageExcerpts.get(card)); return next
+        }) }
         run.adoptedFrom = preRun.runId
         this.emit(run, 'browser.bound', run.browserBinding)
       } catch (error) {
@@ -263,6 +271,13 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
             namespace: event.namespace || null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null }, event.callId)
         }
         const selected = run.browserBinding?.cards?.find(card => card.cardId === result.cardId)
+        if (selected && run.executionPolicy?.mode === BROWSER_BOUNDED && process.env.EGDESK_DRAFT_CHECK_BROWSER === 'on') {
+          const snapshot = result.after ?? result.snapshot
+          if (success && snapshot && Array.isArray(snapshot.text)) {
+            const excerpt = snapshot.text.filter(s => typeof s === 'string').slice(0, 12).map(s => s.slice(0, 400)).join('\n').slice(0, 1200)
+            pageExcerpts.set(selected, excerpt)
+          } else if (result.action) pageExcerpts.delete(selected)
+        }
         // The route the actor reported, from a fixed set; never a success claim.
         const inputRoute = [result.dispatchReceipt?.inputRoute, result.dispatchReceipt?.clickInputRoute]
           .find(route => PUBLIC_INPUT_ROUTES.has(route))
@@ -401,12 +416,14 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKe
       finally { transport.unbindRun(run.runId); if (run.adoptedFrom) transport.unbindRun(run.adoptedFrom) }
     },
     disconnect() {
+      pageExcerpts = new WeakMap()
       fixtureAttestations.clear()
       resetting++
       const operation = service.reset()
       void Promise.resolve(operation).catch(() => {}).finally(() => { for (const runId of transport.runs.keys()) transport.unbindRun(runId); resetting-- })
     },
     reset() {
+      pageExcerpts = new WeakMap()
       fixtureAttestations.clear()
       resetting++
       const operation = service.reset()

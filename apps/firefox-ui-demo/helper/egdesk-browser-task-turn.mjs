@@ -7,7 +7,7 @@
 //      (decisionContext.browserSteps.publish, egdesk-browser-steps-channel.mjs; it sends nothing while EGDESK_BROWSER_STEPS_UI is off), whatever the entry value
 //      ('on' or 'alternate'): browserStepFor below. Closed words, counts, ids and the control's own label only: never a typed value, an address or page text.
 // Pure: no I/O.
-import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
+import { BROWSER_DONE_RULE, BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
 
 export { BROWSER_TASK_TOOL_NAME } // L8's name, the one constant
 export const ALTERNATE_VALUE = 'alternate'
@@ -29,7 +29,12 @@ export function browserTaskRule({ toolOffered = false } = {}) {
  */
 export function withBrowserTaskRule(note, { toolOffered = false } = {}) {
   const parsed = noteObject(note)
-  return parsed ? JSON.stringify({ ...parsed, rule: browserTaskRule({ toolOffered }) }) : note
+  if (!parsed) return note
+  const { status, next, ask } = parsed.egdesk_browser_task
+  const rule = status === 'done' ? BROWSER_DONE_RULE : toolOffered === true && status === 'needs_value' && next === 'continue_with_egdesk_browser_task' && ask?.kind === 'text' && ask.field
+    ? `The task is paused at the named field. If the value follows from the conversation, call ${BROWSER_TASK_TOOL_NAME} now with values keyed by ask.field and no goal; no Card read is needed to locate the field. Otherwise ask one short question.`
+    : browserTaskRule({ toolOffered })
+  return JSON.stringify({ ...parsed, rule })
 }
 
 const noteObject = note => {
@@ -45,7 +50,7 @@ export function noteWords(note) {
 }
 
 // the step contract's operations (L8 taskStepEvent: open | submit | press | fill | scroll | end) as the screen's words (L1 EGDeskBrowserStepsView OP_ALIASES)
-const SCREEN_OP = Object.freeze({ open: 'navigate', submit: 'submit', press: 'click', fill: 'fill', scroll: 'scroll' })
+const SCREEN_OP = Object.freeze({ open: 'navigate', submit: 'submit', press: 'click', fill: 'fill', select: 'select', scroll: 'scroll' })
 // why the conversation model takes the task over, in the screen's words (L1 HANDOFF_REASONS): the note's or the tool's closed status/code
 const HANDOFF_OF = Object.freeze({ needs_value: 'needs_value', detail_needed: 'needs_value', needs_guidance: 'low_confidence', uncertain: 'low_confidence', page_unclear: 'low_confidence',
   choice_needed: 'needs_user', confirm_needed: 'needs_user', need_context: 'needs_user', human_step: 'human_step', person_only_controls: 'human_step', sensitive_flow: 'human_step', login_required: 'human_step', two_factor_required: 'human_step', bot_check: 'human_step' })
@@ -58,12 +63,14 @@ const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : null
  * browserStepFor(event, { clientThreadId }) -> one step in lane L1's shape for decisionContext.browserSteps.publish, or null.
  *   event: L8's step contract ({ taskId, cardId, seq, op, target, valueName, ok, ms, by, code?, status? }), or the entry's own last step
  *   ({ taskId, cardId, seq, op: 'end', status, code }). An op 'end' becomes 'done' (status done), 'blocked' (cannot) or 'handoff' with its reason.
- *   Only the listed fields leave, each checked; a typed value, an address or page text never leaves.
+ *   Only listed fields leave; displayValue is the classified, bounded preview for the local UI channel.
  */
 export function browserStepFor(event, { clientThreadId } = {}) {
   if (!event || typeof event !== 'object' || typeof clientThreadId !== 'string' || !clientThreadId) return null
   const taskId = typeof event.taskId === 'string' && ID.test(event.taskId) ? event.taskId : null, seq = count(event.seq)
   if (!taskId || seq === null) return null
+  if (event.op === 'activity' && ['start', 'stop'].includes(event.phase) && ID.test(event.cardId ?? ''))
+    return { clientThreadId, taskId, seq, cardId: event.cardId, op: 'activity', phase: event.phase }
   const status = typeof event.status === 'string' && WORD.test(event.status) ? event.status : null, code = typeof event.code === 'string' && WORD.test(event.code) ? event.code : null
   let op = SCREEN_OP[event.op] ?? null, reason = null
   if (event.op === 'end') {
@@ -77,6 +84,7 @@ export function browserStepFor(event, { clientThreadId } = {}) {
   const step = { clientThreadId, taskId, seq, op,
     ...(typeof event.cardId === 'string' && ID.test(event.cardId) ? { cardId: event.cardId } : {}),
     ...(short(event.target, 60) ? { target: short(event.target, 60) } : {}), ...(short(event.valueName, 40) ? { valueName: short(event.valueName, 40) } : {}),
+    ...(['fill', 'select'].includes(op) && typeof event.displayValue === 'string' ? { displayValue: [...event.displayValue].slice(0, 40).join('') } : {}),
     ...(!unverified && op !== 'handoff' && typeof event.ok === 'boolean' ? { ok: event.ok } : {}), ...(count(event.ms) !== null ? { ms: event.ms } : {}),
     by: event.by === 'model' ? 'model' : 'decision',
     ...(op === 'handoff' ? { status: reason } : status ? { status } : {}), ...(reason ? { reason } : {}) }

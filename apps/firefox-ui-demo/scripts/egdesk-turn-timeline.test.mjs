@@ -3,7 +3,7 @@ import test from 'node:test'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { CALLS_FORMAT, collectFromBridge, displayWidth, main, mergeLiveTurns, parseWhen, reduceHistory, reduceLiveCalls, renderTable, renderTurn, selectTurns, timelinesOf, turnTimelines, watchCalls } from './egdesk-turn-timeline.mjs'
+import { CALLS_FORMAT, collectFromBridge, displayWidth, main, mergeLiveTurns, parseRange, parseWhen, reduceHistory, reduceLiveCalls, renderTable, renderTurn, selectTurns, timelinesOf, turnTimelines, watchCalls } from './egdesk-turn-timeline.mjs'
 
 // Synthetic history pages shaped like GET /chat/history (only the fields the bridge really writes). Every text below must never reach the output.
 const SECRET = ['검색창에 우산 입력해줘', '우산 3,900원 비밀 본문', 'npm test --token=abc', 'https://shop.example.test/q?u=1', '장화 신은 고양이']
@@ -199,4 +199,24 @@ test('offline matrix CLI: --thread and --turn select exactly one JSON line, note
   const p = await cli('--thread', 'thread-dm-test', '--turn', '2'); assert.equal(p.status, 0); assert.equal(p.stderr.trim(), '참고: note'); assert.equal(p.stdout.trim().split('\n').length, 1)
   assert.deepEqual(JSON.parse(p.stdout), { thread: 'thread-dm-test', turn: 2, requestId: 'req-2', engine: null, totalSec: 6.5, firstActionSec: 3.4, decisionSteps: 2, decisionStepSec: 0.7, engineSegments: 4, engineSec: 5.19, toolsEngineDirect: 1, toolsEngineDelegated: 1, toolsDecisionDirect: 1, browserFailures: 0, humanWaitSec: 0, browserCoverage: 'stored-events-only' })
   const miss = await cli('--thread', 'other', '--turn', '9'); assert.equal(miss.status, 1); assert.equal(miss.stdout, ''); await assert.rejects(cli('--turn', '1'), /exactly one --thread/)
+})
+
+test('KST range across midnight: explicit dates, mixed bounds, legacy clocks and since alone', () => {
+  const since = Date.parse('2026-11-27T23:59+09:00'), until = Date.parse('2026-11-28T00:01+09:00'), now = until + 2000
+  for (const [a, b] of [['23:59', '00:01'], ['2026-11-27T23:59+09:00', '00:01'], ['23:59', '2026-11-28T00:01'], ['2026-11-27T23:59', '2026-11-28T00:01+09:00']]) {
+    const range = parseRange(a, b, now)
+    assert.deepEqual(range, { since, until }); assert.deepEqual(selectTurns([since - 1, since, until, until + 1].map(at => ({ at })), range).map(t => t.at), [since, until])
+  }
+  assert.deepEqual(parseRange('23:59', '00:01', since + 2000), { since, until })
+  assert.deepEqual(parseRange('23:59', null, now), { since, until: null })
+})
+
+test('entry history without watcher: counted once, end marker excluded, closed projection', () => {
+  const step = { callId: 'entry-aabbccdd-0000-1111-2222-0123456789ab', seq: 1, op: 'fill', status: 'ok', by: 'decision', ok: true, completedAt: T + 120, durationMs: 110, target: SECRET[1], value: SECRET[0], url: SECRET[3] }
+  const events = [ev(0, 'message.accepted'), ev(120, 'browser.entry.step', step), ev(121, 'browser.entry.step', { ...step, seq: 2, op: 'end', status: 'done' }), ev(123, 'run.started'), ev(200, 'run.completed')]
+  const history = reduceHistory([{ events }, { events }]), [turn] = turnTimelines(history)
+  assert.ok(SECRET.every(v => !JSON.stringify(history).includes(v)))
+  assert.equal(turn.summary.decisionSteps.steps, 1); assert.equal(turn.summary.decisionSteps.ms, 110); assert.equal(turn.summary.firstPageActionMs, 120); assert.equal(turn.summary.decision.calls, 0)
+  assert.equal(turn.summary.decisionSteps.unsplitMs, 110); assert.equal(turn.summary.decisionSteps.actionMs, 0)
+  assert.equal(turn.rows.find(r => r.toolCallId === step.callId).who, '결정 모델')
 })
