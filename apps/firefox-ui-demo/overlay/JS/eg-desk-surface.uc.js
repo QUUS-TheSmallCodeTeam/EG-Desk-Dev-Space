@@ -25115,7 +25115,16 @@
           }
         }
         rejected.timing = timing;
-      } else if (request && typeof request === 'object') rejected.timing = browserToolTiming({ receivedAtMs });
+      } else if (request && typeof request === 'object') {
+        rejected.timing = browserToolTiming({ receivedAtMs });
+        // The page actor cannot see a document such as Firefox's JSON viewer; the parent still knows where the top-level document is.
+        if (request.kind === 'observe') {
+          try {
+            const spec = document.getElementById(request.cardId)?._browserControls?.toolBrowser?.()?.currentURI?.spec;
+            if (typeof spec === 'string' && spec.length <= 2048 && /^https?:\/\//.test(spec)) rejected.topLocation = { url: spec };
+          } catch {}
+        }
+      }
       // Input the parent authorized may have landed: that row stays unknown, not refused.
       browserToolActivityEnd(activity, rejected, activityLease?.authorized === true);
       return rejected;

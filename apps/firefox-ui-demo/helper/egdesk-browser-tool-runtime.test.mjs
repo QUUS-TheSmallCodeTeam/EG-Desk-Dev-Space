@@ -2078,3 +2078,17 @@ test('internal named click observes past loading; serialized copies cannot reque
   const result = await f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: { ...args, postcondition: NAMED_CHANGE } })
   assert.deepEqual([result.status, result.after.text, f.actionCalls], ['postcondition-observed', ['Hello World!'], 1]); assert.notEqual(result.observationId, obs.observationId)
 })
+
+test('L40: an unobservable wait/observe reply carries the parent top-level http(s) address on the error, never anything else', async () => {
+  const f = guardedFixture()
+  await f.bind()
+  const reply = (request, extra) => ({ requestId: request.requestId, status: 'rejected', error: 'actor cannot see this document', ...extra })
+  f.setWait(request => reply(request, { topLocation: { url: 'https://httpbin.org/post' } }))
+  await assert.rejects(f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 1000 }),
+    error => error.code === 'BROWSER_WAIT_OUTCOME_UNKNOWN' && error.arrival?.url === 'https://httpbin.org/post')
+  for (const topLocation of [{ url: 'javascript:alert(1)' }, { url: 'about:blank' }, { url: 5 }, 'https://httpbin.org/post', undefined]) {
+    f.setWait(request => reply(request, { topLocation }))
+    await assert.rejects(f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 1000 }),
+      error => error.code === 'BROWSER_WAIT_OUTCOME_UNKNOWN' && error.arrival === undefined)
+  }
+})

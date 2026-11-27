@@ -843,6 +843,13 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  * callTool(name, args) → the egdesk_browser_* tool result (throws on refusal).
  * → { outcome, reason?, steps, ... } — see the module header for outcomes.
  */
+// 임시 이름: the top-level address 'arrived' is the POST destination 'to' (same origin and path) and differs from the page 'from' the form was on.
+export function postArrived(arrived, to, from) {
+  try {
+    const a = new URL(arrived), t = new URL(to), f = new URL(from)
+    return /^https?:$/.test(a.protocol) && a.origin === t.origin && a.pathname === t.pathname && !(a.origin === f.origin && a.pathname === f.pathname)
+  } catch { return false }
+}
 const spentPost = new Set() // provisional: one write per originating human message in this helper process
 export async function runBrowserReflex({ cardId, goal, authority, namedButtonRequest, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
@@ -1222,11 +1229,15 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
           const to = option.item.postUrl, result = await act(entry, 'egdesk_browser_click', { cardId, observationId, expectedRevision: snapshot.revision, ref: option.item.element.ref, expectedTarget: expectedTargetOf(option.item.element), postcondition: { kind: 'url', value: to } }, { op: 'submit', target: label })
           if (result.held) return heldResult()
           if (result.ok && result.result?.status === 'postcondition-observed') return finish('done', { url: to })
+          let unobserved = null // 임시 이름: top-level address the parent reported when the arrived document could not be observed (e.g. the JSON viewer)
           try {
             await callTool('egdesk_browser_wait', { cardId, for:'load', timeoutMs:5000 })
             const landed = await callTool('egdesk_browser_observe', { cardId })
             if (!signal?.aborted && isDecisionCurrent() && landed.snapshot?.url === to && landed.snapshot.documentId && landed.snapshot.documentId !== snapshot.documentId) return finish('done', { url: to })
-          } catch (err) { if (isBrowserUserHold(err)) return heldResult() }
+          } catch (err) { if (isBrowserUserHold(err)) return heldResult(); unobserved = err?.arrival?.url ?? null }
+          // The person's one POST went out and the top-level document is now at the form's own origin and path (a new address, not the form page): done,
+          // with the unobserved arrival kept as a fact. A different address or no move stays a failure.
+          if (!signal?.aborted && isDecisionCurrent?.() && postArrived(unobserved, to, snapshot.url)) return finish('done', { url: to, arrivalUnobserved: true })
           return finish('escalated', { reason: 'tool_failed', code: result.code || 'BROWSER_OUTCOME_UNKNOWN' })
         }
         if (option.item.askSite) {
