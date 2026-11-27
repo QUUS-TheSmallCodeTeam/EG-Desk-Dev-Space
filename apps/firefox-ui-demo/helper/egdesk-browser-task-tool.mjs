@@ -2,7 +2,7 @@ import { isBrowserUserHold } from './egdesk-browser-tool-runtime.mjs'
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { NO_FIELD_TEXT, candidateSpans, pickFieldText, undecidedField } from './egdesk-browser-field-text.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
-import { PAGE_TEXT_FLAG, askedFieldTarget, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { PAGE_TEXT_FLAG, pageTextOn, askedFieldTarget, buildReflexCandidates, localDay, navigationLanded, optionOp, optionTarget, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { MAX_TASK_STEPS, createBrowserTaskStore, taskStepEvent } from './egdesk-browser-task.mjs'
 
 // L8 a1 ('교대' round, owner 2026-11-26: "decision model 이랑 대화형 모델이 같은 세션에서 같은 맥락으로 번갈아가면서 사용자 요청을 빠르게 수행"): the browser task as ONE tool
@@ -140,7 +140,7 @@ export function outcomeBody(task, result, { outside = [] } = {}) {
 // text): they read the title and the controls instead (withoutPageText). On: the page text as the direct entry sends it (the run's page_text gate decides as always).
 // storeOf() (optional): the runtime's task store (the direct entry's, lane L5's browserTasks()): the tool and the entry then continue the same task; without it (or while it
 // answers null) the tool keeps its own store.
-export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(), storeOf = null, now = Date.now, clock = Date.now, messageOf = null, onStep = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, maxSteps = MAX_TASK_STEPS, pageText = false } = {}) {
+export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(), storeOf = null, now = Date.now, clock = Date.now, messageOf = null, onStep = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, maxSteps = MAX_TASK_STEPS, pageText = pageTextOn() } = {}) {
   if (!browser || typeof browser.runDirectTask !== 'function' || typeof browser.reflexScope !== 'function') throw new TypeError('the task tool needs the Browser provider (runDirectTask, reflexScope)')
   const t = decisionThresholds(thresholds)
   const busy = new Set()

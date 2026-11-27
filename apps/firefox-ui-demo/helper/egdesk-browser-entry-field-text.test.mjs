@@ -132,7 +132,7 @@ test('a1 a GET search whose url postcondition failed but whose result page loade
   assert.equal(plain.outcome, 'done', 'an address the site did not extend passes its postcondition as before')
 })
 
-test('a1 data boundary: by default neither the entry nor its steps send the page\'s own text (the card is quoted by its controls); EGDESK_BROWSER_TASK_PAGE_TEXT=on sends it for both, as before', async t => {
+test('d: entry and steps include page text by default; explicit off uses controls only', async t => {
   const { PAGE_TEXT_FLAG } = await import('./egdesk-browser-reflex.mjs')
   const sent = async () => {
     const w = duck()
@@ -142,14 +142,14 @@ test('a1 data boundary: by default neither the entry nor its steps send the page
     const stepBodies = w.requests.filter(request => request.questions.some(q => q.name === 'next_step')).map(request => JSON.stringify(request.input)).join('\n')
     return { out, entryBody, stepBodies }
   }
-  delete process.env[PAGE_TEXT_FLAG]
+  process.env[PAGE_TEXT_FLAG] = 'off'
   const off = await sent()
   assert.equal(off.out.status, 'done', 'the flow finishes without the page text')
   assert.match(off.entryBody, /has the controls/, 'the card is quoted by its controls')
   assert.doesNotMatch(off.entryBody, /shows \\"DuckDuckGo\\"/, 'no first line of the page')
   assert.doesNotMatch(off.stepBodies, /샤를 페로의 동화/, 'no line of the results page body in any step')
   assert.match(off.stepBodies, /the page's own text is not sent/)
-  process.env[PAGE_TEXT_FLAG] = 'on'
+  delete process.env[PAGE_TEXT_FLAG]
   t.after(() => { delete process.env[PAGE_TEXT_FLAG] })
   const on = await sent()
   assert.equal(on.out.status, 'done')
