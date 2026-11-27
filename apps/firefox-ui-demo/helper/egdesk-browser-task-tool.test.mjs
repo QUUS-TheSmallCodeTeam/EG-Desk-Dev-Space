@@ -136,7 +136,7 @@ function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양�
 test('a1 values named by the model: the loop types the value where it belongs, submits the read-only GET search at once and finishes; only the live step carries the classified text', async () => {
   const world = wikiWorld()
   const events = []
-  const tool = createBrowserTaskTool({ browser: world.browser, onStep: (_run, event) => events.push(event) })
+  const tool = createBrowserTaskTool({ browser: world.browser, pageText: false, onStep: (_run, event) => events.push(event) }) // page text is on by default since 11-27 (L33); this case pins it off
   const out = parse(await tool.handle(RUN(), { callId: 'call-1', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } }))
   assert.equal(out.status, 'done')
   assert.deepEqual(out.steps.map(step => [step.op, step.target, step.valueName ?? null, step.ok]), [['fill', '위키 검색', '검색어', true], ['submit', '검색', null, true]])
