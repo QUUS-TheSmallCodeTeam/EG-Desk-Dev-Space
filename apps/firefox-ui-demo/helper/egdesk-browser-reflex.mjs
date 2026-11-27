@@ -573,6 +573,12 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   const selectOptions = directEntry && !arrived && !motion && !resultOnly ? options.filter(o => o.item.kind === 'choice' && o.item.element.tag === 'select') : []
   const lists = selectOptions.length <= 32 ? selectOptions : [] // larger inventories retain the original next-step path
   const fan = !motion && !resultOnly && crowdedStep(options, entrySiteLinks)
+  // L46 (real, Main D4: 이름 채우고 주문 제출해줘 -> after the name, next_step top 0.65-0.69 for 'Submit order', under the bar, so the step ended 'uncertain'): the one write-submit
+  // of the page is judged by the SAME predicate the press itself needs (postSubmitQuestion, over the person's words), asked in this request with the form's current field values
+  // so a submit is never read as requested before the fields the person asked for are filled. A decided yes (the lists' bar) names that option as the step; it never lowers the next_step bar.
+  const postOptions = options.filter(o => o.item.postUrl)
+  const post = postOptions.length === 1 && !pendingValues.length && !motion && !resultOnly && !arrived && !lists.length ? postOptions[0] : null
+  const postFields = post ? options.filter(o => o.item.kind === 'fill').slice(0, 12).map(o => compactText(o.item.element.label, 60) + ' = ' + JSON.stringify(compactText(o.item.element.value ?? '', 60) || '(empty)')).join('; ') : ''
   const choices = motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
@@ -593,6 +599,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
         ? 'Which option moves toward the goal next? For an ordinal search result use the result destinations in page order, not the search page navigation controls. Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
         : 'Which option moves toward the goal next?', choices)]),
       ...lists.map((o, i) => predicateQuestion('select_' + i, 'Person said: ' + JSON.stringify(goal) + '. Does the person explicitly ask to set the observed list ' + JSON.stringify(compactText(o.item.element.label, 100) || 'list') + ' to ' + JSON.stringify(compactText(o.item.element.options.find(p => p.value === o.item.desired)?.label, 100)) + ' as the next browser action? Equivalent wording counts. Mention, negation, a condition, or a different option does not.')),
+      ...(post ? [predicateQuestion('post_requested', 'Person said: ' + JSON.stringify(compactText(goal, 600)) + '. Form fields now: ' + (postFields || 'none') + '. ' + postSubmitQuestion(post.item.element.label) + ' No if a field the person asked to fill is still empty, or if they said not to send.')] : []),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...(options.some(o => o.item.kind === 'choice' && !lists.includes(o)) ? [predicateQuestion('choice_requested', 'In the person’s request ' + JSON.stringify(goal) + ', does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
       ...pageStateQuestions(),
@@ -627,6 +634,10 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
       resolved = lists[scores.findIndex(high)]
       certainty = Math.min(...scores.map(n => high(n) ? n : 1 - n))
     }
+  }
+  if (!resolved && post && !resultOnly && !lists.length) {
+    const n = p('post_requested', '')
+    if (high(n)) { resolved = post; certainty = n }
   }
   const resolvedMargin = 2 * certainty - 1
   const disagrees = resolved && !resultOnly && asked.state === 'accepted' && asked.value !== resolved.value
@@ -850,7 +861,20 @@ export function postArrived(arrived, to, from) {
     return /^https?:$/.test(a.protocol) && a.origin === t.origin && a.pathname === t.pathname && !(a.origin === f.origin && a.pathname === f.pathname)
   } catch { return false }
 }
-const spentPost = new Set() // provisional: one write per originating human message in this helper process
+const spentPost = new Set() // provisional: one write per originating human message in this helper process (L46: shared with the direct page tools)
+// L46 (임시 이름): the one question both paths ask about a same-site POST submit, built by code from the button's own name; the person's words are quoted by requestedGoal.
+export const postSubmitQuestion = label => `Does this person expressly request sending this form (${JSON.stringify(label)}) as a step of their task? Filling fields alone does not request sending.`
+export const postSubmitSpent = messageId => spentPost.has(messageId)
+// One write per human message, shared by the entry loop and the direct tools: the quote must request THIS submit (decided yes), the decision must still be current, and the message id is
+// consumed BEFORE dispatch (never retried). -> true (press now) | false (not requested: the person's step) | null (stale or aborted: do nothing).
+export async function authorizePostSubmit(authority, label, scope, timeoutMs, { signal } = {}) {
+  const src = authority?.messageId
+  if (!src || spentPost.has(src)) return false
+  if (!await requestedGoal(authority, 'Submit the current form using ' + JSON.stringify(label), scope, timeoutMs, postSubmitQuestion(label))) return false
+  if (signal?.aborted || !scope?.isDecisionCurrent?.() || spentPost.has(src)) return null
+  spentPost.add(src)
+  return true
+}
 export async function runBrowserReflex({ cardId, goal, authority, namedButtonRequest, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
   textComboboxes = false, onPage = null, watchPopupLoad = null, firstFieldText = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
@@ -1222,10 +1246,9 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
         let origin = { cardId, observationId, snapshot }
         if (option.item.postUrl) {
           const label = option.item.element.label
-          const src = authority?.messageId
-          if (!src || spentPost.has(src) || !await requestedGoal(authority, 'Submit the current form using ' + JSON.stringify(label), { client, authorizeDispatch, isDecisionCurrent }, timeoutMs, `Does this person expressly request sending this form (${JSON.stringify(label)}) as a step of their task? Filling fields alone does not request sending.`)) return finish('escalated', { reason: 'human_step', controls: [label] })
-          if (signal?.aborted || !isDecisionCurrent?.() || spentPost.has(src)) return finish('aborted')
-          spentPost.add(src) // before dispatch: never retry an ambiguous write, even in another task of the same turn
+          const allowed = await authorizePostSubmit(authority, label, { client, authorizeDispatch, isDecisionCurrent }, timeoutMs, { signal })
+          if (allowed === null) return finish('aborted')
+          if (!allowed) return finish('escalated', { reason: 'human_step', controls: [label] })
           const to = option.item.postUrl, result = await act(entry, 'egdesk_browser_click', { cardId, observationId, expectedRevision: snapshot.revision, ref: option.item.element.ref, expectedTarget: expectedTargetOf(option.item.element), postcondition: { kind: 'url', value: to } }, { op: 'submit', target: label })
           if (result.held) return heldResult()
           if (result.ok && result.result?.status === 'postcondition-observed') return finish('done', { url: to })
