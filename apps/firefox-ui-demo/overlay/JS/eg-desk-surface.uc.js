@@ -28523,6 +28523,11 @@
         ? wait.notInnerWindowId : null;
       if (Number.isFinite(deadlineMs)) await whenToolWindowGlobalReady(deadlineMs, skipId, startedAt + (wait?.timeoutMs || 0));
       assertBrowserToolBinding(expected);
+      // L43: a document no page actor can run in (privileged or about: page) is refused at once, with no wait; the next request on a web document works as before (no per-Card state is kept).
+      try {
+        const rt = xulBrowser.remoteType;
+        if (typeof rt === 'string' && rt && !/^(web|file)/.test(rt)) throw Object.assign(new Error('Browser document cannot be observed [privileged]'), { name: 'NotObservable' });
+      } catch (e) { if (e?.name === 'NotObservable') { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw e; } }
       showAgentActivity('Agent가 이 Browser를 관찰 중');
       const attempt = { attempts: 0, abortRetried: false, innerWindowIds: [], waitOffsetMs: 0, sampledAtMs: null };
       lastToolObserve = attempt;
@@ -28544,7 +28549,11 @@
           // remote RootTransport.sys.mjs:180-200: only an actor destroyed
           // mid-query (AbortError) is retried, once, on the replacement
           // document and inside the same deadline. A timeout never is.
-          const retry = attempt.attempts === 1 && error?.name === 'AbortError' && Number.isFinite(deadlineMs) &&
+          // L43: the same single retry when the document or its process was replaced under the query (the queried WindowGlobal is no longer the
+          // current one) or the actor could not be reached on the old global; a document that stays the same and fails is not retried.
+          const replaced = (() => { try { return xulBrowser.browsingContext !== context || xulBrowser.browsingContext.currentWindowGlobal !== windowGlobal } catch { return true } })()
+          const retry = attempt.attempts === 1 && Number.isFinite(deadlineMs) &&
+            (error?.name === 'AbortError' || error?.name === 'InvalidStateError' || error?.name === 'NotSupportedError' || replaced) &&
             Date.now() < deadlineMs - BROWSER_TOOL_REPLY_MARGIN_MS;
           if (!retry) { showAgentActivity('Browser 관찰 불가 · 다시 확인 필요'); throw error; }
           attempt.abortRetried = true;
