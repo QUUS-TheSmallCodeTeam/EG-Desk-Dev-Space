@@ -1,3 +1,4 @@
+import { conversationAuthority } from './egdesk-browser-authority.mjs'
 import { requestedMotion } from './egdesk-browser-motion.mjs'
 import { controlLines, localDay, pageTextOn } from './egdesk-browser-reflex.mjs'
 import { randomBytes } from 'node:crypto'
@@ -315,10 +316,10 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
   const tasks = new Map() // taskId -> task
   const live = task => task && (task.status === 'running' || task.status === 'paused') && now() - task.updatedAt <= ttlMs
   return {
-    create({ conversationKey, cardId, goal }) {
+    create({ conversationKey, cardId, goal, authority = null }) {
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task)) task.status = 'cancelled'
       while (tasks.size >= maxTasks) tasks.delete(tasks.keys().next().value)
-      const task = { taskId: `bt_${randomBytes(6).toString('hex')}`, conversationKey, cardId, goal: compactText(goal, MAX_MESSAGE), status: 'running',
+      const task = { taskId: `bt_${randomBytes(6).toString('hex')}`, conversationKey, cardId, authority, goal: compactText(goal, MAX_MESSAGE), status: 'running',
         pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, confirm: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, liveStep: 0, lastActionAt: null, asked: false, question: null, entryAsks: 0, createdAt: now(), updatedAt: now() }
       tasks.set(task.taskId, task)
       return task
@@ -331,10 +332,11 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
     // becomes the original request plus what the person said (at most the last MAX_GOAL_CHANGES, newest last); the next step is planned under
     // it, with the same recorded-choice check (a changed request is not the recorded one). A RUNNING task is asked to end its segment at the next
     // safe point (the page action in flight finishes; nothing else is done under the old goal). Returns the task, or null when none can take it.
-    changeGoal(conversationKey, message) {
+    changeGoal(conversationKey, message, source = null) {
       let pick = null
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task) && (!pick || task.updatedAt >= pick.updatedAt)) pick = task
       if (!pick || typeof message !== 'string' || !message.trim()) return null
+      pick.authority = source // do not carry permission for an earlier write across a correction
       pick.goalBase ??= pick.goal
       pick.changes = [...(pick.changes ?? []), compactText(message, MAX_CHANGE_CHARS)].slice(-MAX_GOAL_CHANGES)
       pick.goalChanges = (pick.goalChanges ?? 0) + 1
@@ -630,7 +632,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       const extra = fieldTextOn() ? { ...(values ? { values } : {}), valuesFirst: true, textComboboxes: true,
         firstFieldText: async field => (await chosenText(run, task, { field }))?.[field] ?? null } : {}
       values = null
-      const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, namedButtonRequest: task.changes?.at(-1) ?? task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
+      const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, authority: task.authority, namedButtonRequest: task.changes?.at(-1) ?? task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
         maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => { store.progress?.(task, info); stepEvent(run, task, info) }, today: localDay(now()), signal: controller.signal, ...extra })
       if (task.abort === controller) task.abort = null
       task.liveStep = 0
@@ -757,7 +759,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       }
       // c17: a bare "응" says nothing without what was asked; code names what the person confirmed (R1)
       const confirm = paused.confirm
-      void (how === 'retry' ? store.retry(paused) /* c37: try again from this page */ : how === 'change' ? store.changeGoal(conversationKey, message) /* c23: the message replaces the request: it is the goal now, not an answer */ : paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : choiceContextLine(compactText(message, MAX_MESSAGE), paused.askedCandidates, { maxChars: MAX_MESSAGE })))
+      void (how === 'retry' ? store.retry(paused) /* c37: try again from this page */ : how === 'change' ? store.changeGoal(conversationKey, message, conversationAuthority(run, message)) /* c23: the message replaces the request: it is the goal now, not an answer */ : paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : choiceContextLine(compactText(message, MAX_MESSAGE), paused.askedCandidates, { maxChars: MAX_MESSAGE })))
       paused.askedCandidates = []
       paused.confirm = null; paused.status = 'running'; paused.pause = null; paused.asked = false
       const out = await finalize(await loop(run, paused, hosts), paused)
@@ -856,7 +858,9 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
         // c20: the person is asked which card only when the predicates say so (a web task, the card undecided, or two cards decided yes)
         const askCard = entry.kind === 'ask_user' && cards.length > 1
         if (entry.kind !== 'browser' && !askCard) return { handled: false, reason: entry.kind }
-        const task = store.create({ conversationKey, cardId: askCard ? null : entry.cardId, goal: message })
+        const authority = conversationAuthority(run, message)
+        if (!authority) return { handled: false, reason: 'evidence_unavailable' }
+        const task = store.create({ conversationKey, cardId: askCard ? null : entry.cardId, goal: message, authority })
         task.memoryPacket = memoryPacket
         task.memory = memory
         task.memoryPages = Array.isArray(memory?.pages) ? memory.pages : []

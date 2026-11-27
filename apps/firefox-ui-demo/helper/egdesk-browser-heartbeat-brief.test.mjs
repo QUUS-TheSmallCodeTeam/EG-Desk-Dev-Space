@@ -53,7 +53,7 @@ test('brief: the goal (bounded), the card host, the steps and the last closed ou
   w.store.markAsked(w.store.paused('dm'), true)
   assert.equal(w.store.brief('dm').asked, true)
   assert.doesNotMatch(JSON.stringify(w.store.facts('dm')), /세금|portal|example/, 'the heartbeat facts stay content-free')
-  const long = world(); await long.say(`${GOAL} `.repeat(20))
+  const long = world(); await long.say(`${GOAL} `.repeat(12))
   assert.ok(long.store.brief('dm').goal.length <= 160)
   assert.equal(createBrowserTaskStore().brief('dm'), null)
 })

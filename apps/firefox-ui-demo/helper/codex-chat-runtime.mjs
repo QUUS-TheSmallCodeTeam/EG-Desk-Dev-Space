@@ -159,6 +159,7 @@ import { OPEN_ITEMS_KEY, buildRegistry, openItemsContext, registeredOpenItemProv
 import { withoutAuthOpaqueSources } from './egdesk-auth-opaque.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
+import { conversationAuthority } from './egdesk-browser-authority.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
 import { BROWSER_TASK_TOOL_NAME, browserStepFor, noteWords, withBrowserTaskRule } from './egdesk-browser-task-turn.mjs' // a1 (교대)
 import { hostOf } from './egdesk-browser-task-memory.mjs'
@@ -3069,6 +3070,7 @@ export class CodexChatRuntime {
       }
       // Direct browser entry, 'on' (flag decisionContext.browserEntry.mode() === 'on', default off): the objective loop runs on a pre-turn
       // binding BEFORE the native turn exists, and the subjective model gets only the closed note. Any failure here means an ordinary turn.
+      if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested) this.noteBrowserTurnMessage([context.requestId], body.message)
       let taskToolOffered = false
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'on') {
         // a1: alternating, the conversation model's process starts while the Decision model works (Claude: the CLI's start, with the spec this turn carries); best effort, never in the way
@@ -5627,7 +5629,7 @@ export class CodexChatRuntime {
 
   /** Keeps a browser turn's message for browserTaskMessage (memory only, the last 100 keys), only while the entry is on. */
   noteBrowserTurnMessage(keys, message) {
-    if (this.browserEntryMode() !== 'on' || typeof message !== 'string' || !message.trim()) return
+    if (typeof message !== 'string' || !message.trim()) return
     this.browserTurnMessages ??= new Map()
     for (const key of keys) if (typeof key === 'string' && key) { this.browserTurnMessages.delete(key); this.browserTurnMessages.set(key, message) }
     while (this.browserTurnMessages.size > 100) this.browserTurnMessages.delete(this.browserTurnMessages.keys().next().value)
@@ -5895,7 +5897,7 @@ export class CodexChatRuntime {
     const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider(), prepared = provider ? preparedProviders.get(provider) : null
     if (!cfg || !provider || !prepared || typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled()) return null
     const id = `pre-${context.requestId}`
-    const preRun = { runId: id, answerId: id, clientThreadId: context.clientThreadId, status: 'inProgress', executionPolicy: { mode: BROWSER_BOUNDED }, quiet: true }
+    const preRun = { runId: id, answerId: id, requestId: context.requestId, clientThreadId: context.clientThreadId, status: 'inProgress', executionPolicy: { mode: BROWSER_BOUNDED }, quiet: true }
     await this.callProvider(provider, 'bindRun', preRun, prepared) // a refusal here is a refusal before the native turn starts
     let note = null, handedOff = false
     try {
@@ -6838,7 +6840,7 @@ export class CodexChatRuntime {
       if (decision === 'steer' && held?.phase === 'working') {
         // c23: no native turn is live: the message changes the objective task (its goal; the next step is planned under it). Only a message the
         // heartbeat judged a change does that; any other (an unjudged default, a judge that failed) stays pending and goes on with the person's next turn.
-        if (!judged || !this.browserTaskStore?.changeGoal(held.key, entry.text)) throw new Error('not a change of the task')
+        if (!judged || !this.browserTaskStore?.changeGoal(held.key, entry.text, conversationAuthority({ requestId }, entry.text))) throw new Error('not a change of the task')
       } else if (decision === 'steer') {
         const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
         if (!proof || typeof engine.steerTurn !== 'function') throw new Error('no steer contract')

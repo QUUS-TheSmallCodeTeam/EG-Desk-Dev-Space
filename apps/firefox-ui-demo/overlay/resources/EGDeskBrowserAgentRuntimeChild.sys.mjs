@@ -1045,6 +1045,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
           url.hash = "";
           submitUrl = url.href;
         }
+        // Provisional: for a complete native POST form expose its destination, never field values.
+        // Hidden and unknown controls are not evidence for an unattended write.
+        if (method === 'post' && !sensitive && form.elements.length <= 40 && !fields.includes('hidden') &&
+            !node.hasAttribute('formtarget') && !form.getAttribute('target') && !form.closest('[data-private],[data-sensitive]')) {
+          const doc = node.ownerDocument;
+          const url = new URL(node.getAttribute('formaction') || form.getAttribute('action') || doc.URL, doc.baseURI);
+          if (url.origin === new URL(doc.URL).origin && !url.username && !url.password) submitUrl = url.href;
+        }
         facts.form = { method, fields, sensitive, submitUrl };
       } else if (!form) {
         const id = node.getAttribute?.("aria-controls");

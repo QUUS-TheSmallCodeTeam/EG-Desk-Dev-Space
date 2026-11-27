@@ -1,3 +1,4 @@
+import { requestedSiteEvidence } from './egdesk-browser-authority.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { CURRENT_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
@@ -1191,7 +1192,11 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     if (binding.refusedSites.has(site.site)) reject('BROWSER_NAVIGATE_OUT_OF_SCOPE', 'The person refused that site in this run; do not ask again')
     beginMutation(binding)
     const trace = {}
-    const pending = requestUi({ kind: 'allow-site', runId: binding.runId, clientThreadId: binding.clientThreadId,
+    const source = args[requestedSiteEvidence], observed = card.observation
+    if (source && !(observed?.id === source.observationId && observed.snapshot.revision === source.revision &&
+        observed.snapshot.interactiveElements.some(el => !el.disabled && el.ref === source.ref && el.tag === 'a' && el.href === source.href) &&
+        sitePatternsFromInput(source.href).site === site.site && navigationDecision(binding, observed.snapshot.url, source.href).reason === 'outside-site')) reject('BROWSER_OBSERVATION_STALE', 'Observe this Browser Card again before acting')
+    const pending = requestUi({ ...(source ? { conversationRequested: true } : {}), kind: 'allow-site', runId: binding.runId, clientThreadId: binding.clientThreadId,
       cardId: card.cardId, binding: card.ui, site: site.site, patterns: [...site.patterns] }, binding, run, trace,
       { budgetMs: Math.min(SITE_REQUEST_BUDGET_MS, 60000) })
     binding.pending.add(pending)

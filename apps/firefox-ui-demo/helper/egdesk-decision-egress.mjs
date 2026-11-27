@@ -135,6 +135,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-decision-first-commands.mjs': ['run_text: the person\'s own message (up to 600 characters) and EG-Desk\'s fixed descriptions of the options built from the folder; never a script body or a command the person typed'],
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],
+  'egdesk-browser-authority.mjs': ['page_text'], // scoped Browser client; only the source quote and proposed task
   'egdesk-browser-task.mjs': ['page_text'],
   'egdesk-browser-field-text.mjs': ['page_text'], // L8 a1: the field-text choice (the spans of the person's message and the goal, the field's label and the host), through the Browser scope's page_text gate, like the loop's own steps
   'egdesk-entry-placeless-measure.mjs': ['page_text'], // L8 c43: measurement only: the entry request (the message, the open card's title, host and first lines) exactly as the product sends it

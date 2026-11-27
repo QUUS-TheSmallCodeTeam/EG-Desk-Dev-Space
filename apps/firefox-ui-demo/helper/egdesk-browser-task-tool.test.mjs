@@ -136,7 +136,7 @@ function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양�
 test('a1 values named by the model: the loop types the value where it belongs, submits the read-only GET search at once and finishes; step events carry no typed text', async () => {
   const world = wikiWorld()
   const events = []
-  const tool = createBrowserTaskTool({ browser: world.browser, onStep: (_run, event) => events.push(event) })
+  const tool = createBrowserTaskTool({ messageOf: () => '위키에서 장화 신은 고양이 검색', browser: world.browser, onStep: (_run, event) => events.push(event) })
   const out = parse(await tool.handle(RUN(), { callId: 'call-1', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } }))
   assert.equal(out.status, 'done')
   assert.deepEqual(out.steps.map(step => [step.op, step.target, step.valueName ?? null, step.ok]), [['fill', '위키 검색', '검색어', true], ['submit', '검색', null, true]])
@@ -153,7 +153,7 @@ test('a1 values named by the model: the loop types the value where it belongs, s
 
 test('an unverified GET search reaches done via the recovery load wait on subcall five', async () => {
   const world = wikiWorld({ delayedNavigation: true })
-  const tool = createBrowserTaskTool({ browser: world.browser })
+  const tool = createBrowserTaskTool({ messageOf: () => '위키에서 슈렉 검색', browser: world.browser })
   const out = parse(await tool.handle(RUN(), { callId: 'search', arguments: { goal: '위키에서 슈렉 검색', values: { 검색어: '슈렉' } } }))
   assert.equal(out.status, 'done')
   assert.deepEqual(world.calls.map(c => c.name.replace('egdesk_browser_', '')), ['observe', 'fill', 'observe', 'navigate', 'wait', 'observe', 'wait', 'observe'])
@@ -162,7 +162,7 @@ test('an unverified GET search reaches done via the recovery load wait on subcal
 
 test('a1 no value given: the decision model chooses the field text among the spans of the goal (it writes nothing), then the task goes on in the same call', async () => {
   const world = wikiWorld({ answerFreeText: true })
-  const tool = createBrowserTaskTool({ browser: world.browser })
+  const tool = createBrowserTaskTool({ messageOf: () => '위키에서 장화 신은 고양이 검색해줘', browser: world.browser })
   const out = parse(await tool.handle(RUN(), { callId: 'call-2', arguments: { goal: '위키에서 장화 신은 고양이 검색해줘' } }))
   assert.equal(out.status, 'done')
   const spanRequest = world.requests.find(request => request.questions.some(q => q.name === 'field_text'))
@@ -175,7 +175,7 @@ test('a1 no value given: the decision model chooses the field text among the spa
 
 test('a1 no span fits: needs_value names the field; the next call with values (no goal) resumes the same task and finishes', async () => {
   const world = wikiWorld({ answerFreeText: true, fieldText: 'nothing listed' })
-  const tool = createBrowserTaskTool({ browser: world.browser })
+  const tool = createBrowserTaskTool({ messageOf: () => 'search the capital of France on the wiki', browser: world.browser })
   const first = parse(await tool.handle(RUN(), { callId: 'c1', arguments: { goal: 'search the capital of France on the wiki' } }))
   assert.equal(first.status, 'needs_value')
   assert.deepEqual(first.ask, { field: '위키 검색', kind: 'text' })
@@ -205,7 +205,7 @@ test('a1 guidance: the model chooses one of the offered elements; it is acted on
     },
   }
   const events = []
-  const tool = createBrowserTaskTool({ browser, onStep: (_run, event) => events.push(event) })
+  const tool = createBrowserTaskTool({ messageOf: () => '명세서 열어줘', browser, onStep: (_run, event) => events.push(event) })
   const first = parse(await tool.handle(RUN(), { callId: 'g1', arguments: { goal: '명세서 열어줘' } }))
   assert.deepEqual([first.status, first.code, first.options.map(o => o.label)], ['needs_guidance', 'choice_needed', ['2026년 11월 명세서', '2026년 10월 명세서']])
   const unknown = parse(await tool.handle(RUN(), { callId: 'g2', arguments: { guidance: { choose: 'o9' } } }))
@@ -220,7 +220,7 @@ test('a1 guidance: the model chooses one of the offered elements; it is acted on
 test('a1 refusals: no interact Card, several Cards, the decision model off, a second call while the task runs', async () => {
   let release
   const browser = { directEntryEnabled: () => true, reflexScope: () => ({}), runDirectTask: () => new Promise(resolve => { release = () => resolve({ outcome: 'done', steps: [] }) }) }
-  const tool = createBrowserTaskTool({ browser })
+  const tool = createBrowserTaskTool({ messageOf: () => 'x', browser })
   assert.equal(parse(await tool.handle(RUN([{ cardId: 'c', permission: 'observe' }]), { arguments: { goal: 'x' } })).code, 'TASK_NO_INTERACT_CARD')
   const several = parse(await tool.handle(RUN([{ cardId: 'a', permission: 'interact' }, { cardId: 'b', permission: 'interact' }]), { arguments: { goal: 'x' } }))
   assert.deepEqual([several.code, several.cardIds], ['TASK_CARD_REQUIRED', ['a', 'b']])
@@ -292,7 +292,7 @@ test('a1 a link to another site: offered where the loop found no way on; choosin
       return { outcome: 'done', steps: [{ step: 1 }], state: {} }
     },
   }
-  const tool = createBrowserTaskTool({ browser })
+  const tool = createBrowserTaskTool({ messageOf: () => '첫 결과 열기', browser })
   const first = parse(await tool.handle(RUN(), { callId: 's1', arguments: { goal: '첫 결과 열기' } }))
   assert.deepEqual([first.status, first.options], ['needs_guidance', []], 'without the page tools\' press no link to another site is offered')
   tool.usePagePress(async (_run, _event, args) => { pressed.push(args); return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ status: 'pressed', via: 'site' }) }] } })
@@ -306,7 +306,7 @@ test('a1 a link to another site: offered where the loop found no way on; choosin
   assert.equal(opened.page.host, 'namu.wiki')
 
   round = 0
-  const refusedTool = createBrowserTaskTool({ browser })
+  const refusedTool = createBrowserTaskTool({ messageOf: () => '첫 결과 열기', browser })
   refusedTool.usePagePress(async () => ({ success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ status: 'not_done', code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', site: 'site-refused' }) }] }))
   parse(await refusedTool.handle(RUN(), { callId: 'r1', arguments: { goal: '첫 결과 열기' } }))
   const refused = parse(await refusedTool.handle(RUN(), { callId: 'r2', arguments: { guidance: { choose: 'o1' } } }))
@@ -341,13 +341,13 @@ test('a1 page text: by default the loop sends the title and the controls the can
     { ref: 'u', role: 'textbox', label: '아이디', value: 'minsoo' }, { ref: 'p', role: 'password', label: '비밀번호', value: '••••' }, { ref: 'b', role: 'button', label: '로그인', value: '' }, { ref: 'x', role: 'link', label: '' }] })
   assert.deepEqual(seen.text, ['Page title: "로그인" (the page\'s own text is not sent; its controls are listed instead)', 'text field: 아이디 (now "minsoo")', 'Not named here: 1 code or password field, 1 control only the person may use (payment, permission, delete or a submit that writes)'])
   const world = wikiWorld()
-  const tool = createBrowserTaskTool({ browser: world.browser })
+  const tool = createBrowserTaskTool({ messageOf: () => '위키에서 장화 신은 고양이 검색', browser: world.browser })
   assert.equal(parse(await tool.handle(RUN(), { callId: 'pt', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } })).status, 'done')
   const sent = world.requests.map(request => JSON.stringify(request.input)).join('\n')
   assert.doesNotMatch(sent, /방앗간/, 'no line of the page body')
   assert.match(sent, /search field|list or field: 위키 검색/)
   const withText = wikiWorld()
-  const textTool = createBrowserTaskTool({ browser: withText.browser, pageText: true })
+  const textTool = createBrowserTaskTool({ messageOf: () => '위키에서 장화 신은 고양이 검색', browser: withText.browser, pageText: true })
   assert.equal(parse(await textTool.handle(RUN(), { callId: 'pt2', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } })).status, 'done')
   assert.match(withText.requests.map(request => JSON.stringify(request.input)).join('\n'), /방앗간/, 'pageText: true sends the page text as the direct entry does')
 })

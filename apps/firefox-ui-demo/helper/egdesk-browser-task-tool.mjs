@@ -1,3 +1,4 @@
+import { conversationAuthority, requestedGoal } from './egdesk-browser-authority.mjs'
 import { isBrowserUserHold } from './egdesk-browser-tool-runtime.mjs'
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { NO_FIELD_TEXT, candidateSpans, pickFieldText, undecidedField } from './egdesk-browser-field-text.mjs'
@@ -268,7 +269,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     while (!result) {
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }
-      const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState,
+      const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, authority: task.authority, namedButtonRequest: task.authority?.quote, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState,
         maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, actor: 'decision', pageText: pageText === true })
       values = {}
       task.state = record(out?.state) ? out.state : task.state
@@ -316,7 +317,11 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const picked = pickTaskCard(cards, args.cardId)
       if (picked.error) return reply({ status: 'cannot', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}) })
       if (decisionOff()) return reply(OFF)
-      task = store.create({ conversationKey, cardId: picked.cardId, goal: args.goal })
+      let authority = null
+      try { authority = conversationAuthority(run, messageOf?.(run)) } catch { /* unavailable source: no tool work */ }
+      const scope = authority && args.goal !== authority.quote ? browser.reflexScope(run, event, picked.cardId) : null
+      if (!await requestedGoal(authority, args.goal, scope, timeoutMs)) return reply({ status: 'needs_guidance', code: 'choice_needed', options: [] })
+      task = store.create({ conversationKey, cardId: picked.cardId, goal: args.goal, authority })
       Object.assign(task, { toolTask: true, offered: [], spanTried: [], eventSeq: 0, lastPage: null })
     } else {
       task = store.active(conversationKey)

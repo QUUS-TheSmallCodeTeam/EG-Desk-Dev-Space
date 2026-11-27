@@ -63,6 +63,7 @@ function homeModel(body) {
   const text = body.input.map(item => (typeof item.content === 'string' ? item.content : JSON.stringify(item.content))).join('\n')
   const onResults = /URL: https:\/\/duckduckgo\.com\/\?\S*q=/.test(text)
   return body.questions.map(q => {
+    if (q.name === 'choice_requested') return { name: q.name, type: 'predicate', probability: 1 } // synthetic user requested this search
     if (q.type === 'predicate') return { name: q.name, type: 'predicate', probability: q.name === 'goal_met' ? (onResults ? 0.96 : 0.02) : 0.02 }
     const values = q.choices.map(choice => choice.value)
     const fields = values.filter(value => /^\[F\d+\]/.test(value))

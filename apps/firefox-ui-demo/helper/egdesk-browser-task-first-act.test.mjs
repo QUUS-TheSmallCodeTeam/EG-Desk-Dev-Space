@@ -17,6 +17,7 @@ function searchLoop(body) {
   const text = body.input.map(item => (typeof item.content === 'string' ? item.content : JSON.stringify(item.content))).join('\n')
   const onResults = /URL: https:\/\/www\.google\.com\/search/.test(text)
   return body.questions.map(q => {
+    if (q.name === 'choice_requested') return { name: q.name, type: 'predicate', probability: 1 } // synthetic user requested this search
     if (q.type === 'predicate') return { name: q.name, type: 'predicate', probability: q.name === 'goal_met' ? (onResults ? 0.96 : 0.02) : 0.02 }
     if (q.name === 'next_step') return choice(q.name, /filled \[F\d+\] 검색/.test(text) ? pick(q, v => /^\[B\d+\] Google 검색$/.test(v)) : pick(q, v => /^\[F\d+\] 검색$/.test(v)))
     if (/^field_\d+$/.test(q.name)) return choice(q.name, pick(q, v => /^\[F\d+\] 검색$/.test(v)))

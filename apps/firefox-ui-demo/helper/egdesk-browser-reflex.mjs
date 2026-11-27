@@ -1,3 +1,4 @@
+import { requestedGoal, requestedSiteEvidence } from './egdesk-browser-authority.mjs'
 import { requestedMotion, runRequestedMotion, isHistory } from './egdesk-browser-motion.mjs'
 import { undecidedField } from './egdesk-browser-field-text.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
@@ -289,7 +290,7 @@ function elementKind(element, { textComboboxes = false } = {}) {
  * options: [{ value, description, item: { kind: 'navigate'|'press'|'fill', element } }]
  * Values are '[L1] label' (links), '[B1] label' (buttons, tabs), '[F1] label' (text fields).
  */
-export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS, namedButtonRequest, askSite = false, textComboboxes = false } = {}) {
+export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS, authority, namedButtonRequest, askSite = false, textComboboxes = false } = {}) {
   const elements = Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []
   const entries = []
   const excluded = { disabled: 0, gated: 0, offSite: 0, sensitive: 0, unlabeled: 0, overflow: 0, unsupported: 0 }
@@ -365,7 +366,15 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
       (judged?.category === 'pay' && judged.term === '예매' && /예매\s*(내역|현황|조회|확인|목록)/.test(String(element.label ?? ''))))
     const registerLink = phraseLink || (kind === 'navigate' && judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && /등록/.test(judged.term ?? '') && isAllowedUrl(element.href, snapshot))
     const writeSubmit = askSite && kind === 'press' && ['submit', 'image'].includes(element.nav?.type) && element.nav?.form?.method === 'post'
-    if (writeSubmit || (judged?.category !== 'none' && !yieldsToProof && !registerLink)) {
+    const post = writeSubmit && authority?.layer === 'conversation' && nav.sensitiveRegion === false && nav.form.sensitive === false &&
+      typeof nav.regionLabel === 'string' && !SENSITIVE_REGION.test([label, nav.regionLabel, snapshot.url, nav.form.submitUrl].join(' ')) &&
+      Array.isArray(nav.form.fields) && nav.form.fields.every(field => field !== 'hidden' && (SAFE_GET_FIELDS.has(field) || ['tel','email','time','fieldset'].includes(field))) &&
+      httpUrl(nav.form.submitUrl) && isAllowedUrl(nav.form.submitUrl, snapshot) && new URL(nav.form.submitUrl).origin === new URL(snapshot.url).origin &&
+      ['none','submit'].includes(classify({mode:'activate',label:hrefWords(nav.form.submitUrl),role:'link',tag:'a',href:true,url:snapshot.url})?.category) &&
+      (['none','submit'].includes(judged?.category) || (judged?.category === 'pay' && judged.term === 'submit order' && /^submit order$/i.test(label) &&
+        // The label alone also occurs on real checkouts. Only the publicly known non-transactional demonstration endpoint disambiguates it by code.
+        snapshot.url === 'https://httpbin.org/forms/post' && nav.form.submitUrl === 'https://httpbin.org/post'))
+    if ((writeSubmit && !post) || (!post && judged?.category !== 'none' && !yieldsToProof && !registerLink)) {
       excluded.gated++
       if (kind === 'press' && label && withheld.length < MAX_PERSON_TARGETS) withheld.push({ label, role: String(element.role) })
       continue
@@ -388,7 +397,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     if (!label) { excluded.unlabeled++; continue }
     counters.press++
     entries.push({ label: `[B${counters.press}] ${label}`, description: readOnly?.kind === 'get_form' ? `${element.role} on this page; opens ${pathOf(readOnly.url)} (a read-only search)`
-      : readOnly?.kind === 'view' ? `${element.role} on this page; shows another part of this page` : named ? `${element.role} named in the request; press once and wait for the changed page` : `${element.role} on this page`, item: { kind, element, ...(readOnly ? { readOnly } : {}), ...(named ? { named: true } : {}) } })
+      : readOnly?.kind === 'view' ? `${element.role} on this page; shows another part of this page` : named ? `${element.role} named in the request; press once and wait for the changed page` : `${element.role} on this page`, item: { kind, element, ...(post ? { postUrl: nav.form.submitUrl } : {}), ...(readOnly ? { readOnly } : {}), ...(named ? { named: true } : {}) } })
   }
   const kept = entries.slice(0, Math.max(0, maxOptions))
   excluded.overflow = entries.length - kept.length
@@ -567,7 +576,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
         ? 'Which option moves toward the goal next? For an ordinal search result use the result destinations in page order, not the search page navigation controls. Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
         : 'Which option moves toward the goal next?', choices),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
-      ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
+      ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'In the person’s request ' + JSON.stringify(goal) + ', does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
       ...(typedSearchOffered ? [predicateQuestion('search_only', 'Is running a search with the resolved field value the entire browser request? No if the person wants to open a result, filter, select, or take any further browser action.')] : []),
@@ -754,7 +763,8 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  * callTool(name, args) → the egdesk_browser_* tool result (throws on refusal).
  * → { outcome, reason?, steps, ... } — see the module header for outcomes.
  */
-export async function runBrowserReflex({ cardId, goal, namedButtonRequest, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
+const spentPost = new Set() // provisional: one write per originating human message in this helper process
+export async function runBrowserReflex({ cardId, goal, authority, namedButtonRequest, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
   textComboboxes = false, onPage = null, watchPopupLoad = null, firstFieldText = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
@@ -949,7 +959,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
     steps.push(entry)
     const seen = pageText === false ? withoutPageText(snapshot) : snapshot // a1: what the step's judgments read (the page's own text only when it may be sent)
     // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
-    const built = buildReflexCandidates(snapshot, { namedButtonRequest, askSite: textComboboxes, ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    const built = buildReflexCandidates(snapshot, { authority, namedButtonRequest, askSite: textComboboxes, ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
     const { excluded, personOnly, withheld, offSite } = built
     // L6c a2: a field the page actor refused as not editable on this document is no option of this task any more (its label stays as numbered)
     const options = notEditable.size ? built.options.filter(option => !(option.item.kind === 'fill' && notEditable.has(fieldKey(snapshot, option.item.element.ref)))) : built.options
@@ -1121,17 +1131,38 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
       default: {
         const option = decision.option
         let origin = { cardId, observationId, snapshot }
+        if (option.item.postUrl) {
+          const label = option.item.element.label
+          const src = authority?.messageId
+          if (!src || spentPost.has(src) || !await requestedGoal(authority, 'Submit the current form using ' + JSON.stringify(label), { client, authorizeDispatch, isDecisionCurrent }, timeoutMs, `Does this person expressly request sending this form (${JSON.stringify(label)}) as a step of their task? Filling fields alone does not request sending.`)) return finish('escalated', { reason: 'human_step', controls: [label] })
+          if (signal?.aborted || !isDecisionCurrent?.() || spentPost.has(src)) return finish('aborted')
+          spentPost.add(src) // before dispatch: never retry an ambiguous write, even in another task of the same turn
+          const to = option.item.postUrl, result = await act(entry, 'egdesk_browser_click', { cardId, observationId, expectedRevision: snapshot.revision, ref: option.item.element.ref, expectedTarget: expectedTargetOf(option.item.element), postcondition: { kind: 'url', value: to } }, { op: 'submit', target: label })
+          if (result.held) return heldResult()
+          if (result.ok && result.result?.status === 'postcondition-observed') return finish('done', { url: to })
+          try {
+            await callTool('egdesk_browser_wait', { cardId, for:'load', timeoutMs:5000 })
+            const landed = await callTool('egdesk_browser_observe', { cardId })
+            if (!signal?.aborted && isDecisionCurrent() && landed.snapshot?.url === to && landed.snapshot.documentId && landed.snapshot.documentId !== snapshot.documentId) return finish('done', { url: to })
+          } catch (err) { if (isBrowserUserHold(err)) return heldResult() }
+          return finish('escalated', { reason: 'tool_failed', code: result.code || 'BROWSER_OUTCOME_UNKNOWN' })
+        }
         if (option.item.askSite) {
           // The existing Card question owns the 55s deadline and the conversation grant. Nothing is dispatched while it is pending.
           let answer, fresh
-          try { answer = await callTool('egdesk_browser_request_site', { cardId, site: hostOfUrl(option.item.element.href) }) }
+          const el = option.item.element, position = offSite.findIndex(link => link.href === el.href) + 1
+          const proposal = 'Open external destination #' + position + ' in page order: ' + JSON.stringify({ host: hostOfUrl(el.href), title: el.label })
+          const requested = position > 0 && await requestedGoal(authority, proposal, { client, authorizeDispatch, isDecisionCurrent }, timeoutMs,
+            'Does the person ask to OPEN this destination, identifying it by this position, name or site? Its position among distinct destinations is ' + position + '; site ' + JSON.stringify(hostOfUrl(el.href)) + '; link title ' + JSON.stringify(el.label) + '. Asking to read a title does not ask to open it.')
+          if (signal?.aborted || (isDecisionCurrent && !isDecisionCurrent())) return finish('aborted')
+          try { answer = await callTool('egdesk_browser_request_site', { cardId, site: hostOfUrl(el.href), ...(requested ? { [requestedSiteEvidence]: { observationId, revision: snapshot.revision, href: el.href, ref: el.ref } } : {}) }) }
           catch (error) { return isBrowserUserHold(error) ? heldResult() : finish('escalated', { reason: 'tool_failed', code: PUBLIC_CODE.test(error?.code) ? error.code : 'TOOL_FAILED' }) }
           if (signal?.aborted) return finish('aborted')
           if (answer?.status !== 'site-allowed') return finish('escalated', { reason: answer?.status === 'site-pending' ? 'site_pending' : 'site_not_allowed' })
           try { fresh = await callTool('egdesk_browser_observe', { cardId }) } catch (error) { return isBrowserUserHold(error) ? heldResult() : finish('escalated', { reason: 'observe_failed' }) }
           if (signal?.aborted) return finish('aborted')
           if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
-          const now = fresh?.snapshot, el = option.item.element
+          const now = fresh?.snapshot
           if (typeof fresh?.observationId !== 'string' || !Number.isSafeInteger(now?.revision) || now.url !== snapshot.url || now.documentId !== snapshot.documentId ||
               !buildReflexCandidates(now, { askSite: true, classify, isAllowedUrl }).options.some(o => o.item.askSite && o.item.element.label === el.label && o.item.element.href === el.href)) {
             return finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OBSERVATION_STALE' })

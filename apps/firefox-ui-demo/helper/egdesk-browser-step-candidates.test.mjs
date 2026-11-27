@@ -1,3 +1,4 @@
+import { requestedSiteEvidence } from './egdesk-browser-authority.mjs'
 // L8b a2 (real window 2026-11-26 17:27 KST, EGDESK_BROWSER_ENTRY=alternate, page text off): "덕덕고 카드에서 장화 신은 고양이 검색해줘" on the DuckDuckGo Card. The entry entered
 // (browser_entry 1.0), its first step held (next_step top 0.52, second 0.21, 47 options) and the conversation model did the whole request (23.4 s). Found by replaying the Card's
 // controls (egdesk-ddg-live-controls.fixture.mjs) through the product code and the real model (report l8b-a2):
@@ -249,6 +250,7 @@ for (const [receipt, code, second] of [['site-allowed', undefined], ['site-refus
     const calls = [], reply = Promise.withResolvers(), asked = Promise.withResolvers()
     const client = fakeClient(req => {
       const next = req.questions.find(q => q.name === 'next_step')
+      if (req.questions.some(q => q.name === 'choice_requested') && !next) return { choice_requested: { type: 'predicate', probability: receipt === 'site-allowed' ? 1 : 0 } }
       if (!landed && second) {
         assert.ok(next.choices.every(c => /^\[L\d+\]/.test(c.value) || ['needs_user_context','blocked'].includes(c.value)))
         assert.ok(!req.questions.some(q => ['open_only','read_here','field_text'].includes(q.name)))
@@ -260,7 +262,12 @@ for (const [receipt, code, second] of [['site-allowed', undefined], ['site-refus
     const callTool = async (name, args) => {
       calls.push(name.replace('egdesk_browser_', ''))
       if (name.endsWith('_observe')) return { observationId: `o${calls.length}`, snapshot: landed ? { ...page, url: href, documentId: 'landed', interactiveElements: [] } : { ...page, revision: calls.length } }
-      if (name.endsWith('_request_site')) { assert.equal(args.site, 'namu.wiki'); asked.resolve(); return reply.promise }
+      if (name.endsWith('_request_site')) {
+        assert.equal(args.site, 'namu.wiki')
+        assert.equal(args[requestedSiteEvidence]?.href, receipt === 'site-allowed' ? href : undefined)
+        assert.ok(!JSON.stringify(args).includes('observationId'), 'internal source evidence is never a JSON tool argument')
+        asked.resolve(); return args[requestedSiteEvidence] ? { status: 'site-allowed' } : reply.promise
+      }
       if (name.endsWith('_navigate')) { assert.deepEqual([args.url, args.observationId, args.expectedRevision], [href, 'o3', 3]); landed = true }
       return {}
     }
@@ -268,9 +275,9 @@ for (const [receipt, code, second] of [['site-allowed', undefined], ['site-refus
     const provider = { directEntryEnabled: () => true, reflexScope: () => scope, runDirectTask: (_run, args) => runBrowserReflex({ ...args, ...scope, pageText: false }) }
     const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), fieldText: () => true })
     const yes = { type: 'predicate', probability: 0.98 }
-    const result = entry.handle({ run: { browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: second ? '두 번째 결과 열어줘' : '첫 번째 검색 결과 열어줘',
+    const result = entry.handle({ run: { requestId: 'person-1', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: second ? '두 번째 결과 열어줘' : '첫 번째 검색 결과 열어줘',
       hosts: { card: 'duckduckgo.com' }, entryAnswers: { browser_entry: yes, browser_entry_card_0: yes, browser_entry_answer: { ...yes, probability: 0.02 } } })
-    await Promise.race([asked.promise, result]); assert.deepEqual(calls, ['observe', 'request_site'])
+    await Promise.race([asked.promise, result]); assert.deepEqual(calls.slice(0,2), ['observe', 'request_site'])
     reply.resolve({ status: receipt })
     const note = JSON.parse((await result).note).egdesk_browser_task
     assert.deepEqual([note.status, note.code], [code ? 'cannot_proceed' : 'done', code])

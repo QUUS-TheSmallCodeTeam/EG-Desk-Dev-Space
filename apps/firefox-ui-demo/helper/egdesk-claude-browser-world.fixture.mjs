@@ -140,7 +140,7 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   } }) : null
   const browser = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, schemaReady: readiness,
     ...(loopClient ? { decision: { mode: () => 'on', configured: () => true, recipient: () => 'b'.repeat(64), generation: () => 1, client: loopClient } } : {}) })
-  const taskTool = loopClient ? createBrowserTaskTool({ browser }) : null
+  const taskTool = loopClient ? createBrowserTaskTool({ browser, messageOf: run => chat.browserTaskMessage(run) }) : null
   const page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => browser.dispatch(run, event) }, ledger: wiring.ledger, ...(taskTool ? { taskTool } : {}) })
   // the decision model: a scripted answer per question name (predicates by name; a pick is 'none'); every request body is kept
   const predicates = decisions?.predicates ?? {}
