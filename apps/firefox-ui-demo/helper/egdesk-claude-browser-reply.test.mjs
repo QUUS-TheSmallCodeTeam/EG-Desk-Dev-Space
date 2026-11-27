@@ -171,3 +171,33 @@ for (const enabled of [false, true]) test(`D26: bounded browser judgments ${enab
   assert.equal(Boolean(check), enabled, names.join(','))
   if (enabled) assert.match(JSON.stringify(check.input), /D26-evidence-marker/)
 })
+
+test('R2-d: the steps the browser task took this turn are evidence for the check of the answer (control name and went-through only, no value), so a true "선택했어요" has a record', async t => {
+  const key = 'EGDESK_DRAFT_CHECK_BROWSER', before = process.env[key]
+  t.after(() => { if (before == null) delete process.env[key]; else process.env[key] = before })
+  process.env[key] = 'on'
+  const w = world(t, { hold: true, pages: () => ({ '/home': { text: ['쇼핑몰'], elements: [] } }), decisions: { predicates: { rel_0: 0.99, sup_0: 0.99 } } })
+  w.chat.decisionContext.draftCheck = { mode: () => 'on' }; w.chat.decisionContext.nunchi = { enabled: true }
+  const sent = await w.browserSend('피자 크기 중간으로 골라줘')
+  await until(() => typeof w.transports.at(-1)?.finish === 'function')
+  const run = w.runOf(sent)
+  assert.ok(!w.chat.answerFactsEvidence(run).some(item => item.id === 'task_steps'), 'no step, no item')
+  w.chat.browserTaskStep(run, { taskId: 'task-1', seq: 1, op: 'select', target: 'check Medium', displayValue: 'SECRET-VALUE', ok: true, by: 'decision' })
+  w.chat.browserTaskStep(run, { taskId: 'task-1', seq: 2, op: 'end', status: 'done', ok: true, by: 'decision' })
+  const item = w.chat.answerFactsEvidence(run).find(x => x.id === 'task_steps')
+  assert.match(item.text, /select "check Medium": went through/)
+  assert.doesNotMatch(item.text, /SECRET-VALUE/)
+  assert.doesNotMatch(item.text, /end/)
+  await play(w, ['중간으로 선택했어요.']); await settle(w, sent)
+})
+
+for (const bounded of [true]) test('R2-d: a browser turn whose answer the check would withhold entirely posts the engine\'s answer (never an empty reply)', async t => {
+  const key = 'EGDESK_DRAFT_CHECK_BROWSER', before = process.env[key]
+  t.after(() => { if (before == null) delete process.env[key]; else process.env[key] = before })
+  process.env[key] = 'on'
+  const w = world(t, { hold: true, pages: () => ({ '/home': { text: ['쇼핑몰'], elements: [] } }), decisions: { predicates: { rel_0: 0.99, sup_0: 0.01 } } })
+  w.chat.decisionContext.draftCheck = { mode: () => 'on' }; w.chat.decisionContext.nunchi = { enabled: true }
+  const sent = await w.browserSend('버튼 눌러서 나오는 글자 알려줘')
+  await play(w, ['나오는 글자는 Hello World 입니다.']); await settle(w, sent)
+  assert.deepEqual(bubbles(w), ['나오는 글자는 Hello World 입니다.'])
+})

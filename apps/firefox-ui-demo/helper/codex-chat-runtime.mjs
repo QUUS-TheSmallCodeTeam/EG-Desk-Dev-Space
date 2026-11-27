@@ -3219,6 +3219,7 @@ export class CodexChatRuntime {
       for (const provider of preparedProviders.keys()) {
         if (browserPre && provider === browserPre.provider) {
           await this.callProvider(provider, 'adoptRun', run, preparedProviders.get(provider), browserPre.preRun); browserPre.adopted = true
+          if (Array.isArray(browserPre.preRun?.decisionSteps)) run.decisionSteps = [...browserPre.preRun.decisionSteps, ...(run.decisionSteps ?? [])].slice(0, 8) // R2-d: the entry's steps are this turn's evidence
           if (context.browserTaskTurn === true || browserPre.note) this.browserTaskRuns.add(run)
           // A browser-task turn in the live-session mode (held messages + heartbeat + a store for in-run replies): this run may stay open
           // after its question so the reply resumes the task INSIDE the run (see holdRunForBrowserReply). Everything a later native turn
@@ -5662,6 +5663,14 @@ export class CodexChatRuntime {
         const step = closedEntryStep(event, { callId: run.entrySteps.callId, seq: run.entrySteps.rows.length + 1, completedAt: this.now(), durationMs: event.ms })
         if (step) run.entrySteps.rows.push(step)
       }
+      // R2-d (real window, 4번 '중간' 선택): the check of the turn's answer read only the note's closed words, so the one action the decision model took ("check Medium") had no
+      // evidence and the true claim was revised into a wrong hedge. Each step the browser task took this turn is kept as its control's own name and whether it went through
+      // (no typed value, no address; the same words the screen shows), and rides with the check's evidence beside the note.
+      if (run && event && ['open', 'submit', 'press', 'fill', 'select', 'scroll'].includes(event.op) && typeof event.ok === 'boolean') {
+        const target = typeof event.target === 'string' ? event.target.replace(/\s+/g, ' ').trim().slice(0, 60) : ''
+        const lines = (run.decisionSteps ??= [])
+        if (lines.length < 8) lines.push(`${event.op}${target ? ` "${target}"` : ''}: ${event.ok ? 'went through' : 'did not go through'}`)
+      }
       const channel = this.decisionContext?.browserSteps
       if (typeof channel?.publish !== 'function' || !run?.clientThreadId || this.deletedConversations.has(run.clientThreadId)) return false
       const step = browserStepFor(event, { clientThreadId: run.clientThreadId })
@@ -7027,6 +7036,9 @@ export class CodexChatRuntime {
           : { feature: 'draft_check', mode: 'on', attached: false, judgments: [], fallback: 'timeout', timing: { totalMs, calls: null } })
         if (handle) this.draftRecords.set(run, handle)
       } catch { /* recording never affects posting */ }
+      // R2-d (real window, 19번 'Start'): a browser turn's answer is about a page action the person watched; when the check could read too little of the page to support any sentence, an
+      // empty answer is worse than the answer as the engine wrote it (the way before the check). The held draft is posted unchecked, as with the check off.
+      if (result?.outcome === 'withheld' && run.executionPolicy?.mode === BROWSER_BOUNDED) { this.draftOutcomes.set(run, 'unchecked'); return null }
       if (result?.outcome) this.draftOutcomes.set(run, result.outcome)
       if (result?.outcome === 'withheld') this.rememberWithheldEvidence(run, result) // c28/c29: the next check carries what this check had
       // L1 c16: which part of what will be posted the answering model wrote (the check's own copy excluded), for readers of the answer's meaning
@@ -7173,6 +7185,8 @@ export class CodexChatRuntime {
     }
     const note = this.draftCheckTurns.get(run)?.browserNote
     if (typeof note === 'string' && note.trim() && egress.allows('browser_task_record') && (run.executionPolicy?.mode !== BROWSER_BOUNDED || pageTextOn())) out.push({ id: 'task', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The browser task's outcome note: ${publicText(note, 1000)}` })
+    if (Array.isArray(run.decisionSteps) && run.decisionSteps.length && egress.allows('browser_task_record') && (run.executionPolicy?.mode !== BROWSER_BOUNDED || pageTextOn()))
+      out.push({ id: 'task_steps', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The steps EG-Desk's browser task carried out in this turn on the person's Card, each as the control's own name and whether it went through (a step that went through really happened on the page; the page's resulting state is not quoted here): ${run.decisionSteps.join('; ')}` })
     return out
   }
 
