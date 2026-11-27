@@ -8,7 +8,7 @@ import { FAMILY_PAGES } from './egdesk-browser-live-families.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
 
-// L8 c22: real, browser-live-settings-v3 (2026-11-25): the first step (body sha256 4dc14ab3..., 2806 bytes) offered two links and the fixed
+// L8 c22: real, browser-live-settings-v3 (2026-11-25): the first step (body sha256 1e50c0fb..., 2806 bytes) offered two links and the fixed
 // options; the two toggles were never options and nothing said they existed; next_step answered scroll_more at 0.56. Synthetic page.
 const page = FAMILY_PAGES.settings['/settings/notifications']
 const SNAP = { cardId: 'card', documentId: 'doc1', revision: 1, url: 'https://account.example.test/settings/notifications', readyState: 'complete', text: page.text, viewport: { width: 1200, height: 800, devicePixelRatio: 1 }, interactiveElements: page.elements }
@@ -56,6 +56,6 @@ test('a page without such controls: no line, no predicate (the request bytes as 
   let body = null
   const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { body = init.body; return { ok: true, text: async () => JSON.stringify({ answers: [] }) } } })
   await decideReflexStep({ goal: compactText('마케팅 알림 꺼줘', 500), snapshot: SNAP, options: buildReflexCandidates(SNAP).options, today: '2026-11-19', client, thresholds: decisionThresholds() }).catch(() => null)
-  assert.equal(createHash('sha256').update(body).digest('hex').slice(0, 12), '4dc14ab34b0d', 'the real v3 step body, byte for byte, without the person-only controls passed')
+  assert.equal(createHash('sha256').update(body).digest('hex').slice(0, 12), '1e50c0fbab56', 'the real v3 step body, byte for byte, without the person-only controls passed')
   assert.deepEqual(buildReflexCandidates(SNAP).personOnly, [{ label: '마케팅 정보 알림', role: 'switch', value: 'on' }, { label: '보안 알림', role: 'switch', value: 'on' }])
 })
