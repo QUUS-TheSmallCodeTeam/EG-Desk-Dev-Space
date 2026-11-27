@@ -86,6 +86,19 @@ export function scaleBoxes(boxes, sx, sy, canvas) {
   return out
 }
 
+/** The text-free recording mark: a small red dot at the top right that never takes a click. Also used for an OS-level capture the bridge runs. */
+export function setRecordingDot(doc, on) {
+  try {
+    const old = doc.getElementById(SCREEN_RECORDING.dotId)
+    if (!on) { old?.remove(); return }
+    if (old) return
+    const dot = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div')
+    dot.id = SCREEN_RECORDING.dotId
+    dot.setAttribute('style', 'position:fixed;top:8px;right:8px;width:10px;height:10px;border-radius:50%;background:#e5322d;z-index:2147483647;pointer-events:none;')
+    ;(doc.documentElement || doc.body).appendChild(dot)
+  } catch {}
+}
+
 const withTimeout = (promise, ms, setTimer, clearTimer) => new Promise((resolve, reject) => {
   const timer = setTimer(() => reject(new Error('mask-query-timeout')), ms)
   Promise.resolve(promise).then(v => { clearTimer(timer); resolve(v) }, e => { clearTimer(timer); reject(e) })
@@ -121,18 +134,7 @@ export function createScreenRecorder(deps) {
     file: r.filePath, sidecar: r.sidecarPath, segments: r.segments.length, totalBytes: r.totalBytes, framesDrawn: r.framesDrawn,
     framesDropped: r.framesDropped, dropReasons: r.dropReasons, maskRevision: r.maskRevision, mime: r.mime, error: r.error ?? null })
 
-  function indicator(on) {
-    try {
-      const old = doc.getElementById(SCREEN_RECORDING.dotId)
-      if (!on) { old?.remove(); return }
-      if (old) return
-      const dot = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div')
-      dot.id = SCREEN_RECORDING.dotId
-      // Text-free mark: a small red dot at the top right; it never takes a click.
-      dot.setAttribute('style', 'position:fixed;top:8px;right:8px;width:10px;height:10px;border-radius:50%;background:#e5322d;z-index:2147483647;pointer-events:none;')
-      ;(doc.documentElement || doc.body).appendChild(dot)
-    } catch {}
-  }
+  const indicator = on => setRecordingDot(doc, on)
 
   async function collectMasks(r) {
     const frames = deps.frames?.() || []

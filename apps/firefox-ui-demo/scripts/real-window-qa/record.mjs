@@ -1,5 +1,6 @@
-// Screen recording control (temporary name): node record.mjs start [--fps N] [--scale S] [label...] | stop | status
-// Defaults: 4 frames/s at scale 0.5 (light). A fast scroll or flicker needs more: --fps 10 --scale 0.75.
+// Screen recording control (temporary name): node record.mjs start [--source os|window] [--fps N] [--scale S] [--max-sec N] [label...] | stop | status
+// --source os (default): what a person sees, separate windows and dialogs included (ffmpeg on the Desk window's rectangle, 10 fps, MP4). NO MASK: QA only.
+// --source window: the Desk window's own masked capture (WebM, 4 fps at scale 0.5; --fps/--scale apply), but separate windows are not seen.
 // Bridge HTTP only (127.0.0.1:39218), no Marionette. The bridge needs EGDESK_SCREEN_RECORDING=on (default off).
 // start prints the recording id and file; stop waits for the window to finish and for the bridge to re-read the file, then prints the check.
 const [, , cmd, ...rest] = process.argv
@@ -13,7 +14,7 @@ const call = async (method, sub, body) => {
 let out
 if (cmd === 'start') {
   const body = {}, words = []
-  for (let i = 0; i < rest.length; i++) { if (rest[i] === '--fps') body.fps = Number(rest[++i]); else if (rest[i] === '--scale') body.scale = Number(rest[++i]); else words.push(rest[i]) }
+  for (let i = 0; i < rest.length; i++) { if (rest[i] === '--fps') body.fps = Number(rest[++i]); else if (rest[i] === '--scale') body.scale = Number(rest[++i]); else if (rest[i] === '--source') body.source = rest[++i]; else if (rest[i] === '--max-sec') body.maxMs = Number(rest[++i]) * 1000; else words.push(rest[i]) }
   if (words.length) body.label = words.join(' ')
   out = await call('POST', '/start', body)
 }
