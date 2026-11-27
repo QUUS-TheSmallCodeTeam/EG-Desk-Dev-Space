@@ -59,6 +59,56 @@
   let browserAgentActorReady = false;
   console.warn(TAG, 'loaded, readyState =', document.readyState);
 
+  // Screen recording v1 (round d, L37; temporary names; bridge flag EGDESK_SCREEN_RECORDING, default off). Nothing here runs until the
+  // bridge sends a 'recording.command' start; the recorder module is imported then, not at load. See EGDeskScreenRecorder.sys.mjs.
+  let screenRecorder = null;
+  function screenRecording() {
+    if (screenRecorder) return screenRecorder;
+    const Recorder = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskScreenRecorder.sys.mjs');
+    const rectOf = (el) => { const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; };
+    const inWindow = (r) => r.width > 0 && r.height > 0 && r.left < window.innerWidth && r.top < window.innerHeight && r.left + r.width > 0 && r.top + r.height > 0;
+    screenRecorder = Recorder.createScreenRecorder({
+      window, document, IOUtils, MediaRecorder: window.MediaRecorder, crypto: window.crypto,
+      capture: (rect, scale) => window.browsingContext.currentWindowGlobal.drawSnapshot(new window.DOMRect(rect.x, rect.y, rect.width, rect.height), scale, 'white'),
+      frames: () => {
+        ensureBrowserAgentActor();
+        const out = [];
+        for (const card of document.querySelectorAll('.egd-browser-card')) {
+          const browser = card._xulBrowser;
+          if (!browser?.isConnected) continue;
+          const rect = rectOf(browser);
+          if (!inWindow(rect)) continue;
+          let cover = null;
+          if (card.dataset?.codexRole === 'auth') cover = 'signin';
+          else if (browser.browsingContext?.originAttributes?.privateBrowsingId > 0) cover = 'private';
+          else if (browser.fullZoom !== undefined && browser.fullZoom !== 1) cover = 'zoom';
+          out.push({ id: card.id, rect, cover, query: () => browser.browsingContext.currentWindowGlobal.getActor(BROWSER_AGENT_ACTOR_NAME).sendQuery('screenshotMask', {}) });
+        }
+        return out;
+      },
+      chromeCovers: () => Array.from(document.querySelectorAll('input[type="password"], [data-sensitive], [data-private]'), rectOf).filter(inWindow),
+      report: (body) => fetch('http://127.0.0.1:39218/v1/recording/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+      runtime: () => {
+        const info = globalThis.Services?.appinfo;
+        return { app: 'EG-Desk', appVersion: info?.version ?? null, platform: info?.OS ?? null, pid: info?.processID ?? null,
+          window: { innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio } };
+      },
+    });
+    // The app closing or this window going away ends the recording (no hand-over contract exists for v1).
+    window.addEventListener('unload', () => { if (screenRecorder?.active()) screenRecorder.stop('window-closing'); }, { once: true });
+    try { globalThis.Services?.obs?.addObserver({ observe: () => { if (screenRecorder?.active()) screenRecorder.stop('app-closing'); } }, 'quit-application-granted'); } catch {}
+    return screenRecorder;
+  }
+  async function handleRecordingCommand(event) {
+    if (!document.getElementById('egd-canvas-layer')) return; // only the Desk window records
+    try {
+      if (event.command === 'start') {
+        const result = await screenRecording().start(event);
+        if (!result.ok && result.reason !== 'exists') await fetch('http://127.0.0.1:39218/v1/recording/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: event.id, state: 'failed', reason: result.reason }) });
+      } else if (event.command === 'stop' && screenRecorder?.status()?.id === event.id) await screenRecorder.stop(event.reason || 'requested');
+    } catch (error) { console.warn(TAG, 'screen recording command failed', error); }
+  }
+
   function ensureBrowserAgentActor() {
     if (browserAgentActorReady) return true;
     try {
@@ -16906,6 +16956,9 @@
         case 'host.activity':
         case 'host.control':
           state.hostActivityFeed?.(event);
+          return;
+        case 'recording.command':
+          void handleRecordingCommand(event);
           return;
         // CU-01: the computer control policy or its check changed.
         case 'computer.control':

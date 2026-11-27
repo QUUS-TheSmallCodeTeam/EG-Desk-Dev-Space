@@ -47,6 +47,7 @@ import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { applyUpperBundle, describeUpperBundle, hudRoutingCapability, modeGatedClient } from './egdesk-upper-bundle.mjs'
+import { createScreenRecordingService } from './egdesk-screen-recording.mjs'
 import { PERSONAL_FLAGS_FILE, applyPersonalFlags, describePersonalFlags } from './egdesk-personal-flags.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
@@ -532,6 +533,8 @@ const presenceMirror = createPresenceMirror()
 const handlePresenceMirrorHttp = createPresenceMirrorHttpHandler({ mirror: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 // Whose task a conversation's run is (another member's presence alias, told by the window; memory only). Same flag, default off.
 const runRequesters = createRunRequesters({ presence: presenceMirror })
+// Screen recording v1 (round d, L37; temporary flag name, default off): control line for the window's recorder. See helper/egdesk-screen-recording.mjs.
+const screenRecording = createScreenRecordingService({ enabled: () => process.env.EGDESK_SCREEN_RECORDING === 'on', broadcast: event => broadcast(event), dataDir, port: BRIDGE_PORT })
 const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRequesters, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 // L1 c21 (5): a second Desk window reads a run's requester here
 const handleRunRequesterReadHttp = createRunRequesterReadHttpHandler({ requesters: runRequesters, presence: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
@@ -1462,6 +1465,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleRoomAccountHttp(req, res, url)) return
   if (await handleUserGuidanceHttp(req, res, url)) return
   if (await handlePresenceMirrorHttp(req, res, url)) return
+  if (await screenRecording.handle(req, res, url)) return
   if (await handleRunRequesterReadHttp(req, res, url)) return
   if (await handleRunRequesterHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
@@ -1507,6 +1511,7 @@ let shuttingDown = false
 async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
+  try { screenRecording.closing() } catch {} // a running recording is told to stop and finish its file
   boardAgentAsk.close()
   acceptingFileRoots = false
   pendingFileRoots.clear()
