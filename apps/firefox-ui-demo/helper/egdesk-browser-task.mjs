@@ -95,7 +95,7 @@ const q = text => `"${String(text).replace(/"/g, "'")}"`
 // 0.19 (decided no), so the entry, as designed, did not enter. Nothing said what the page shows. R1: the card's predicate also quotes the
 // first lines the card shows now (its heading and the next lines, each quoted on its own), where the run may receive page text.
 const shownLines = card => (Array.isArray(card.shows) ? card.shows : []).map(line => compactText(String(line ?? ''), ENTRY_LINE_CHARS)).filter(Boolean).slice(0, ENTRY_LINES)
-// a1: with the page's own text withheld (PAGE_TEXT_FLAG off, the default) a card is quoted by its controls instead of its first lines (bounded control descriptions, not body lines)
+// a1: with the page's own text withheld (PAGE_TEXT_FLAG explicitly off) a card is quoted by its controls instead of its first lines (bounded control descriptions, not body lines)
 export const ENTRY_CARD_CONTROLS = 16, ENTRY_CARD_CONTROL_CHARS = 40
 const shownControls = card => (Array.isArray(card.controls) ? card.controls : []).map(line => compactText(String(line ?? ''), ENTRY_CARD_CONTROL_CHARS + 16)).filter(Boolean).slice(0, ENTRY_CARD_CONTROLS)
 const quoteIdentity = card => ((card.pageTitle || card.title) ? `${q(compactText(card.pageTitle || card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`)

@@ -1,5 +1,6 @@
 import { PAGE_TOOLS_FLAG, createPageToolsProvider, pageToolsEnabled } from './egdesk-page-tools.mjs'
-import { BROWSER_TASK_PAGE_TEXT_FLAG, BROWSER_TASK_TOOL_FLAG, browserTaskToolEnabled, createBrowserTaskTool } from './egdesk-browser-task-tool.mjs'
+import { pageTextOn } from './egdesk-browser-reflex.mjs'
+import { BROWSER_TASK_TOOL_FLAG, browserTaskToolEnabled, createBrowserTaskTool } from './egdesk-browser-task-tool.mjs'
 
 // L8 u1: the bridge's wiring of the page tools (helper/egdesk-page-tools.mjs). Developer flag EGDESK_PAGE_TOOLS=on, default off: without it this returns null and the bridge
 // passes nothing new. With it one more tool provider is registered; the catalog (collectToolSpecs) offers its tools to Claude (EG-Desk MCP) and to Codex (dynamicTools, the own-tools path)
@@ -32,7 +33,7 @@ export function createPageToolsWiring({ env = process.env, getChat, ledger = nul
     messageOf,
     onStep: (run, event) => { const hook = pageProvider?.runtime?.browserTaskStep; return typeof hook === 'function' ? hook(run, event, { taskId: event.taskId, cardId: event.cardId }) : getChat()?.browserTaskStep?.(run, event) },
     storeOf: () => pageProvider?.runtime?.browserTasks?.() ?? null,
-    pageText: env[BROWSER_TASK_PAGE_TEXT_FLAG] === 'on',
+    pageText: pageTextOn(env),
   }) : null
   pageProvider = createPageToolsProvider({ mode: () => 'on', browser, ledger, env, messageOf,
     scopeOf: (run, event, cardId) => provider().reflexScope(run, event, cardId), ...(taskTool ? { taskTool } : {}) })

@@ -181,7 +181,7 @@ for (const crowded of [false, true]) {
     assert.equal(stepRequests.length, 3)
     assert.equal(stepRequests[0].questions.some(q => q.name === 'step_link'), crowded, 'the crowded home is fanned out')
     assert.equal(stepRequests[0].questions.find(q => q.name === 'next_step').choices.some(choice => choice.value === FIELD), true, 'the search box is an option')
-    for (const request of stepRequests) assert.match(request.input[1].content, /the page's own text is not sent/, 'page text off (the default)')
+    assert.match(stepRequests.at(-1).input[1].content, /나무위키/, 'default-on sends result page text')
     assert.equal(w.requests.filter(request => request.questions.some(q => q.name === 'field_text')).length, 1)
   })
 }

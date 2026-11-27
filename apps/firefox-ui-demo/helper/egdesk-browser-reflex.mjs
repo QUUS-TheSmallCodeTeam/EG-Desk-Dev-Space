@@ -450,15 +450,15 @@ export function reflexActionArgs(option, { cardId, observationId, snapshot, text
   return { escalate: 'press_needs_expected_effect' }
 }
 
-// a1 (owner 2026-11-26 16:00, as Main recorded it: the decision model may receive the names and values of a page's controls on every site, not its body text): the
+// With the explicit page-text opt-out, the
 // snapshot the step's judgments read when page text is withheld. Its text is the page title and the controls (role and name, a field's current value), never a line of
 // the page body; a value that looks like a credential is never listed. Options, fields and the finished page's text for the caller's code still come from the real snapshot.
 const CONTROL_WORD = Object.freeze({ link: 'link', button: 'button', textbox: 'text field', searchbox: 'search field', search: 'search field', email: 'text field', number: 'number field', combobox: 'list or field', tab: 'tab', checkbox: 'check box', radio: 'option', switch: 'switch', select: 'list', listbox: 'list', slider: 'slider', menuitem: 'menu item', option: 'option' })
 export const MAX_CONTROL_LINES = 40
-// a1 (Main 17:1x; the person was told at 15:58 "본문 글은 보내지 않습니다"): ONE flag for every Decision request of the objective loop, the direct entry and the task tool. Off (the default):
+// Owner decision, 2026-11-27: send the allowed page text by default. Explicit off:
 // the page's own text is never sent, its title and controls are (withoutPageText; the entry quotes a card's controls instead of its first lines). On: the page text as before.
 export const PAGE_TEXT_FLAG = 'EGDESK_BROWSER_TASK_PAGE_TEXT'
-export const pageTextOn = (env = process.env) => { try { return env?.[PAGE_TEXT_FLAG] === 'on' } catch { return false } }
+export const pageTextOn = (env = process.env) => { try { return env?.[PAGE_TEXT_FLAG] === undefined || env[PAGE_TEXT_FLAG] === 'on' } catch { return false } }
 // The controls are those the loop's own candidate rule lists (buildReflexCandidates): its options, the controls only the person may operate that have no action (a toggle, a list), and
 // links to another site. A control withheld as a payment, permission, delete or writing submit, and a credential or code field, is never named: only counted, in closed words.
 export function controlLines(snapshot, { limit = MAX_CONTROL_LINES, textComboboxes = false } = {}) {

@@ -338,19 +338,19 @@ test('a1 the page tools bind their own press for a link to another site: a fresh
   assert.equal(gone.code, 'PAGE_REF_UNKNOWN')
 })
 
-test('a1 page text: by default the loop sends the title and the controls the candidate rule lists (names, a field\'s value) instead of the page\'s own text; a credential field or a withheld control is only counted, never named', async () => {
+test('a1 page text: when explicitly disabled the loop sends the title and the controls the candidate rule lists (names, a field\'s value) instead of the page\'s own text; a credential field or a withheld control is only counted, never named', async () => {
   const { withoutPageText } = await import('./egdesk-browser-reflex.mjs')
   const seen = withoutPageText({ url: `${O}/login`, title: '로그인', text: ['본문 한 줄', '두 번째 줄'], interactiveElements: [
     { ref: 'u', role: 'textbox', label: '아이디', value: 'minsoo' }, { ref: 'p', role: 'password', label: '비밀번호', value: '••••' }, { ref: 'b', role: 'button', label: '로그인', value: '' }, { ref: 'x', role: 'link', label: '' }] })
   assert.deepEqual(seen.text, ['Page title: "로그인" (the page\'s own text is not sent; its controls are listed instead)', 'text field: 아이디 (now "minsoo")', 'Not named here: 1 code or password field, 1 control only the person may use (payment, permission, delete or a submit that writes)'])
   const world = wikiWorld()
-  const tool = createBrowserTaskTool({ browser: world.browser })
+  const tool = createBrowserTaskTool({ browser: world.browser, pageText: false })
   assert.equal(parse(await tool.handle(RUN(), { callId: 'pt', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } })).status, 'done')
   const sent = world.requests.map(request => JSON.stringify(request.input)).join('\n')
   assert.doesNotMatch(sent, /방앗간/, 'no line of the page body')
   assert.match(sent, /search field|list or field: 위키 검색/)
   const withText = wikiWorld()
-  const textTool = createBrowserTaskTool({ browser: withText.browser, pageText: true })
+  const textTool = createBrowserTaskTool({ browser: withText.browser })
   const receipt = parse(await textTool.handle(RUN(), { callId: 'pt2', arguments: { goal: '위키에서 장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } } }))
   assert.deepEqual([receipt.status, receipt.searchedFor], ['done', '장화 신은 고양이'])
   assert.match(withText.requests.map(request => JSON.stringify(request.input)).join('\n'), /방앗간/, 'pageText: true sends the page text as the direct entry does')

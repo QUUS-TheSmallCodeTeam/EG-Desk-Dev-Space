@@ -148,3 +148,26 @@ test('hold, unchanged outside the harness: a bounded Claude turn with the check 
   await play(w, [NARRATION, { tool: 'egdesk_browser_observe', args: {} }, ANSWER]); await settle(w, sent)
   assert.deepEqual(bubbles(w), [NARRATION, ANSWER]); assert.deepEqual(notes(w, sent), [])
 })
+
+for (const enabled of [false, true]) test(`D26: bounded browser judgments ${enabled ? 'on' : 'off'}, scoped page evidence`, async t => {
+  const key = 'EGDESK_DRAFT_CHECK_BROWSER', before = process.env[key]
+  t.after(() => { if (before == null) delete process.env[key]; else process.env[key] = before })
+  process.env[key] = enabled ? 'on' : 'off'
+  const w = world(t, { hold: true, pages: () => ({ '/home': { text: ['쇼핑몰', 'D26-evidence-marker'], elements: [] } }), decisions: { predicates: { rel_0: 0.99, sup_0: 0.99 } } })
+  w.chat.decisionContext.draftCheck = { mode: () => 'on' }; w.chat.decisionContext.nunchi = { enabled: true }
+  const sent = await w.browserSend('이 카드에는 무엇이 있어?')
+  await until(() => typeof w.transports.at(-1)?.finish === 'function')
+  const run = w.runOf(sent), observed = await callTool(w, 'egdesk_browser_observe', { cardId: 'card' })
+  assert.ok(observed.snapshot.text.includes('쇼핑몰'))
+  assert.equal(w.chat.answerFactsEvidence(run).some(item => item.text?.includes('쇼핑몰')), enabled)
+  const cards = run.browserBinding.cards; run.browserBinding.cards = []
+  assert.ok(!w.chat.answerFactsEvidence(run).some(item => item.text?.includes('쇼핑몰')))
+  run.browserBinding.cards = cards
+  await play(w, ['카드에는 쇼핑몰이 표시되어 있습니다.']); await settle(w, sent)
+  const names = w.decisionBodies.flatMap(body => body.questions.map(q => q.name))
+  assert.equal(names.includes('rel_0'), enabled, names.join(','))
+  assert.equal(names.some(n => n.startsWith('nk_')), enabled, names.join(','))
+  const check = w.decisionBodies.find(b => b.questions.some(q => q.name === 'sup_0'))
+  assert.equal(Boolean(check), enabled, names.join(','))
+  if (enabled) assert.match(JSON.stringify(check.input), /D26-evidence-marker/)
+})
