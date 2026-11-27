@@ -517,7 +517,7 @@ export function finishedPageFacts(segments, ids = []) {
 const askName = field => compactText(field.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)
 
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], field = null, staleBy = null }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], searchedFor = null, field = null, staleBy = null }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(task.goalChanges > 0 ? { goalChanges: Math.min(task.goalChanges, 9) } : {}), // c23: how many times the person changed the request while it ran
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
@@ -528,6 +528,7 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
     ...(Array.isArray(found) && found.length ? { found: found.slice(0, MAX_FOUND_SEGMENTS) } : {}),
     // c30: with no identifier to locate a status by, the page's own first lines (same gate as found)
     ...(Array.isArray(page) && page.length && !(Array.isArray(found) && found.length) ? { page: page.slice(0, MAX_PAGE_LINES) } : {}),
+    ...(status === 'done' && searchedFor ? { searchedFor } : {}),
     ...(staleBy === 'user-hold' ? { staleBy } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
@@ -691,8 +692,9 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       case 'done': {
         task.status = 'done'; task.pause = null; store.touch(task)
         remember(task, { status: 'done' })
-        const { found, page } = pageTextInNote() === true ? finishedPageFacts(result.text, taskIdentifiers(task)) : { found: [], page: [] }
-        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page }) }
+        const allowPage = pageTextInNote() === true
+        const { found, page } = allowPage ? finishedPageFacts(result.text, taskIdentifiers(task)) : { found: [], page: [] }
+        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page, searchedFor: allowPage ? result.searchedFor : null }) }
       }
       case 'needs_user_context': {
         const candidates = result.candidates || []

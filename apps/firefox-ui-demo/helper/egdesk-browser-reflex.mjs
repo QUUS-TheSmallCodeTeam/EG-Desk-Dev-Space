@@ -991,6 +991,8 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
 
     const arrived = arrival && !pending.size && navigationLanded({ actual: snapshot.url, expected: arrival.expected, from: arrival.from, submitted: arrival.kind === 'search' }) && (!arrival.exact || new URL(snapshot.url).href === new URL(arrival.expected).href) ? arrival.kind : null
     const finalArrival = !!arrived && arrival.final === true && (arrived === 'search' || new URL(snapshot.url).href === new URL(arrival.expected).href)
+    // Expose only one unambiguous value we actually typed and the submitted form carried, never the URL or unrelated parameters.
+    const searchWords = arrived === 'search' ? [...new Set([...new URL(arrival.expected).searchParams.values()].filter(word => word && typedTexts.includes(word)))] : []
     arrival = null // proof is for the immediate landing only (loading steps above do not consume it)
     let decision
     try {
@@ -1085,7 +1087,7 @@ export async function runBrowserReflex({ cardId, goal, namedButtonRequest, value
 
     switch (decision.kind) {
       // c20: the visible text of the finished page, for the caller's code (bounded; the task locates the status next to its identifier)
-      case 'done': return finish('done', { url: snapshot.url, observationId, text: (Array.isArray(snapshot.text) ? snapshot.text : []).slice(0, 40).map(part => compactText(part, 180)) })
+      case 'done': return finish('done', { ...(searchWords.length === 1 && searchWords[0].length <= 120 ? { searchedFor: searchWords[0] } : {}), url: snapshot.url, observationId, text: (Array.isArray(snapshot.text) ? snapshot.text : []).slice(0, 40).map(part => compactText(part, 180)) })
       case 'handoff': return finish('handoff', { pageState: decision.pageState, url: snapshot.url })
       // A blocked page names its state; "no listed element moves toward the goal" on an ordinary page is plain 'blocked'.
       case 'blocked': return finish('escalated', { reason: BLOCKED_STATES.has(decision.pageState) ? decision.pageState : 'blocked', ranked: decision.ranked })

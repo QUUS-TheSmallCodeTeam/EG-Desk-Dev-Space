@@ -208,7 +208,7 @@ test('the rule: the same words for both engines; it names the browser task tool 
   assert.doesNotMatch(plain + tool, /https?:|제출/, 'no address and no submit word (the C9 note checks)')
   const note = JSON.stringify({ egdesk_browser_task: { id: 'bt_1', status: 'done', stepsDone: 2, actions: { fill: 0 }, next: 'report_to_user' } })
   const value = JSON.parse(withBrowserTaskRule(note, { toolOffered: true }))
-  assert.deepEqual(value.egdesk_browser_task, JSON.parse(note).egdesk_browser_task, 'the note is untouched'); assert.equal(value.rule, tool)
+  assert.deepEqual(value.egdesk_browser_task, JSON.parse(note).egdesk_browser_task, 'the note is untouched'); assert.match(value.rule, /Do not call a tool to confirm/); assert.doesNotMatch(value.rule, /needs_value|needs_guidance/)
   for (const other of ['not json', '[1]', '{"x":1}', null, 3]) assert.equal(withBrowserTaskRule(other), other, 'anything else is returned as it is')
   assert.deepEqual(noteWords(note), { id: 'bt_1', status: 'done', code: null }); assert.equal(noteWords('x'), null)
 })
@@ -308,17 +308,18 @@ test('the browser task tool (L8) in a Claude run continues the task the entry st
   assert.equal(new URL(w.cur.url).searchParams.get('q'), '장화 신은 고양이', 'its span came from the person\'s message (browserTaskMessage)')
   assert.ok(w.published.some(step => step.op === 'fill' && step.clientThreadId === 'ui-claude'))
   w.transports[0].finish(); await w.settled(sent)
-  // alternating with the tool on: the entry finishes by itself (fieldText) and the rule names the tool for anything that would still need it
+  // With the tool still offered, a finished entry instructs the engine to report, not confirm.
   const alt = claudeWorld(t, { site: 'duck', taskTool: true })
   const s2 = await alt.send(DUCK_MSG); await alt.settled(s2)
   assert.ok(alt.chat.collectToolSpecs('browserBounded', { browserInteraction: true, engineId: 'claude' }).specs.some(s => s.name === BROWSER_TASK_TOOL_NAME), 'offered with an interact Card')
-  assert.equal(noteOf(alt.transports[0].sent[0]).rule, browserTaskRule({ toolOffered: true }))
+  assert.match(noteOf(alt.transports[0].sent[0]).rule, /Do not call a tool to confirm/)
 })
 
 test('alternate: an uncertain first field with no literal value hands the same task to the model for a value and GET search', { timeout: 20000 }, async t => {
   const w = claudeWorld(t, { site: 'duck', hold: true, taskTool: true })
   const sent = await w.send('덕덕고 카드에서 비 올 때 쓰는 거 검색해줘'); await w.drain()
-  const { egdesk_browser_task: note } = noteOf(w.transports[0].sent[0])
+  const { egdesk_browser_task: note, rule } = noteOf(w.transports[0].sent[0])
+  assert.match(rule, /no Card read is needed/); assert.match(rule, /Otherwise ask one short question/)
   assert.ok(w.timeline.includes('decide:field_text')); assert.deepEqual(w.acts, [])
   assert.deepEqual([note.status, note.code, note.next, note.ask], ['needs_value', 'detail_needed', 'continue_with_egdesk_browser_task', { field: '검색어', kind: 'text' }])
   const out = await callTool(w, BROWSER_TASK_TOOL_NAME, { values: { [note.ask.field]: '우산' } })
