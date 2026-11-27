@@ -301,6 +301,7 @@ other work as well: sharing or adding a host alone does not complete the product
   approval or bounded standing delegation before acting; bind the target and
   account, then read back the actual destination before reporting completion.
   Do not retry an action with an unknown outcome as if it had failed.
+- [ ] 브라우저 작업 절차 기억(임시 이름): 완료·검증된 목표의 단계를 값 없이 남기고, 다음 같은 요청에서 결정 모델의 첫 후보로 쓰고, 결과로 고친다. 권한은 매번 그 대화의 사람 말에서만. 설계 제안: `apps/firefox-ui-demo/docs/BROWSER_TASK_PROCEDURE_MEMORY.md`(2026-11-27 소유자 요청, 미구현).
 
 ### P1 - Canvas and Viewport
 
