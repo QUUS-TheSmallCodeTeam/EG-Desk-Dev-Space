@@ -109,7 +109,10 @@ export const REFLEX_CONTROLS = Object.freeze({
   blocked: 'Cannot proceed: no listed element moves toward the goal.',
 })
 // Exact, single-action requests only. The model still identifies the result among the observed safe links, not by raw anchor index.
-const openRankedResult = goal => /^(?:(?:첫|두|세|네|[1-9]\d?)\s*번째|첫째|둘째|셋째|넷째)\s*(?:검색\s*)?결과(?:를)?\s*열어\s*(?:줘|주세요)[.!?]?$/u.test(goal.trim())
+function openRankedResult(goal) {
+  const m = /^(?:(첫|두|세|네|[1-9]\d?)\s*번째|(첫째|둘째|셋째|넷째))\s*(?:검색\s*)?결과(?:를)?\s*열어\s*(?:줘|주세요)[.!?]?$/u.exec(goal.trim())
+  return m ? ({ 첫: 1, 첫째: 1, 두: 2, 둘째: 2, 세: 3, 셋째: 3, 네: 4, 넷째: 4 }[m[1] || m[2]] ?? Number(m[1])) : 0
+}
 const NO_FIELD = 'no matching field'
 const MAX_ELEMENT_OPTIONS = 255 - Object.keys(REFLEX_CONTROLS).length
 // Roles from EGDeskBrowserAgentRuntimeChild.roleFor. 'password' is its own role
@@ -547,8 +550,12 @@ function fannedChoice(next, answers, fan, thresholds) {
  */
 export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, directEntry = false, popupProof = false, typedSearchOffered = false, finalArrival = false, resultOnly = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const motion = requestedMotion(goal)
+  // A bounded prefix suffices to identify a requested rank; never skip an unclassified row to reach it.
+  const links = resultOnly ? options.filter(o => o.item.kind === 'navigate').slice(0, 32) : []
+  const selectOptions = directEntry && !arrived && !motion && !resultOnly ? options.filter(o => o.item.kind === 'choice' && o.item.element.tag === 'select') : []
+  const lists = selectOptions.length <= 32 ? selectOptions : [] // larger inventories retain the original next-step path
   const fan = !motion && !resultOnly && crowdedStep(options, entrySiteLinks)
-  const choices = resultOnly ? [...options.filter(o => o.item.kind === 'navigate').map(optionChoice), { value: 'needs_user_context', description: 'The requested result cannot be identified on this page.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
+  const choices = motion ? [{ value: 'move_' + motion, description: isHistory(motion) ? 'Move one entry ' + motion + ' in this browser card history.' : 'Scroll this page ' + motion + ' as requested.' }, { value: 'blocked', description: REFLEX_CONTROLS.blocked }] : fan ? [...fan.direct.map(optionChoice), ...Object.keys(fan.groups).map(name => ({ value: name, description: STEP_GROUPS[name].description })), ...tableOptions(REFLEX_CONTROLS)]
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
     `Goal: ${goal}`, ...(isDay(today) ? [`Today: ${today}`] : []), `URL: ${snapshot.url}`,
@@ -563,11 +570,13 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   const result = await client.decide({
     input: [{ role: 'developer', content: options.some(o => o.item.kind === 'choice') ? REFLEX_RULES + '\n' + 'Pick [C] check/uncheck or list selections only for the exact choices and states explicitly requested by the person, never as an inferred prerequisite. For multiple requested choices, continue until each has the requested state.' : REFLEX_RULES }, { role: 'user', content: evidence }],
     questions: [
-      choiceQuestion('next_step', resultOnly ? 'Which observed link is the requested numbered search result? Count distinct result destinations in displayed order, not search tabs, domain filters, or repeated anchors. Choose needs_user_context if the requested result is absent or ambiguous.' : entrySiteLinks && options.some(o => o.item.askSite)
+      ...(resultOnly ? links.map((o, i) => predicateQuestion('result_' + i,
+        'On this search results page, is the observed link ' + JSON.stringify(compactText(o.item.element.label, 100)) + ' (' + new URL(o.item.element.href).hostname + ') a search result item itself? Search tabs, domain filters, menus and promotions are not result items. Judge this link only; code counts the items.')) : [choiceQuestion('next_step', entrySiteLinks && options.some(o => o.item.askSite)
         ? 'Which option moves toward the goal next? For an ordinal search result use the result destinations in page order, not the search page navigation controls. Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
-        : 'Which option moves toward the goal next?', choices),
+        : 'Which option moves toward the goal next?', choices)]),
+      ...lists.map((o, i) => predicateQuestion('select_' + i, 'Person said: ' + JSON.stringify(goal) + '. Does the person explicitly ask to set the observed list ' + JSON.stringify(compactText(o.item.element.label, 100) || 'list') + ' to ' + JSON.stringify(compactText(o.item.element.options.find(p => p.value === o.item.desired)?.label, 100)) + ' as the next browser action? Equivalent wording counts. Mention, negation, a condition, or a different option does not.')),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
-      ...(options.some(o => o.item.kind === 'choice') ? [predicateQuestion('choice_requested', 'Does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
+      ...(options.some(o => o.item.kind === 'choice' && !lists.includes(o)) ? [predicateQuestion('choice_requested', 'Does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
       ...(typedSearchOffered ? [predicateQuestion('search_only', 'Is running a search with the resolved field value the entire browser request? No if the person wants to open a result, filter, select, or take any further browser action.')] : []),
@@ -580,7 +589,31 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   const pageState = readPageState(result.answers, thresholds.pageState)
   const goalMet = readPredicate(result.answers, 'goal_met', thresholds.done)
   const asked = readChoice(result.answers, 'next_step', { minConfidence: thresholds.choice, minMargin: thresholds.margin })
-  const next = fan ? fannedChoice(asked, result.answers, fan, thresholds) : asked
+  // Missing or intermediate evidence is not a negative. Count only a fully classified prefix;
+  // for a select require one explicit yes and confident negatives for all competing values.
+  const p = (name, i) => readPredicate(result.answers, name + i, thresholds.done).probability
+  const high = n => Number.isFinite(n) && n >= Math.max(thresholds.done, thresholds.choice)
+  const low = n => Number.isFinite(n) && n <= 1 - Math.max(thresholds.done, thresholds.choice)
+  let resolved = null, certainty = 1
+  if (resultOnly) {
+    let remaining = openRankedResult(goal)
+    for (const [i, o] of links.entries()) {
+      const n = p('result_', i)
+      if (!high(n) && !low(n)) break
+      certainty = Math.min(certainty, high(n) ? n : 1 - n)
+      if (high(n) && --remaining === 0) { resolved = o; break }
+    }
+  } else if (lists.length) {
+    const scores = lists.map((_, i) => p('select_', i)), hits = scores.filter(high)
+    if (hits.length === 1 && scores.every(n => high(n) || low(n))) {
+      resolved = lists[scores.findIndex(high)]
+      certainty = Math.min(...scores.map(n => high(n) ? n : 1 - n))
+    }
+  }
+  const resolvedMargin = 2 * certainty - 1
+  const disagrees = resolved && !resultOnly && asked.state === 'accepted' && asked.value !== resolved.value
+  if (resolvedMargin < thresholds.margin || disagrees) resolved = null
+  const next = resolved ? { state: 'accepted', value: resolved.value, confidence: certainty, margin: resolvedMargin, ranked: [{ value: resolved.value, probability: certainty }] } : fan ? fannedChoice(asked, result.answers, fan, thresholds) : asked
   const out = { pageState: pageState.state, pageChecks: pageState.p,
     ...(typedSearchOffered && readPredicate(result.answers, 'search_only', thresholds.done).state === 'yes' ? { searchOnly: true } : {}),
     next: { value: next.value, confidence: next.confidence, margin: next.margin, state: next.state, ...(next.fan ? { fan: next.fan } : {}) },
@@ -588,8 +621,9 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   if (out.pageState && HANDOFF_STATES.has(out.pageState)) return { kind: 'handoff', ...out }
   if (out.pageState && BLOCKED_STATES.has(out.pageState)) return { kind: 'blocked', ...out }
   if (out.pageState !== 'content') return { kind: 'page_unclear', ...out }
+  if (disagrees) return { kind: 'user_context', ...out }
   if (resultOnly) {
-    const option = next.state === 'accepted' && !historyConflict && options.find(o => o.item.kind === 'navigate' && o.value === next.value)
+    const option = !historyConflict && resolved
     return option ? { kind: 'act', option, openOnly: true, ...out } : { kind: 'user_context', ...out, candidates: out.ranked.filter(row => options.some(o => o.item.kind === 'navigate' && o.value === row.value)).map(row => row.value) }
   }
   // A model's goal_met is not a scroll coordinate or a history landing.
@@ -614,7 +648,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   if (next.value === 'blocked') return { kind: 'blocked', ...out }
   if (next.value === 'goal_met') return { kind: 'uncertain', ...out } // chosen, but goal_met stayed below the done threshold
   const option = options.find(item => item.value === next.value)
-  if (option?.item.kind === 'choice' && readPredicate(result.answers, 'choice_requested', thresholds.done).state !== 'yes') return { kind: 'user_context', ...out }
+  if (option?.item.kind === 'choice' && (lists.includes(option) ? option !== resolved : readPredicate(result.answers, 'choice_requested', thresholds.done).state !== 'yes')) return { kind: 'user_context', ...out }
   // History conflicts with this page (the earlier choice is gone): the person decides, whatever the model picked.
   if (option && historyConflict) return { kind: 'user_context', ...out }
   return option ? { kind: 'act', option, ...(popupProof && readPredicate(result.answers, 'open_only', thresholds.done).state === 'yes' ? { openOnly: true } : {}), ...out } : { kind: 'uncertain', ...out }
