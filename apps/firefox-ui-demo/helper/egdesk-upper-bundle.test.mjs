@@ -72,7 +72,7 @@ test('the bridge applies the bundle before it reads any flag, gives every turn-j
   assert.ok(bridge.indexOf('applyUpperBundle(process.env)') > 0 && bridge.indexOf('applyUpperBundle(process.env)') < first, 'applied before the first flag read')
   assert.match(bridge, /decisionContext: \{[^]*?client: modeGatedClient\(decisionClient, \{ mode: \(\) => bridgeSettings\.decisionContext\.mode, configured: \(\) => decisionCredentials\.getApiKey\(\) !== null \}\)/)
   assert.ok(!/decisionContext: \{[^]*?\n\s+client: decisionClient,/.test(bridge.slice(bridge.indexOf('decisionContext: {'), bridge.indexOf('decisionContext: {') + 900)), 'the decisionContext does not take the bare client')
-  assert.match(bridge, /openDecisionCredentialStore\(\{ dataDir: path\.join\(dataDir, 'settings'\) \}\)/); assert.equal(DECISION_CREDENTIAL_FILE, 'egdesk-decision-credential.json')
+  assert.match(bridge, /openDecisionCredentialStore\(\{ dataDir: path\.join\(dataDir, 'settings'\)(, provider: decisionProvider[^]*?)? \}\)/); assert.equal(DECISION_CREDENTIAL_FILE, 'egdesk-decision-credential.json')
   assert.match(bridge, /getApiKey: \(\) => decisionCredentials\.getApiKey\(\)/)
 })
 

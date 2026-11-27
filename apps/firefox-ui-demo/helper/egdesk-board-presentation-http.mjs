@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { performance } from 'node:perf_hooks'
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
-import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
+import { createDecisionClient, DECISION_PROVIDERS, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
@@ -94,7 +94,7 @@ function normalizePrepare(body) {
  * synchronously on successful key/mode changes to revoke pending and active work.
  * `fetchImpl` and `now` support offline fixtures; production uses fixed defaults.
  */
-export function createBoardPresentationHttpHandler({ credentials, getMode, budget, port = 39218,
+export function createBoardPresentationHttpHandler({ credentials, getMode, budget, port = 39218, provider = 'openai',
   fetchImpl, now = () => performance.now(), calibrationLog = null, briefing = null, briefingBindings: persistedBindings = null } = {}) {
   if (typeof credentials?.getApiKey !== 'function' || typeof credentials?.savedAt !== 'function' ||
       typeof getMode !== 'function' || typeof budget?.canSpend !== 'function' ||
@@ -110,7 +110,7 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
       'egdesk:board-presentation:v1', endpoint, model, revision, key,
     ])).digest('hex')
   }
-  const client = createDecisionClient({ getApiKey: () => credentials.getApiKey(), budget, recipientForKey, fetchImpl })
+  const client = createDecisionClient({ getApiKey: () => credentials.getApiKey(), budget, recipientForKey, fetchImpl, provider })
   const pending = new Map()
   let pendingBytes = 0
   let active = null
@@ -118,7 +118,7 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
   function authority({ checkBudget = true } = {}) {
     const mode = getMode()
     if (!MODES.has(mode)) return { mode: 'off', reason: 'mode-off' }
-    const binding = recipientForKey(credentials.getApiKey(), DECISIONS_ENDPOINT, DECISION_MODEL)
+    const binding = recipientForKey(credentials.getApiKey(), DECISION_PROVIDERS[provider].endpoint, DECISION_PROVIDERS[provider].model)
     if (!binding) return { mode, reason: 'not-configured' }
     if (checkBudget && budget.canSpend() !== true) return { mode, reason: 'budget-exceeded' }
     return { mode, binding }

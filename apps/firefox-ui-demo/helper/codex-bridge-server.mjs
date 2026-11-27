@@ -41,7 +41,7 @@ import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
-import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { DECISION_PROVIDERS, createDecisionBudget, createDecisionClient, decisionProviderFromEnv, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { decisionCallLogFromEnv, recordDecisionCalls } from './egdesk-decision-call-log.mjs' // u4
 import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
@@ -274,13 +274,19 @@ const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'setting
 // month's input-token tally (and a cap, once chosen) is kept in its own 0600
 // file beside the key so a restart does not reset the local guard; the key is
 // never written there.
-const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings') })
+// Provider (temporary name EGDESK_DECISION_PROVIDER=gemini; default openai = unchanged behavior). The key store, client, send-target binding and
+// Board client all follow the same provider; each provider has its own key file. EGDESK_GEMINI_DECISION_KEY_FILE (temporary name) may point at a
+// file with a GEMINI_API_KEY=... line (default <data>/settings/gemini-decision-key.txt), used only while no Gemini key is saved in the store.
+const decisionProvider = decisionProviderFromEnv(process.env)
+const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings'), provider: decisionProvider,
+  keyFile: process.env.EGDESK_GEMINI_DECISION_KEY_FILE || path.join(dataDir, 'settings', 'gemini-decision-key.txt') })
+const decisionEndpoint = DECISION_PROVIDERS[decisionProvider].endpoint
 const decisionBudgetStore = openDecisionBudgetStore({ dataDir: path.join(dataDir, 'settings') })
 // Content-free threshold-calibration record (canon 5.3): numbers and closed words only, own 0600 file, never exported.
 const decisionCalibrationLog = openCalibrationLog({ dataDir: path.join(dataDir, 'settings') })
 const decisionBudget = createDecisionBudget({ monthlyInputTokenCap: decisionBudgetStore.state?.cap ?? null, initial: decisionBudgetStore.state,
   onChange: state => { decisionBudgetStore.save(state) } })
-const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
+const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint ?? decisionEndpoint, model)
 // One keep-alive transport for the single Decisions endpoint (never retries; see egdesk-decision-transport.mjs).
 const decisionTransport = createDecisionTransport()
 // Idle warm-up (c18; developer flag EGDESK_DECISION_WARMUP=advisory|on, default off; helper/egdesk-decision-warmup.mjs). Off: the client's fetch is the
@@ -288,7 +294,7 @@ const decisionTransport = createDecisionTransport()
 // minutes ago" is known for any kind of request, and one fixed content-free request may be sent when a composer is used or a turn starts.
 const decisionWarmupConfig = warmupConfigFromEnv(process.env)
 const decisionActivity = decisionWarmupConfig.mode === 'off' ? null : createDecisionActivity({ idleMs: decisionWarmupConfig.idleMs })
-const decisionClientBase = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey,
+const decisionClientBase = createDecisionClient({ provider: decisionProvider, getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey,
   fetchImpl: decisionActivity ? decisionActivity.wrap(decisionTransport.fetch) : decisionTransport.fetch })
 // u4: developer flag EGDESK_DECISION_CALL_LOG=on (default off): every decision call is noted as a closed row (kind, start/end ms, input and cached tokens, outcome) around THE client; off, this is the client itself
 const decisionClient = recordDecisionCalls(decisionClientBase, decisionCallLogFromEnv(process.env))
@@ -692,7 +698,7 @@ const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: 
 // L4 c23: the briefing version chain survives a bridge restart (ids, kinds, material-key hashes, versions and content hashes only; 0600 in the bridge's data dir).
 const briefingBindings = openBriefingBindings({ dataDir: path.join(dataDir, 'briefing') })
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
-const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
+const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials, provider: decisionProvider,
   getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch,
   briefingBindings,
   // Briefing flow, `on` path. Publishing goes through the real context runtime; the design / redesign / new-component text comes from the answer's own model on a
