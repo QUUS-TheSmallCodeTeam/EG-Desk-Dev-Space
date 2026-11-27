@@ -4,7 +4,8 @@ import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './eg
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
 import { grantHint } from './egdesk-browser-grant-path.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation } from './egdesk-browser-url-policy.mjs'
-import { buildReflexCandidates, decideReflexStep, withoutPageText, expectedTargetOf, navigationLanded, reflexActionArgs } from './egdesk-browser-reflex.mjs'
+import { conversationAuthority } from './egdesk-browser-authority.mjs'
+import { authorizePostSubmit, buildReflexCandidates, decideReflexStep, withoutPageText, expectedTargetOf, navigationLanded, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
 
@@ -196,8 +197,31 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     if (opaque(element.href) || opaque(snapshot.url)) return respond(true, { status: 'refused', code: 'BROWSER_CARD_OPAQUE' })
     const eligible = obs.options.some(o => o.item.element.ref === element.ref && (o.item.kind === 'choice' || o.item.kind === 'press'))
     const granted = eligible && await requested(run, event, cardId, obs)
-    const verdict = classify(snapshot, obs.options, element, granted)
     const label = short(element.label, L.labelChars)
+    // L46 (임시 이름): the same authority the entry loop has for ONE same-site, non-sensitive POST submit. The target must be the form's one write-submit as the CODE proves it (buildReflexCandidates with the
+    // person's authority), and the person's words of this turn (conversation layer, never the engine's arguments or the page) must request THIS submit, decided by the loop's predicate (authorizePostSubmit);
+    // the human message id is consumed BEFORE the press in the ledger the entry shares. Anything else (login, payment, code, bot check, no request, already spent) stays the person's step below.
+    if (kind === 'press' && element.disabled !== true && !CREDENTIAL_LABEL.test(String(element.label ?? '')) && !opaque(snapshot.url)) {
+      let authority = null
+      try { authority = conversationAuthority(run, messageOf(run)) } catch { authority = null }
+      const post = authority ? buildReflexCandidates(snapshot, { authority, askSite: true, textComboboxes: true }).options.find(o => o.item.postUrl && o.item.element.ref === element.ref) : null
+      const scope = post && scopeOf ? scopeOf(run, event, cardId) : null
+      if (post && scope?.client) {
+        const allowed = await authorizePostSubmit(authority, label, scope, undefined)
+        if (allowed === null) return respond(true, { status: 'not_done', code: 'PAGE_REF_UNKNOWN', cardId, label, written: false, next: 'read_again' })
+        if (allowed) {
+          const to = post.item.postUrl
+          const done = await call(run, event, 'egdesk_browser_click', { cardId, observationId: obs.observationId, expectedRevision: snapshot.revision, ref: element.ref, expectedTarget: expectedTargetOf(element), postcondition: { kind: 'url', value: to } }, 'post')
+          last.delete(`${run?.runId ?? run?.answerId}/${cardId}`)
+          if (done.ok && done.data?.status === 'postcondition-observed') return respond(true, { status: 'pressed', via: 'person-asked', cardId, label, outcome: 'postcondition-observed', next: 'read_again', forYouOnly: INTERNAL_NOTE })
+          const fresh = await observe(run, event, cardId, 'postlanded').catch(() => ({ error: 'PAGE_OBSERVE_FAILED' }))
+          if (!fresh.error && fresh.snapshot?.url === to && fresh.snapshot.documentId && fresh.snapshot.documentId !== snapshot.documentId) return respond(true, { status: 'pressed', via: 'person-asked', cardId, label, outcome: 'form-result-observed', next: 'read_again', forYouOnly: INTERNAL_NOTE })
+          // sent once, the outcome unverified: never press again for this message
+          return respond(true, { status: 'not_done', via: 'person-asked', cardId, label, code: done.data?.error?.code ?? 'PAGE_ACTION_FAILED', written: 'unknown', next: 'read_again', forYouOnly: INTERNAL_NOTE + ' The submit was sent once for this message: do not press it again; read the Card and say what you see.' })
+        }
+      }
+    }
+    const verdict = classify(snapshot, obs.options, element, granted)
     if (verdict.act === 'disabled') return respond(true, { status: 'refused', code: 'PAGE_CONTROL_DISABLED' })
     if (verdict.act === 'person') return respond(true, { status: 'person_step', cardId, label, why: verdict.why, written: false, forYouOnly: INTERNAL_NOTE })
     const base = { cardId, observationId: obs.observationId, expectedRevision: snapshot.revision }
