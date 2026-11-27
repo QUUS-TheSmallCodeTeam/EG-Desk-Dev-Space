@@ -123,3 +123,8 @@ src/                  = legacy Electron/Vite POC
 ```
 
 Last updated: 2026-05-18
+
+## License
+
+EG-Desk is licensed under the [Mozilla Public License 2.0](LICENSE).
+Third-party code vendored under `apps/firefox-ui-demo/overlay/resources/vendor/` keeps its own license (see the `LICENSE` file in each folder).
