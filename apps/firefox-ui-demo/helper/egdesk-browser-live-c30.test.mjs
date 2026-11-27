@@ -26,7 +26,7 @@ test('holdout2-v2: the membership request, entry then step, under 3k; its entry 
   assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
   const seen = []
   const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
-  assert.deepEqual(out.requests.map(r => [r.stage, r.sha256.slice(0, 8)]), [['entry', '05c37bf2'], ['step', '99aa414d']], 'the entry is byte-identical to c36\'s measured one')
+  assert.deepEqual(out.requests.map(r => [r.stage, r.sha256.slice(0, 8)]), [['entry', '05c37bf2'], ['step', '6f728e9e']], 'the entry is byte-identical to c36\'s measured one')
   for (const body of seen) assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
   const phase = out.phases[0]
   assert.deepEqual([phase.first.status, phase.acts.length], ['done', 0])
@@ -57,7 +57,7 @@ test('the first steps of the five families are byte-identical to steps already s
     return Object.fromEntries(out.phases.map(p => [p.id, out.requests.filter(r => r.phase === p.id && r.stage !== 'entry').map(r => r.sha256.slice(0, 8))]))
   }
   const stability = await stepShas('stability')
-  assert.deepEqual(stability, { 'stab-se': ['4dc14ab3', 'fb59df7a'], 'stab-st': ['2c251fef'], 'stab-dv': ['41a0dcff'], 'stab-inv': ['f8b2c92d'] })
+  assert.deepEqual(stability, { 'stab-se': ['1e50c0fb', 'fb59df7a'], 'stab-st': ['4b247b1e'], 'stab-dv': ['41a0dcff'], 'stab-inv': ['21b8b5cd'] })
   const rerun = await stepShas('holdout-rerun')
-  assert.deepEqual(rerun['rr-ig-list'].slice(0, 2), ['2ca3325b', 'b8ee9302'])
+  assert.deepEqual(rerun['rr-ig-list'].slice(0, 2), ['f2943bd6', '689f65cf'])
 })

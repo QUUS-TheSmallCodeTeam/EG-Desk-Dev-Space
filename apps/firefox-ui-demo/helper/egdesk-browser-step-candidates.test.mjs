@@ -340,3 +340,19 @@ test('R2-d a crowded step opens a chosen link only when the request names it: th
   const out = await decideReflexStep({ goal: '열어줘', snapshot: withoutPageText(short), options: few, client, thresholds: T })
   assert.deepEqual([out.kind, client.requests.length], ['act', 1])
 })
+
+test('L39 the step evidence puts the controls before the page text and names the text as page-state evidence; text withheld sends no second control list', async () => {
+  const el = (role, label, extra = {}) => ({ ref: 'x_' + label, role, label, tag: 'input', href: '', value: '', disabled: false, ...extra })
+  const snapshot = { url: 'https://example.test/form', revision: 1, title: 'Form', text: ['Pizza Size', 'Small', 'Medium'], interactiveElements: [el('radio', 'Small', { checked: false, value: 'unchecked', choice: { inForm: true } }), el('radio', 'Medium', { checked: false, value: 'unchecked', choice: { inForm: true } })] }
+  const evidenceOf = async snap => {
+    const client = fakeClient(() => ({ goal_met: { name: 'goal_met', type: 'predicate', probability: 0.02 } }))
+    await decideReflexStep({ goal: '중간 골라줘', snapshot: snap, options: buildReflexCandidates(snap).options, client, thresholds: T })
+    return client.requests[0].input.find(m => m.role === 'user').content
+  }
+  const on = await evidenceOf(snapshot)
+  assert.ok(on.indexOf('Controls on this page') > -1 && on.indexOf('Controls on this page') < on.indexOf('Visible text:'))
+  assert.match(on.split('Visible text:')[1], /Pizza Size/)
+  const off = await evidenceOf(withoutPageText(snapshot))
+  assert.equal(off.includes('Controls on this page'), false)
+  assert.match(off.split('Visible text:')[1], /Page title/)
+})

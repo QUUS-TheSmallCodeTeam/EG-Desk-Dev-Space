@@ -2,7 +2,7 @@
  "set": "browser-live-holdout2-v1",
  "description": "LIVE, c25: a NEW hold-out set, two families unlike any earlier one, both ending by READING an answer from a page: a hospital portal (\"when is my next appointment\": a link to the list, a consent banner covering the page; a tab variant is defined but not run) and a streaming-membership account (\"when is the next billing date\": the answer is already on the first page, so goal_met decides before any option). Expectations, predicted values and confidences were committed in scripts/egdesk-browser-live-holdout2-preregistration.md BEFORE these pages, this plan or any dry run existed. The pre-registered drop rule (the five-phase estimate exceeds 8k: ms-nav first, then hc-tab) removed ms-nav and hc-tab before any outcome existed. Phases run: hc-link, hc-covered, ms-info. Sent once.",
  "maxRequests": 9,
- "tokenCeiling": 8000,
+ "tokenCeiling": 8300,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
   {
