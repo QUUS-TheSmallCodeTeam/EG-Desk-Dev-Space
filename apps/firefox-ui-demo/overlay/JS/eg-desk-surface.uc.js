@@ -26394,6 +26394,68 @@
   }
 
 
+  // L42 (egdesk.perf.sleepHiddenCards, default off): a Browser card off the screen or shown small is put to sleep (inactive <browser>),
+  // woken when it is seen again or an Agent/Decision-model tool reaches it. See EGDeskCardSleep.sys.mjs. No UI, no text.
+  let cardSleeper = null, cardSleepTimer = 0;
+  let cardSleepModule = null; // imported only when the flag is on
+  const CardSleep = new Proxy({}, { get: (_, key) => (cardSleepModule ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCardSleep.sys.mjs'))[key] });
+  function perfSleepHiddenCardsEnabled() { try { return readSurfacePref('egdesk.perf.sleepHiddenCards') === 'on'; } catch { return false; } }
+  function cardSleepEntry(card) {
+    const browser = card._xulBrowser;
+    return { id: card.id, rect: () => browser.getBoundingClientRect(), setAwake: (awake) => { CardSleep.setBrowserAwake(browser, awake); } };
+  }
+  function cardSleepExcluded(card) {
+    try {
+      const browser = card._xulBrowser;
+      if (!card.isConnected || !browser?.isConnected || card.hidden) return true;
+      if (state.activeEntityId === card.id || state.cardFullscreen?.cardId === card.id) return true; // the card the person works in
+      const focus = document.activeElement;
+      if (focus && (focus === browser || card.contains(focus))) return true;
+      if (card._egdToolBusy > 0 || Date.now() - (card._egdToolAt || 0) < CardSleep.TOOL_GRACE_MS) return true;
+      const control = card._browserControls?.agentControlState?.();
+      if (control && (control.inFlight > 0 || control.held)) return true;
+      if (screenRecorder?.active?.()) return true;
+      return false;
+    } catch { return true; }
+  }
+  function installCardSleep() {
+    if (cardSleeper || !perfSleepHiddenCardsEnabled()) return;
+    cardSleeper = CardSleep.createCardSleeper({
+      viewport: () => ({ width: window.innerWidth, height: window.innerHeight }),
+      cards: () => Array.from(document.querySelectorAll('.egd-browser-card'))
+        .filter(card => card._xulBrowser?.isConnected && card.dataset?.codexRole !== 'auth')
+        .map(card => ({ ...cardSleepEntry(card), excluded: () => cardSleepExcluded(card) })),
+    });
+    cardSleepTimer = window.setInterval(() => { try { cardSleeper.tick(); } catch (error) { console.warn(TAG, 'card sleep tick failed', error); } }, CardSleep.TICK_MS);
+    window.addEventListener('unload', () => window.clearInterval(cardSleepTimer), { once: true });
+  }
+  // Before any tool (entry, work, observe, capture) uses a card: wake it first; keep it awake while the call runs and for a while after.
+  function guardCardForTools(card, controls) {
+    try { installCardSleep(); } catch {}
+    if (!cardSleeper) return;
+    const asyncNames = new Set(['agentSnapshot', 'agentAct', 'captureInput', 'toolObserve', 'toolAct', 'toolReconcile', 'toolNavigateChrome', 'toolHistory', 'toolAskSite']);
+    const syncNames = new Set(['toolBrowser', 'toolBinding', 'toolActivity', 'toolPrepareAgentProjection', 'toolWhenReady', 'toolSetNavigationGuard', 'toolUserHold']);
+    const touch = () => {
+      card._egdToolAt = Date.now();
+      const wasAsleep = cardSleeper.isAsleep(card.id);
+      if (wasAsleep) cardSleeper.wakeNow(cardSleepEntry(card));
+      return wasAsleep;
+    };
+    for (const name of [...asyncNames, ...syncNames]) {
+      const fn = controls[name];
+      if (typeof fn !== 'function') continue;
+      controls[name] = asyncNames.has(name)
+        ? async function(...args) {
+          card._egdToolBusy = (card._egdToolBusy || 0) + 1;
+          try {
+            if (touch()) await new Promise(resolve => window.setTimeout(resolve, 120)); // let the page start painting again
+            return await fn.apply(this, args);
+          } finally { card._egdToolBusy = Math.max(0, (card._egdToolBusy || 1) - 1); card._egdToolAt = Date.now(); }
+        }
+        : function(...args) { touch(); return fn.apply(this, args); };
+    }
+  }
+
   // L38: staggered load of restored browser cards. Cards in view load at once; the rest one per ~1.2 s so content processes do not all start together.
   function perfStaggerBrowserLoadEnabled() { try { return readSurfacePref('egdesk.perf.staggerBrowserLoad') === 'on'; } catch { return false; } }
   const restoredBrowserLoadQueue = [];
@@ -28759,6 +28821,7 @@
       agentPause: pauseAgentControl,
       agentHandBack: handBackAgentControl,
     };
+    guardCardForTools(card, card._browserControls); // L42: no-op unless egdesk.perf.sleepHiddenCards is on
     // a1 (L1): who did what on this Card. Each Agent request the Card carried out (the Decision model's reflex steps and
     // the conversation model's own tool calls alike) gets a short caption at the Card's lower edge and, while the page is
     // the one it was read on, a frame around its target: the request's observed bounds, else the last reading's bounds of
@@ -33384,6 +33447,7 @@
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);
       try { installDeskPresence(); } catch { /* optional: the Desk works the same without presence */ }
+      try { installCardSleep(); } catch { /* L42 optional: default off */ }
       try { if (readSurfacePref('egdesk.perf.flatFrost') === 'on') document.documentElement.setAttribute('egd-perf-flat-frost', ''); } catch { /* L38 optional: default off */ }
       window.__egdesk = {
         state,
