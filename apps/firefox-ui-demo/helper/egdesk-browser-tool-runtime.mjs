@@ -401,10 +401,16 @@ function validSnapshot(snapshot, cardId) {
     Number.isFinite(snapshot.viewport.devicePixelRatio) && snapshot.viewport.devicePixelRatio > 0 &&
     typeof snapshot.url === 'string' && Array.isArray(snapshot.interactiveElements) && Array.isArray(snapshot.text)
 }
+// 임시 이름: a failed observe/wait reply may carry the top-level address the parent saw (http(s) only); it is an address, never page content.
+function arrivalOf(response) {
+  const url = response?.status === 'rejected' && record(response.topLocation) ? response.topLocation.url : null
+  return typeof url === 'string' && url.length <= 2048 && /^https?:\/\//.test(url) ? { url } : null
+}
 function observationFrom(response, cardId) {
   const snapshot = response?.snapshot
   if (response?.status !== 'observed' || !validSnapshot(snapshot, cardId)) {
-    reject('BROWSER_OBSERVATION_UNAVAILABLE', 'The selected Browser did not return a verifiable observation')
+    const arrival = arrivalOf(response)
+    throw Object.assign(new Error('The selected Browser did not return a verifiable observation'), { code: 'BROWSER_OBSERVATION_UNAVAILABLE', ...(arrival ? { arrival } : {}) })
   }
   return snapshot
 }
@@ -735,7 +741,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     const reported = response?.snapshot?.wait
     let snapshot
     try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
-    catch { reject('BROWSER_WAIT_OUTCOME_UNKNOWN', 'Wait ended without a verifiable observation; observe again before acting') }
+    catch (error) { throw Object.assign(new Error('Wait ended without a verifiable observation; observe again before acting'), { code: 'BROWSER_WAIT_OUTCOME_UNKNOWN', ...(error?.arrival ? { arrival: error.arrival } : {}) }) }
     if (!record(reported) || reported.for !== args.for || !['met', 'timeout'].includes(reported.outcome) ||
         !Number.isSafeInteger(reported.elapsedMs) || reported.elapsedMs < 0) {
       reject('BROWSER_WAIT_OUTCOME_UNKNOWN', 'Wait ended without a verifiable observation; observe again before acting')
@@ -771,7 +777,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     const reported = response?.snapshot?.wait
     let snapshot
     try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
-    catch { reject('BROWSER_WAIT_OUTCOME_UNKNOWN', 'Wait ended without a verifiable observation; observe again before acting') }
+    catch (error) { throw Object.assign(new Error('Wait ended without a verifiable observation; observe again before acting'), { code: 'BROWSER_WAIT_OUTCOME_UNKNOWN', ...(error?.arrival ? { arrival: error.arrival } : {}) }) }
     if (!record(reported) || reported.for !== condition || !['met', 'timeout'].includes(reported.outcome) ||
         !Number.isSafeInteger(reported.elapsedMs) || reported.elapsedMs < 0 ||
         !Number.isSafeInteger(reported.matchCount) || reported.matchCount < 0) {
