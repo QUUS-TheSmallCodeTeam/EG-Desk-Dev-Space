@@ -27,7 +27,7 @@
 | `run-matrix.sh`, `summarize.mjs` | 반복 측정과 요약 |
 | `page-eval.mjs` | 카드 페이지에서 식 하나를 읽기 전용으로 평가(프레임 스크립트) |
 | `observe-card.mjs` | 제품 경로 관찰(`toolObserve(toolBinding())`) 저장 |
-| `record.mjs` | 화면 녹화 제어(임시 이름): `start [라벨]`, `stop`, `status`. 브리지 HTTP만 씀. 브리지에 `EGDESK_SCREEN_RECORDING=on` 필요, 파일은 `<EG-Desk 데이터>/recordings/<id>.webm`+`.json` |
+| `record.mjs` | 화면 녹화 제어(임시 이름): `start [--fps N] [--scale S] [라벨]`, `stop`, `status`. 브리지 HTTP만 씀. 브리지에 `EGDESK_SCREEN_RECORDING=on` 필요, 파일은 `<EG-Desk 데이터>/recordings/<id>.webm`+`.json` |
 | `frames.sh` | `frames.sh <webm> <출력 폴더> [fps]`: 녹화에서 프레임 PNG 추출(ffmpeg) |
 | `go-card.mjs` | 카드 자체 `navigate()`로 이동하고 도착 확인(주소창 합성 키 안 씀) |
 | `new-dm-grant.sh`, `grant-card.sh` | 새 Agent DM(엔진 선택) + 카드 'Chat 조작 허용', 카드 추가 허용 |

@@ -84,7 +84,7 @@ test('start persists node/owner/runtime first, shows the dot, paints masks, and 
   assert.equal(r.events.find(e => Array.isArray(e) && e[0] === 'json')[1], 'starting', 'the first write is before any frame')
   assert.ok(r.isDot())
   await r.runTick(); await r.runTick()
-  assert.equal(r.track.frames, 2)
+  assert.equal(r.drawn.filter(d => d[0] === 'draw').length, 2)
   const masks = r.drawn.filter(d => d[0] === 'mask')
   assert.ok(masks.length >= 2, 'the chrome field and the card field are covered')
   assert.deepEqual(r.drawn.filter(d => d[0] === 'style').at(-1), ['style', '#000000'])

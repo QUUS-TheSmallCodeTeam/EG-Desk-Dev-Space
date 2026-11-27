@@ -8,7 +8,7 @@
 //   cannot answer, is private, a sign-in card, or is zoomed is covered whole. Chrome fields of type password or marked
 //   data-sensitive / data-private are covered too. A frame whose mask cannot be built is dropped, never drawn.
 //   Boxes of the previous frame are painted again with the new ones, so a field that moved never shows for a frame.
-// - Encode: canvas.captureStream(0) + requestFrame (frames exist only when drawn) -> MediaRecorder in a supported WebM.
+// - Encode: canvas.captureStream(rate) (frames exist only when the canvas is drawn; requestFrame was ~1/s in Firefox) -> MediaRecorder in a supported WebM.
 //   No supported WebM = no recording (the start is refused; no native encoder is bundled).
 // - Files: <dir>/<id>.webm grows by timeslice segments; <dir>/<id>.json (sidecar) holds owner, runtime, node (written
 //   BEFORE the first frame), and per segment: time range, byte range, sha256, mask revision range, frames drawn/dropped.
@@ -103,8 +103,8 @@ const withTimeout = (promise, ms, setTimer, clearTimer) => new Promise((resolve,
 export function createScreenRecorder(deps) {
   const { window: win, document: doc, IOUtils, MediaRecorder, crypto } = deps
   const now = deps.now || (() => Date.now())
-  const setTimer = deps.setTimeout || globalThis.setTimeout.bind(globalThis)
-  const clearTimer = deps.clearTimeout || globalThis.clearTimeout.bind(globalThis)
+  const setTimer = deps.setTimeout || win.setTimeout.bind(win)
+  const clearTimer = deps.clearTimeout || win.clearTimeout.bind(win)
   let run = null
 
   const report = body => { try { return Promise.resolve(deps.report?.(body)).catch(() => {}) } catch { return Promise.resolve() } }
@@ -174,7 +174,6 @@ export function createScreenRecorder(deps) {
       ctx.drawImage(bitmap, 0, 0, r.canvas.width, r.canvas.height)
       ctx.fillStyle = '#000000'
       for (const box of scaleBoxes(painted, r.canvas.width / wCss, r.canvas.height / hCss, r.canvas)) ctx.fillRect(box.x, box.y, box.width, box.height)
-      r.track.requestFrame?.()
       r.framesDrawn++; r.segDrawn++
       r.segRevMax = Math.max(r.segRevMax, r.maskRevision)
     } catch (error) {
@@ -226,7 +225,9 @@ export function createScreenRecorder(deps) {
       if (await IOUtils.exists(sidecarPath) || await IOUtils.exists(filePath)) return { ok: false, reason: 'exists' }
       // Node, owner and runtime are stored before the first frame exists (contract).
       await persist(r)
-      const stream = r.canvas.captureStream(0)
+      // Measured in Firefox: captureStream(0)+requestFrame reaches the encoder about once a second; captureStream(rate) follows the canvas.
+      // The canvas only changes when a frame is drawn here, so a rate above fps costs nothing while nothing is drawn.
+      const stream = r.canvas.captureStream(Math.min(30, Math.max(8, Math.ceil(options.fps * 2))))
       r.stream = stream
       r.track = stream.getVideoTracks()[0]
       r.recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: SCREEN_RECORDING.bitsPerSecond })
