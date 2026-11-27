@@ -41,6 +41,16 @@ function fixture(t, { on = true, window = 'ok', verify } = {}) {
   return { service, commands, dataDir }
 }
 
+test('the flag defaults to off in the module itself', async t => {
+  const keep = process.env.EGDESK_SCREEN_RECORDING
+  t.after(() => { if (keep === undefined) delete process.env.EGDESK_SCREEN_RECORDING; else process.env.EGDESK_SCREEN_RECORDING = keep })
+  delete process.env.EGDESK_SCREEN_RECORDING
+  const service = createScreenRecordingService({ broadcast() {}, dataDir: '/tmp/x' })
+  assert.equal((await call(service, 'GET', '/v1/recording')).status, 404)
+  process.env.EGDESK_SCREEN_RECORDING = 'on'
+  assert.equal((await call(service, 'GET', '/v1/recording')).status, 200)
+})
+
 test('flag off: every route is refused with 404 and nothing is sent to the window', async t => {
   const f = fixture(t, { on: false })
   for (const [m, u] of [['GET', '/v1/recording'], ['POST', '/v1/recording/start'], ['POST', '/v1/recording/stop']]) assert.equal((await call(f.service, m, u, m === 'POST' ? {} : undefined)).status, 404)
@@ -107,6 +117,7 @@ test('verifyRecordingFiles: segment hashes and size are checked against the file
 })
 
 test('verifyRecordingFiles with ffprobe: a real WebM decodes; junk bytes do not', { skip: !existsSync(FFMPEG) || !existsSync(FFPROBE) }, async t => {
+  try { execFileSync(FFMPEG, ['-version'], { stdio: 'ignore' }) } catch { return t.skip('process spawn is not available here') }
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-ffp-')); t.after(() => rmSync(dir, { recursive: true, force: true }))
   execFileSync(FFMPEG, ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=4:duration=2', '-c:v', 'libvpx', '-y', path.join(dir, 'v.webm')])
   const bytes = readFileSync(path.join(dir, 'v.webm'))

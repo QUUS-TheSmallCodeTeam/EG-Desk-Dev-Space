@@ -68,7 +68,7 @@ function execFileJson(bin, args, timeout) {
  * createScreenRecordingService({ enabled, broadcast, dataDir, now?, verify?, setTimer?, clearTimer?, pid? })
  * -> { start(options), stop(), report(body), snapshot(), handle(req, res, url) }
  */
-export function createScreenRecordingService({ enabled = () => false, broadcast, dataDir, now = Date.now, verify = verifyRecordingFiles, setTimer = setTimeout, clearTimer = clearTimeout, pid = process.pid, port = 39218, startAckMs = SCREEN_RECORDING_HTTP.startAckMs, stopAckMs = SCREEN_RECORDING_HTTP.stopAckMs } = {}) {
+export function createScreenRecordingService({ enabled = () => process.env.EGDESK_SCREEN_RECORDING === 'on', broadcast, dataDir, now = Date.now, verify = verifyRecordingFiles, setTimer = setTimeout, clearTimer = clearTimeout, pid = process.pid, port = 39218, startAckMs = SCREEN_RECORDING_HTTP.startAckMs, stopAckMs = SCREEN_RECORDING_HTTP.stopAckMs } = {}) {
   if (typeof broadcast !== 'function' || !dataDir) throw new TypeError('broadcast and dataDir are required')
   const dir = path.join(dataDir, 'recordings')
   let current = null   // { id, label, state, requestedAt, info, waiters, maxTimer }

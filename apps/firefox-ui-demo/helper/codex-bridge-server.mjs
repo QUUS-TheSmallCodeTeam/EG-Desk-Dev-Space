@@ -533,8 +533,8 @@ const presenceMirror = createPresenceMirror()
 const handlePresenceMirrorHttp = createPresenceMirrorHttpHandler({ mirror: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 // Whose task a conversation's run is (another member's presence alias, told by the window; memory only). Same flag, default off.
 const runRequesters = createRunRequesters({ presence: presenceMirror })
-// Screen recording v1 (round d, L37; temporary flag name, default off): control line for the window's recorder. See helper/egdesk-screen-recording.mjs.
-const screenRecording = createScreenRecordingService({ enabled: () => process.env.EGDESK_SCREEN_RECORDING === 'on', broadcast: event => broadcast(event), dataDir, port: BRIDGE_PORT })
+// Screen recording v1 (round d, L37; temporary flag name EGDESK_SCREEN_RECORDING, read inside the module, default off): control line for the window's recorder. See helper/egdesk-screen-recording.mjs.
+const screenRecording = createScreenRecordingService({ broadcast: event => broadcast(event), dataDir, port: BRIDGE_PORT })
 const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRequesters, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 // L1 c21 (5): a second Desk window reads a run's requester here
 const handleRunRequesterReadHttp = createRunRequesterReadHttpHandler({ requesters: runRequesters, presence: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
