@@ -417,10 +417,10 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
 }
 
 // a1 ('교대' round): the step event contract. One event per page action of a browser task (the direct entry's loop and the task tool alike); lane L1 draws
-// it, lane L5 carries it through the runtime. Closed words, the element's own short name and the NAME of a typed value only: never the text typed, an
+// it, lane L5 carries it through the runtime. Closed metadata plus an optional classified preview for the live frame only; never an
 // address or page text. by: 'decision' (the objective loop decided the step) | 'model' (the conversation model chose it, the task tool's guidance).
 // status: only on the task tool's last event of a call (op 'end'). A wait is part of the step before it: no event of its own.
-export const STEP_EVENT_OPS = Object.freeze(['open', 'submit', 'press', 'fill', 'scroll', 'end'])
+export const STEP_EVENT_OPS = Object.freeze(['open', 'submit', 'press', 'fill', 'select', 'scroll', 'end'])
 const EVENT_CODE = /^[A-Za-z][A-Za-z0-9_]{2,63}$/
 export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision', status = null } = {}) {
   if (!task || !info || typeof info !== 'object') return null
@@ -431,9 +431,17 @@ export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision',
   return Object.freeze({ taskId: task.taskId, cardId: cardId ?? task.cardId ?? null, seq: Number.isSafeInteger(seq) ? seq : 0, op: info.op,
     target: typeof info.target === 'string' && info.target ? compactText(info.target, 40) : null,
     valueName: typeof info.valueName === 'string' && info.valueName ? compactText(info.valueName.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) || null : null, // a field's own option value as the name ('[F1] 검색') reads as its label
+    ...(['fill', 'select'].includes(info.op) && typeof info.displayValue === 'string' ? { displayValue: info.ok === true ? info.displayValue : '●●●' } : {}),
     ok: info.ok === true, ms: ms === null ? null : Math.max(0, Math.round(ms)), by: by === 'model' ? 'model' : 'decision',
     ...(typeof info.code === 'string' && EVENT_CODE.test(info.code) ? { code: info.code } : {}),
     ...(typeof status === 'string' && EVENT_CODE.test(status) ? { status } : {}) })
+}
+
+// Card-only live frames: never part of a step list, result, or task record.
+export async function withBrowserTaskActivity(run, task, notify, work) {
+  const signal = phase => { try { notify?.(run, { op: 'activity', phase, taskId: task.taskId, cardId: task.cardId, seq: task.eventSeq ?? 0 }) } catch {} }
+  signal('start')
+  try { return await work() } finally { signal('stop') }
 }
 
 const CANNOT = new Set(['site_not_allowed', 'site_pending', 'blocked', 'access_denied', 'error_page', 'modal_blocking', 'uncertain', 'press_needs_expected_effect', 'tool_failed', 'observe_failed', 'step_limit', 'step_rejected'])
@@ -617,6 +625,9 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
   }
 
   async function loop(run, task, hosts) {
+    return withBrowserTaskActivity(run, task, onStepEvent, () => loopSegments(run, task, hosts))
+  }
+  async function loopSegments(run, task, hosts) {
     if (!task.cardHost && typeof hosts?.[task.cardId] === 'string') task.cardHost = hosts[task.cardId].toLowerCase() // the card's host, for the brief
     let values = null // a1 fieldText: the chosen text, given to the next segment once (the loop keeps what is still to type in its state)
     // Segments of a few steps; the task's total budget survives pauses.

@@ -175,7 +175,7 @@ test('the surface draws the steps only with the bridge capability, between the m
   assert.match(surfaceSource, /const BrowserStepsView = ChromeUtils\.importESModule\('chrome:\/\/userchrome\/content\/EGDeskBrowserStepsView\.sys\.mjs'\);/);
   assert.match(surfaceSource, /function bridgeBrowserStepsField\(bridgeState\) \{\n    return \{ browserStepsUi: bridgeState\?\.capabilities\?\.browserSteps === true \};\n  \}/);
   assert.equal((surfaceSource.match(/\.\.\.bridgeSessionFields\(bridgeState\),\n\s+\.\.\.bridgeBrowserStepsField\(bridgeState\),/g) || []).length, 2, 'connect and refresh both read it');
-  assert.match(surfaceSource, /case 'browser\.task\.step': \{\n          const before = state\.codex\.browserSteps;\n          state\.codex\.browserSteps = BrowserStepsView\.addBrowserStep\(before, event\);/);
+  assert.match(surfaceSource, /BrowserStepsView\.addBrowserStep\(before, event, \{ live: true \}\);/);
   assert.match(surfaceSource, /const browserStepBlocks = codex\.browserStepsUi === true\n/);
   assert.match(surfaceSource, /formatMessageTime\(notice\.at\)\)\)\);\n            \}\n            appendBrowserSteps\(until\);\n          \};/, 'placed with the control notices, by time');
   assert.match(surfaceSource, /toolActivity: request => browserStepDisplay\.track\(request, startAgentToolActivity\(request\)\),/);
@@ -193,4 +193,14 @@ test('the surface draws the steps only with the bridge capability, between the m
   assert.match(rule('.egd-browser-step-box'), /pointer-events: none !important;/);
   assert.match(rule('.egd-browser-step-caption'), /pointer-events: none !important;/);
   assert.match(rule('.egd-browser-step-caption'), /z-index: 13;/, 'above the Card body capture layer (12)');
+});
+
+test('only a live frame has a displayed value; card working is independent of individual tool calls', async () => {
+  const { browserAgentBadge } = await import('../overlay/resources/EGDeskSurfaceState.sys.mjs');
+  const raw = step(1, { displayValue: '우산' });
+  assert.equal(View.browserStepLine(View.normalizeBrowserStep(raw, { live: true })).text, '‘검색칸’에 ‘우산’ 입력');
+  assert.equal(View.normalizeBrowserStep(raw).displayValue, undefined);
+  assert.deepEqual(browserAgentBadge({ taskWorking: true }), { mode: 'operating', label: 'Agent 작업 중', control: 'pause', recheckMs: 0 });
+  assert.equal(browserAgentBadge({ taskWorking: true, hold: true }).control, 'handback');
+  assert.equal(browserAgentBadge({ taskWorking: false }).mode, 'hidden');
 });

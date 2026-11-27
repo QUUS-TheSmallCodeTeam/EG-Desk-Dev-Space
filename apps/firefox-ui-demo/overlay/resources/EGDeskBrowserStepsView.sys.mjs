@@ -65,13 +65,15 @@ export function browserEngineName(engineId) {
   return ENGINE_NAMES[engineId] || '대화 모델';
 }
 
-/** One step as shown, or null when it cannot be placed (no room, task or order). Never keeps a typed value. */
-export function normalizeBrowserStep(raw, { ts = null, clientThreadId = null } = {}) {
+/** One step as shown, or null when it cannot be placed (no room, task or order). Only an explicitly live frame keeps a classified value. */
+export function normalizeBrowserStep(raw, { ts = null, clientThreadId = null, live = false } = {}) {
   if (!raw || typeof raw !== 'object') return null;
   const thread = id(raw.clientThreadId, 200) || id(raw.threadId, 200) || id(clientThreadId, 200);
   const taskId = id(raw.taskId);
   const seq = Number.isSafeInteger(raw.seq) && raw.seq >= 0 ? raw.seq : null;
   if (!thread || !taskId || seq === null) return null;
+  if (raw.op === 'activity') return live && id(raw.cardId) && ['start', 'stop'].includes(raw.phase)
+    ? { clientThreadId: thread, taskId, seq, cardId: raw.cardId, op: 'activity', phase: raw.phase } : null;
   const opSource = word(raw.op, 60) || word(raw.tool, 60) || word(raw.action, 60);
   const op = browserStepOp(opSource);
   const target = raw.target && typeof raw.target === 'object' ? plain(raw.target.label ?? raw.target.name, 60) : plain(raw.target, 60);
@@ -83,6 +85,7 @@ export function normalizeBrowserStep(raw, { ts = null, clientThreadId = null } =
     clientThreadId: thread, taskId, seq, op,
     ...(id(raw.cardId) ? { cardId: raw.cardId } : {}),
     ...(target ? { target } : {}),
+    ...(live && ['fill', 'select'].includes(op) && typeof raw.displayValue === 'string' ? { displayValue: plain(raw.displayValue, 40) } : {}),
     ...(valueName ? { valueName } : {}),
     ...(typeof raw.key === 'string' && /^[A-Za-z]{1,12}$/.test(raw.key) ? { key: raw.key } : {}),
     ...(Object.hasOwn(SCROLL_WORDS, raw.direction) ? { direction: raw.direction } : {}),
@@ -160,13 +163,14 @@ export function browserStepLine(step, { engineId = null } = {}) {
   }
   const who = step.by === 'model' ? engine : '결정 모델';
   const target = step.target || '';
-  const value = step.valueName ? `'${step.valueName}' ` : '';
+  const display = step.displayValue;
+  const value = typeof display === 'string' ? `‘${display}’ ` : step.valueName ? `'${step.valueName}' ` : '';
   const action = (() => {
     switch (step.op) {
-      case 'fill': return target ? `${target}에 ${value}입력` : `${value}입력`;
+      case 'fill': return target ? `${display !== undefined ? `‘${target}’` : target}에 ${value}입력` : `${value}입력`;
       case 'click': return target ? `'${target}' 누름` : '누름';
       case 'press': return `${step.key || target || 'Enter'} 키 누름`;
-      case 'select': return target ? `${target}에서 ${value}선택` : `${value}선택`;
+      case 'select': return target ? `${display !== undefined ? `‘${target}’` : target}에서 ${value}선택` : `${value}선택`;
       case 'scroll': return `${SCROLL_WORDS[step.direction] || ''} 스크롤`.trim();
       case 'navigate': return target ? `${target} 열기` : '페이지 이동';
       case 'observe': return '화면 읽음';

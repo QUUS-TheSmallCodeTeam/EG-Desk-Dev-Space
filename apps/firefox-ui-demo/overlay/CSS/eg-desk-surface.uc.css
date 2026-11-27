@@ -539,6 +539,7 @@
 .egd-browser-agent-target[hidden] { display: none !important; }
 /* a1 (L1): the frame around the target of the request the Card just carried out (percent of the observed content
    viewport, like the dot), and its caption at the Card body's lower edge, above the capture layer. Display only. */
+.egd-browser-card[data-egd-task-working] { outline: 2px solid var(--egd-primary); outline-offset: 2px; }
 .egd-browser-step-box {
   position: absolute;
   z-index: 3;

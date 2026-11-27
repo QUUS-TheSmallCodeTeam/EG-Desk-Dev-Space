@@ -831,9 +831,10 @@ const AGENT_WAIT_WORDS = Object.freeze({ load: '페이지 로드', idle: '화면
 
 /** The Card's Agent badge: 대표님's hold, then a live lease the Agent is using,
  * then a count that fades. `recheckMs` says when to look again (0: on events). */
-export function browserAgentBadge({ hold = false, permission = null, inFlight = 0, count = 0, lastActiveAt = 0,
+export function browserAgentBadge({ hold = false, taskWorking = false, permission = null, inFlight = 0, count = 0, lastActiveAt = 0,
   now = Date.now(), recentMs = BROWSER_AGENT_RECENT_MS } = {}) {
   if (hold) return { mode: 'user', label: '대표님이 직접 조작 중', control: 'handback', recheckMs: 0 };
+  if (taskWorking) return { mode: 'operating', label: 'Agent 작업 중', control: 'pause', recheckMs: 0 };
   const live = permission === 'interact' || permission === 'observe';
   if (inFlight > 0 || (live && count > 0)) {
     return { mode: 'operating', label: permission === 'observe' ? 'Agent 읽는 중' : 'Agent 조작 중',

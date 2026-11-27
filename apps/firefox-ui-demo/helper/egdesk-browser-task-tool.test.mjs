@@ -84,7 +84,7 @@ function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양�
   const snapshot = () => (cur.url === `${O}/` ? {
     url: cur.url, documentId: `d${cur.revision}`, revision: cur.revision, readyState: 'complete', title: '위키 대문', text: ['위키 대문', '오늘의 문서'],
     interactiveElements: [
-      { ref: 'q', role: 'combobox', tag: 'textarea', label: '위키 검색', href: '', value: cur.value },
+      { ref: 'q', role: 'combobox', tag: 'textarea', displayValueSafe: true, label: '위키 검색', href: '', value: cur.value },
       { ref: 'go', role: 'button', tag: 'input', label: '검색', href: '', value: '검색', nav: { type: 'submit', sensitiveRegion: false, regionLabel: '', form: { method: 'get', fields: ['textarea', 'submit'], sensitive: false, submitUrl: submitUrl() }, controls: null } },
       { ref: 'today', role: 'link', tag: 'a', label: '오늘의 문서', href: `${O}/wiki/today`, value: '' },
     ] } : {
@@ -133,7 +133,7 @@ function wikiWorld({ answerFreeText = false, fieldText = '장화 신은 고양�
   return { browser, calls, requests, get cur() { return cur } }
 }
 
-test('a1 values named by the model: the loop types the value where it belongs, submits the read-only GET search at once and finishes; step events carry no typed text', async () => {
+test('a1 values named by the model: the loop types the value where it belongs, submits the read-only GET search at once and finishes; only the live step carries the classified text', async () => {
   const world = wikiWorld()
   const events = []
   const tool = createBrowserTaskTool({ browser: world.browser, onStep: (_run, event) => events.push(event) })
@@ -143,11 +143,13 @@ test('a1 values named by the model: the loop types the value where it belongs, s
   assert.deepEqual(out.page, { title: '장화 신은 고양이 - 위키', host: 'wiki.example.test' })
   assert.ok(world.cur.url.startsWith(`${O}/w/index.php?search=`), 'the GET search ran as its own navigation')
   assert.ok(world.calls.some(call => call.name === 'egdesk_browser_navigate' && call.url.includes('search=')))
-  assert.deepEqual(events.map(event => event.op), ['fill', 'submit', 'end'])
-  assert.deepEqual(events.map(event => event.seq), [1, 2, 3])
-  assert.equal(events.at(-1).status, 'done')
-  assert.ok(events.every(event => event.by === 'decision' && event.taskId === out.taskId && event.cardId === 'card'))
-  assert.doesNotMatch(JSON.stringify(events) + JSON.stringify(out.steps), /장화 신은 고양이(?! - 위키)/, 'no typed text in the steps')
+  assert.deepEqual(events.filter(event => !event.phase).map(event => event.op), ['fill', 'submit', 'end'])
+  assert.deepEqual(events.filter(event => !event.phase).map(event => event.seq), [1, 2, 3])
+  assert.equal(events.at(-2).status, 'done')
+  assert.ok(events.filter(event => !event.phase).every(event => event.by === 'decision' && event.taskId === out.taskId && event.cardId === 'card'))
+  assert.deepEqual(events.filter(e => e.phase).map(e => e.phase), ['start', 'stop'])
+  assert.equal(events.find(e => e.op === 'fill').displayValue, '장화 신은 고양이')
+  assert.doesNotMatch(JSON.stringify(out.steps), /장화 신은 고양이(?! - 위키)/, 'no typed text in the steps')
   assert.ok(Number.isFinite(out.elapsedMs))
 })
 
@@ -381,7 +383,7 @@ test('a1 the wiring uses the runtime\'s hooks: the step events go to browserTask
   assert.equal(out.taskId, entryTask.taskId, 'the entry\'s task, continued')
   assert.deepEqual(directCalls[0].resumeState.history, ['opened [L1] 명세서'], 'from where the entry left it')
   assert.equal(directCalls[0].actor, 'decision')
-  assert.deepEqual(received.map(r => [r.event.op, r.ids.taskId, r.ids.cardId]), [['open', entryTask.taskId, 'card'], ['end', entryTask.taskId, 'card']])
+  assert.deepEqual(received.filter(r => !r.event.phase).map(r => [r.event.op, r.ids.taskId, r.ids.cardId]), [['open', entryTask.taskId, 'card'], ['end', entryTask.taskId, 'card']])
   assert.match(out.forYouOnly, /Not for the person/)
 })
 
@@ -417,4 +419,22 @@ test('a1 D33 one navigation rule: a link lands on its host and path whatever que
   await unmoved.dispatch(RUN(), { tool: 'egdesk_card_read', callId: 'd3', arguments: { mode: 'structure' } })
   const failed = parse(await unmoved.dispatch(RUN(), { tool: 'egdesk_card_press', callId: 'd4', arguments: { ref: 'about' } }))
   assert.equal(failed.status, 'not_done', 'a page that did not move is still a failure')
+})
+
+test('live field previews fail closed and choice labels match the visible selection', async () => {
+  const { optionStepDisplay } = await import('./egdesk-browser-reflex.mjs')
+  const fill = element => optionStepDisplay({ item: { kind: 'fill', element } }, '가'.repeat(42)).displayValue
+  assert.equal(fill({ label: '검색', displayValueSafe: true }), '가'.repeat(39) + '…')
+  for (const element of [{ label: '검색' }, { label: 'OTP', displayValueSafe: true }, { label: '인증 코드', displayValueSafe: true }, { label: 'Sensitive field' }, { label: '카드 번호', displayValueSafe: true }, { role: 'hidden' }]) assert.equal(fill(element), '●●●')
+  for (const [tag, role, desired, expected] of [['select','combobox','m','Medium'],['input','radio','checked','checked'],['input','checkbox','unchecked','unchecked']]) {
+    const element = { tag, role, label: '크기', options: [{ value: 'm', label: 'Medium' }], displayValueSafe: true }
+    assert.deepEqual(optionStepDisplay({ item: { kind: 'choice', element, desired } }), { op: 'select', target: '크기', displayValue: expected })
+  }
+})
+
+test('a thrown tool call releases the same card before returning failure', async () => {
+  const phases = [], browser = { directEntryEnabled: () => true, reflexScope: () => ({}), runDirectTask: async () => { throw Error('synthetic') } }
+  const tool = createBrowserTaskTool({ browser, onStep: (_, e) => phases.push([e.cardId,e.phase]) })
+  assert.equal(parse(await tool.handle(RUN(), { arguments: { goal: 'x' } })).code, 'tool_failed')
+  assert.deepEqual(phases, [['card','start'],['card','stop']])
 })

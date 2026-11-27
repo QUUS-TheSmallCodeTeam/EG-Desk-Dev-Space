@@ -8,7 +8,7 @@
 // seq, op, target, valueName, ok, ms, by: 'decision'|'model', status?, reason? }) (or emits the same frame, type
 // 'browser.task.step', through its emit callback; gate() below drops it while the flag is off). A chat event
 // 'browserTask.step' on a run is not touched here: it is stored and numbered like any chat event, and the overlay reads it.
-// The frame carries labels and the NAME of a value only (valueName), never what was typed.
+// Only the live frame may carry displayValue, classified at the observed field. Stored chat events do not consume it.
 import { BROWSER_STEP_FRAME_TYPE, normalizeBrowserStep } from '../overlay/resources/EGDeskBrowserStepsView.sys.mjs'
 
 export { BROWSER_STEP_FRAME_TYPE }
@@ -18,7 +18,7 @@ export const browserStepsUiMode = (env = process.env) => (env?.[BROWSER_STEPS_UI
 
 /** The frame the overlay receives for one step, or null when the step cannot be placed. */
 export function browserStepFrame(step, { now = Date.now } = {}) {
-  const normalized = normalizeBrowserStep(step, { ts: Number.isFinite(step?.ts) ? step.ts : now() })
+  const normalized = normalizeBrowserStep(step, { live: true, ts: Number.isFinite(step?.ts) ? step.ts : now() })
   if (!normalized) return null
   const { clientThreadId, ...rest } = normalized
   return { type: BROWSER_STEP_FRAME_TYPE, v: 1, clientThreadId, ...rest }

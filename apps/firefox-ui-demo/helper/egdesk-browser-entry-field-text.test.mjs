@@ -95,7 +95,7 @@ test('a1 the real-window flow with the entry\'s fieldText on: entry -> the searc
   const spanAsk = w.requests.find(request => request.questions.some(q => q.name === 'field_text'))
   assert.ok(spanAsk.questions[0].choices.some(option => option.value === '장화 신은 고양이'))
   assert.ok(!spanAsk.questions[0].choices.some(option => /검색/.test(option.value)), 'an action word is no part of a span')
-  assert.deepEqual(steps.map(event => [event.op, event.ok]), [['fill', true], ['submit', true]], 'the extended GET search counts as done (the page that loaded proves it)')
+  assert.deepEqual(steps.filter(event => !event.phase).map(event => [event.op, event.ok]), [['fill', true], ['submit', true]], 'the extended GET search counts as done (the page that loaded proves it)')
 })
 
 test('a1 the same with fieldText off: the entry pauses at the first step as before (detail_needed), nothing typed; and a span nobody chose leaves the same pause', async () => {
