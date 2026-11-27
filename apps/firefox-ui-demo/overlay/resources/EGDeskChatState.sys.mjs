@@ -4090,3 +4090,41 @@ export function longAnswerView(text, limits = LONG_ANSWER_LIMITS) {
   const summary = ['긴 답변이라 앞부분만 보여 드립니다', `전체 ${groupDigits(value.length)}자`, codeBlocks ? `코드 ${codeBlocks}개` : null].filter(Boolean).join(' · ');
   return { ...folded, long: true, preview, summary };
 }
+
+// L38: the Desk record (Firefox pref, hard limit about 1 MB) keeps room identity and screen state, not the conversation text.
+// A room the bridge's chat store already holds (localConversationId, history loaded) is saved without messages; the store is the
+// original and loadLocalHistoryThread() merges it back on restore. A room the store does not hold keeps its messages. If the
+// record is still over maxBytes, the largest room fields go first (messages, then other non-identity fields) so the Cards are always saved.
+export const DESK_RECORD_MAX_BYTES = 256 * 1024;
+const DESK_ROOM_IDENTITY_KEYS = new Set(['id', 'type', 'title', 'engineId', 'engineProfileId', 'localConversationId', 'conversationId', 'clientBindingId',
+  'bindingAccountKey', 'bindingState', 'retainedNativeBinding', 'projectId', 'project', 'routing', 'createdAt', 'updatedAt', 'model', 'name']);
+const utf8Bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
+export function compactDeskChatForRecord(snapshot, { bridgeBacked = false, maxBytes = DESK_RECORD_MAX_BYTES } = {}) {
+  const threads = snapshot?.chat?.threads;
+  if (!Array.isArray(threads)) return snapshot;
+  let rows = threads.map(thread => bridgeBacked && thread?.localConversationId && Array.isArray(thread.messages) && thread.messages.length
+    ? { ...thread, messages: [] } : thread);
+  const rest = { ...snapshot, chat: { ...snapshot.chat, threads: [] } };
+  const budget = Math.floor(maxBytes * 0.98) - utf8Bytes(rest);
+  let total = rows.reduce((sum, row) => sum + utf8Bytes(row) + 1, 0);
+  // Per-field sizes are measured once, then the largest go first until the record fits.
+  const shrink = (pick) => {
+    if (total <= budget) return;
+    const fields = [];
+    rows.forEach((row, index) => {
+      if (!row || typeof row !== 'object') return;
+      for (const key of Object.keys(row)) if (pick(key)) fields.push({ index, key, gain: key === 'messages' ? utf8Bytes(row[key]) - 2 : utf8Bytes(row[key]) + key.length + 4 });
+    });
+    fields.sort((a, b) => b.gain - a.gain);
+    const next = rows.map(row => row && typeof row === 'object' ? { ...row } : row);
+    for (const { index, key, gain } of fields) {
+      if (total <= budget || gain <= 12) break;
+      if (key === 'messages') next[index].messages = []; else delete next[index][key];
+      total -= gain;
+    }
+    rows = next;
+  };
+  shrink(key => key === 'messages');
+  shrink(key => !DESK_ROOM_IDENTITY_KEYS.has(key) && key !== 'messages');
+  return { ...snapshot, chat: { ...snapshot.chat, threads: rows } };
+}

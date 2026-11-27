@@ -5840,7 +5840,9 @@
   }
 
   function serializeDeskSnapshot() {
-    const snapshot = {
+    // L38: the bridge's chat store holds the text of rooms it has loaded; the Desk record keeps room identity and layout only.
+    const deskRecordBridgeBacked = state.codex.localHistoryStatus === 'ready';
+    let snapshot = {
       version: 1,
       savedAt: Date.now(),
       desk: {
@@ -5873,7 +5875,7 @@
       boardProjections: cloneJson(state.boards),
       chat: {
         threads: cloneJson(state.codex.threads.map(({ localRuns, localHistoryCoverage, ...thread }) => ({
-          ...normalizeChatRequestProjectDraft(thread), messages: ChatState.chatSpeechOnly(thread.messages || []).map(({ liveRevision, localHistory, localSeq, ...message }) => message),
+          ...normalizeChatRequestProjectDraft(thread), messages: deskRecordBridgeBacked && thread.localConversationId ? [] : ChatState.chatSpeechOnly(thread.messages || []).map(({ liveRevision, localHistory, localSeq, ...message }) => message),
         }))),
         activeThreadId: state.codex.activeThreadId,
         codexAccountKey: state.codex.codexAccountKey || null,
@@ -5883,6 +5885,7 @@
         localHistoryBackupKey: state.codex.legacyChatBackupKey || null,
       },
     };
+    snapshot = ChatState.compactDeskChatForRecord(snapshot, { bridgeBacked: deskRecordBridgeBacked });
     return typeof jointDesk !== 'undefined' && jointDesk ? jointDesk.scrub(snapshot) : snapshot;
   }
 
