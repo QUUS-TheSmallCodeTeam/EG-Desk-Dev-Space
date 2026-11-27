@@ -19,7 +19,7 @@ import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.
 //     The tool follows new/closed windows of that pid (filter refresh every second). The old fixed screen rectangle ('os', ffmpeg avfoundation) is REMOVED:
 //     it recorded whatever app was on top of that rectangle (a real incident). Mask: the tool masks boxes it receives on stdin before encoding;
 //     the window-side producer of those boxes is not connected yet, so the sidecar says mask 'none' unless a window report 'mask' arrives.
-//     Stopped by 'q' on the tool's stdin (SIGINT, then SIGKILL as fallbacks); the file is fragmented MP4. No Screen Recording permission -> a clear refusal.
+//     Stopped by 'q' on the tool's stdin (SIGINT, then SIGKILL as fallbacks); the recording is a list of MP4 parts (<id>.mp4, <id>.s2.mp4, ...; a part closes on roll every 60 s or after a writer failure, and the next frame opens a new one; sidecar 'segments' has per-part hash, bytes, time range, real error). No Screen Recording permission -> a clear refusal.
 //   'window': the Desk window's own drawSnapshot + MediaRecorder (masked, but only the main window; separate windows are not seen).
 // Flag off (default): every route answers 404 {status:'off'}. A recording existing is a record, not proof that any work succeeded.
 // After a stop the bridge re-reads the .webm itself: every segment's sha256 against the sidecar, the total size, and, when ffprobe is
@@ -42,6 +42,8 @@ export async function verifyRecordingFiles({ dir, id, ffprobe = SCREEN_RECORDING
   const result = { by: 'bridge', at: new Date().toISOString(), ok: false }
   let sidecar, bytes
   try { sidecar = JSON.parse(await readFile(sidecarPath, 'utf8')) } catch { return { ...result, error: 'sidecar-unreadable' } }
+  // Parts written by the recorder tool (round d L45): each segment is its own MP4 with its own hash, duration and loss record.
+  if (Array.isArray(sidecar.segments) && sidecar.segments.length && sidecar.segments.every(x => x && typeof x.file === 'string')) return verifySegmentFiles({ dir, sidecar, result, ffprobe, run, readFile, access })
   const file = path.join(dir, typeof sidecar.file === 'string' ? path.basename(sidecar.file) : `${id}.webm`)
   try { bytes = await readFile(file) } catch { return { ...result, error: 'file-unreadable' } }
   // A window-set capture has no segments (one file written by the recorder tool): size and decode are checked, there are no segment hashes to compare.
@@ -71,6 +73,40 @@ export async function verifyRecordingFiles({ dir, id, ffprobe = SCREEN_RECORDING
     } catch (error) { Object.assign(result, { playback: 'decode-failed', playbackNote: String(error?.message || error).slice(0, 160) }) }
   }
   result.ok = result.sizeMatches && result.segmentHashesMatch && result.playback !== 'no-frames' && result.playback !== 'decode-failed'
+  return result
+}
+
+/** Segment-file recordings: every part that the recorder closed ok must exist, match its hash and decode. Failed parts are listed as lost, not hidden. */
+async function verifySegmentFiles({ dir, sidecar, result, ffprobe, run, readFile, access }) {
+  let probe = false
+  try { await access(ffprobe); probe = true } catch {}
+  const parts = []
+  let okParts = 0, goodParts = 0, frames = 0, seconds = 0, total = 0
+  for (const seg of sidecar.segments) {
+    const part = { index: seg.index, file: path.basename(seg.file), recorderOk: seg.ok === true }
+    if (seg.ok === true) okParts++
+    let bytes = null
+    try { bytes = await readFile(path.join(dir, path.basename(seg.file))) } catch { part.missing = true }
+    if (bytes) {
+      part.bytes = bytes.length; part.sha256 = sha(bytes); total += bytes.length
+      part.hashMatches = typeof seg.sha256 === 'string' ? seg.sha256 === part.sha256 : null
+      if (probe) {
+        try {
+          const out = await run(ffprobe, ['-v', 'error', '-count_frames', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,width,height,nb_read_frames:format=duration', '-of', 'json', path.join(dir, path.basename(seg.file))], SCREEN_RECORDING_HTTP.ffprobeTimeoutMs)
+          const n = Number(out?.streams?.[0]?.nb_read_frames), d = Number(out?.format?.duration)
+          part.decodedFrames = Number.isFinite(n) ? n : null; part.durationSec = Number.isFinite(d) ? d : null
+          part.playback = Number.isFinite(n) && n > 0 ? 'decodes' : 'no-frames'
+        } catch (error) { part.playback = 'decode-failed'; part.playbackNote = String(error?.message || error).slice(0, 120) }
+      }
+    }
+    if (seg.ok === true && bytes && part.hashMatches !== false && (!probe || part.playback === 'decodes')) goodParts++
+    if (part.playback === 'decodes') { frames += part.decodedFrames; seconds += part.durationSec || 0 }
+    parts.push(part)
+  }
+  Object.assign(result, { segmentFiles: parts, segments: parts.length, okSegments: okParts, verifiedSegments: goodParts, lostSegments: parts.length - goodParts, fileBytes: total,
+    sizeMatches: total > 0, segmentHashesMatch: parts.every(p => p.missing || p.hashMatches !== false), decodedFrames: probe ? frames : null, durationSec: probe ? seconds : null,
+    playback: probe ? (goodParts > 0 ? 'decodes' : 'no-frames') : 'unchecked', ...(probe ? {} : { playbackNote: 'ffprobe-missing' }) })
+  result.ok = okParts > 0 && goodParts === okParts && result.segmentHashesMatch
   return result
 }
 
@@ -128,8 +164,16 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
     maskRevision: rec.maskRev ?? 0, maskRevisions: rec.maskRevisions ?? [],
     intervals: (rec.filterLog ?? []).map((e, i, a) => ({ fromMs: e.atMs, toMs: a[i + 1]?.atMs ?? null, windows: e.windows, windowIds: e.windowIds, maskRevision: e.maskRev })),
     owner: { kind: 'bridge-http', label: rec.label }, runtime: { app: 'EG-Desk', bridgePid: pid, firefoxPid: rec.firefoxPid ?? null }, node: { kind: 'egdesk-owned-windows', surface: 'desk' },
-    recorder: rec.recorderInfo ?? null, frames: rec.frames ?? null, fps: rec.fps, maxMs: rec.maxMs,
+    recorder: rec.recorderInfo ?? null, frames: rec.frames ?? null, ...(rec.source === DEFAULT_SOURCE ? segmentRecord(rec) : {}), fps: rec.fps, maxMs: rec.maxMs,
     startedAt: rec.startedAt ?? null, endedAt: null, stopReason: null, file: rec.fileName, state: rec.state, error: rec.error ?? null, verification: null, ...extra })
+  /** Parts of the recording: per-part file, hash, bytes, time range and, for a part that failed, the recorder's real error; gaps between parts are named. */
+  const segmentRecord = rec => {
+    const segs = rec.segments ?? []
+    const gaps = []
+    for (let i = 1; i < segs.length; i++) { const a = segs[i - 1], b = segs[i]; if (Number.isFinite(a.endMs) && Number.isFinite(b.startMs ?? b.openedAtMs)) gaps.push({ afterIndex: a.index, fromMs: a.endMs, toMs: b.startMs ?? b.openedAtMs, gapMs: (b.startMs ?? b.openedAtMs) - a.endMs }) }
+    return { segments: segs, segmentFailures: Math.max(rec.segmentFailures ?? 0, segs.filter(x => x.ok === false).length), segmentGaps: gaps, droppedFrames: rec.droppedFrames ?? null }
+  }
+  const hashSegments = async rec => { for (const seg of rec.segments ?? []) { try { const bytes = await fs.readFile(path.join(dir, seg.file)); seg.bytes = bytes.length; seg.sha256 = sha(bytes) } catch { seg.missing = true } } }
   const writeSidecar = (rec, extra) => fs.writeFile(path.join(dir, `${rec.id}.json`), JSON.stringify(sidecarOf(rec, extra), null, 1))
   const logFilter = rec => { (rec.filterLog ||= []).push({ atMs: now() - rec.startedMs, windows: rec.windowIds?.length ?? 0, windowIds: rec.windowIds ?? [], maskRev: rec.maskRev ?? 0 }); if (rec.filterLog.length > 200) rec.filterLog.splice(1, 1) }
 
@@ -138,7 +182,14 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
     if (!e || typeof e !== 'object') return
     if (e.event === 'started') { rec.recorderInfo = { video: e.video ?? null, display: e.display ?? null, fps: e.fps ?? null, scale: e.scale ?? null }; rec.windowIds = Array.isArray(e.windowIds) ? e.windowIds : []; logFilter(rec); rec.waiters.recorder?.({ started: true }) }
     else if (e.event === 'windows') { rec.windowIds = Array.isArray(e.windowIds) ? e.windowIds : []; logFilter(rec) }
-    else if (e.event === 'progress' || e.event === 'stopped') { if (Number.isFinite(e.frames)) rec.frames = { count: e.frames, masked: e.maskedFrames ?? 0 } }
+    else if (e.event === 'segment') { (rec.segments ||= []).push({ index: e.index, file: path.basename(String(e.file || '')), reason: String(e.reason || '').slice(0, 40), width: e.width ?? null, height: e.height ?? null, openedAtMs: e.atMs ?? null, ok: null }); if (rec.segments.length > 600) rec.segments.splice(1, 1) }
+    else if (e.event === 'segment-closed') {
+      const seg = (rec.segments ||= []).find(x => x.index === e.index) ?? (rec.segments.push({ index: e.index, file: path.basename(String(e.file || '')) }), rec.segments.at(-1))
+      Object.assign(seg, { frames: e.frames ?? 0, durationMs: e.durationMs ?? 0, startMs: e.startMs ?? null, endMs: e.endMs ?? null, closeReason: String(e.reason || '').slice(0, 40), ok: e.ok === true })
+      if (e.ok !== true) { seg.error = e.error && typeof e.error === 'object' ? { domain: e.error.domain ?? null, code: e.error.code ?? null, localized: String(e.error.localized ?? '').slice(0, 200), chain: Array.isArray(e.error.chain) ? e.error.chain.slice(0, 4) : [] } : { localized: String(e.detail || 'unknown').slice(0, 200) }
+        if (Array.isArray(e.recentFrames)) seg.recentFrames = e.recentFrames.slice(-10).map(x => String(x).slice(0, 120)) }
+    }
+    else if (e.event === 'progress' || e.event === 'stopped') { if (e.event === 'stopped') { rec.segmentFailures = e.segmentFailures ?? 0; rec.droppedFrames = { busy: e.droppedBusy ?? 0, order: e.droppedOrder ?? 0 } } if (Number.isFinite(e.frames)) rec.frames = { count: e.frames, masked: e.maskedFrames ?? 0 } }
     else if (e.event === 'error') { rec.recorderError = String(e.reason || 'recorder-error').slice(0, 60); rec.recorderDetail = String(e.detail || '').slice(0, 300); rec.waiters.recorder?.({ error: rec.recorderError }) }
   }
 
@@ -209,6 +260,7 @@ export function createScreenRecordingService({ enabled = () => process.env.EGDES
       if (!await waitExit(quitMs) && alive(rec.proc)) { try { rec.proc.kill('SIGINT') } catch {} }
       if (!await waitExit(intMs) && alive(rec.proc)) { try { rec.proc.kill('SIGKILL') } catch {}; rec.error ||= 'recorder-killed'; await waitExit(2000) }
       command(rec, 'indicator', { on: false })
+      await hashSegments(rec)
       if (!(rec.exit && rec.exit.code === 0)) rec.error ||= rec.recorderError || `recorder-exit-${rec.exit?.code ?? rec.exit?.signal ?? 'unknown'}`
       await writeSidecar(rec, { endedAt: new Date(now()).toISOString(), stopReason: rec.stopReason, state: rec.error ? 'failed' : 'finished', error: rec.error ?? null }).catch(() => {})
       await finish(rec, { state: rec.error ? 'failed' : 'finished', error: rec.error ?? null })

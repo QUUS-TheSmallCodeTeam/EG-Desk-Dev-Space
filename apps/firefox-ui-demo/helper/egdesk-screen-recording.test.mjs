@@ -228,3 +228,44 @@ test('mask boxes from the window are forwarded to the recorder stdin as JSON lin
   const done = sidecarOf(f, start.body.recording.id)
   assert.equal(done.mask, 'recorder-stdin'); assert.equal(done.maskRevision, 1); assert.equal(done.maskRevisions[0].boxes, 1); assert.equal(side.state, 'recording')
 })
+
+// ---- L45: a writer failure in the recorder tool becomes a new segment file, never a silent end ----
+test('segments: a failed part and its continuation are recorded with real error, hash, time range and gap; verification names the lost part', async t => {
+  const f = winFixture(t, { verify: ({ dir, id }) => verifyRecordingFiles({ dir, id, ffprobe: '/nonexistent/ffprobe' }) })
+  const start = await call(f.service, 'POST', '/v1/recording/start', {})
+  const id = start.body.recording.id, rdir = path.join(f.dataDir, 'recordings')
+  const out = f.spawned[0].child.stdout
+  const good = Buffer.from('mp4-part-two')
+  writeFileSync(path.join(rdir, `${id}.mp4`), Buffer.from('half-written part one'))
+  writeFileSync(path.join(rdir, `${id}.s2.mp4`), good)
+  const ev = o => out.emit('data', JSON.stringify(o) + '\n')
+  ev({ event: 'segment', index: 1, file: path.join(rdir, `${id}.mp4`), reason: 'start', width: 1512, height: 982, atMs: 100 })
+  ev({ event: 'segment-closed', index: 1, file: path.join(rdir, `${id}.mp4`), frames: 52, reason: 'writer-failed', durationMs: 10200, startMs: 100, endMs: 10700, ok: false,
+    error: { domain: 'AVFoundationErrorDomain', code: -11800, localized: 'The operation could not be completed', chain: [{ domain: 'NSOSStatusErrorDomain', code: -16341, localized: 'x' }] }, recentFrames: ['t=1 dt=199'] })
+  ev({ event: 'segment', index: 2, file: path.join(rdir, `${id}.s2.mp4`), reason: 'continue-after-failure', width: 1512, height: 982, atMs: 10720 })
+  ev({ event: 'segment-closed', index: 2, file: path.join(rdir, `${id}.s2.mp4`), frames: 400, reason: 'stop', durationMs: 79000, startMs: 10720, endMs: 90000, ok: true })
+  const stop = await call(f.service, 'POST', '/v1/recording/stop')
+  assert.equal(stop.status, 200)
+  const side = sidecarOf(f, id)
+  assert.equal(side.segments.length, 2); assert.equal(side.segmentFailures, 1)
+  assert.equal(side.segments[0].ok, false); assert.equal(side.segments[0].error.code, -11800); assert.equal(side.segments[0].error.chain[0].code, -16341); assert.equal(side.segments[0].file, `${id}.mp4`)
+  assert.equal(side.segments[1].ok, true); assert.equal(side.segments[1].sha256, sha(good)); assert.equal(side.segments[1].bytes, good.length); assert.equal(side.segments[1].frames, 400)
+  assert.deepEqual(side.segmentGaps, [{ afterIndex: 1, fromMs: 10700, toMs: 10720, gapMs: 20 }])
+  assert.ok(side.segments[0].sha256, 'the failed part is hashed too')
+  const v = side.verification.bridge
+  assert.equal(v.segments, 2); assert.equal(v.verifiedSegments, 1); assert.equal(v.lostSegments, 1); assert.equal(v.ok, true); assert.equal(v.segmentFiles[1].hashMatches, true)
+})
+
+test('verifyRecordingFiles with segment files: a tampered or missing ok part fails the check', async t => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-seg-')); t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const a = Buffer.from('aaaa'), b = Buffer.from('bbbb')
+  writeFileSync(path.join(dir, 'x.mp4'), a); writeFileSync(path.join(dir, 'x.s2.mp4'), b)
+  const side = { segments: [{ index: 1, file: 'x.mp4', ok: true, sha256: sha(a) }, { index: 2, file: 'x.s2.mp4', ok: true, sha256: sha(b) }] }
+  writeFileSync(path.join(dir, 'x.json'), JSON.stringify(side))
+  const opts = { dir, id: 'x', ffprobe: '/nonexistent/ffprobe' }
+  assert.equal((await verifyRecordingFiles(opts)).ok, true)
+  writeFileSync(path.join(dir, 'x.s2.mp4'), Buffer.from('bbbX'))
+  const bad = await verifyRecordingFiles(opts); assert.equal(bad.ok, false); assert.equal(bad.segmentHashesMatch, false)
+  rmSync(path.join(dir, 'x.s2.mp4'))
+  const gone = await verifyRecordingFiles(opts); assert.equal(gone.ok, false); assert.equal(gone.segmentFiles[1].missing, true)
+})

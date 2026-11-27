@@ -4,7 +4,9 @@
 // Order is the contract's: capture -> scope (filter) -> mask (CVPixelBuffer, in place) -> encode (AVAssetWriter H.264 MP4).
 // The video is the main display's size (points * scale); everything but the included windows is empty. Mask boxes are display points.
 // stdin: {"mask":[{"x":..,"y":..,"w":..,"h":..}],"rev":N} (JSON line) or "q". SIGINT/SIGTERM also stop and finalize the file.
-// stdout: one JSON line per event: started, windows, progress, mask, stopped, error. Exit 0 on a finished file, 1 on error, 2 on usage.
+// A writer that fails (round d lane L45) never ends the recording silently: the failure (domain, code, underlying error) is emitted as 'segment-closed',
+// and the next frame opens a NEW segment file (<out>, <out base>.s2.mp4, ...). Events 'segment' / 'segment-closed' list every part.
+// stdout: one JSON line per event: started, windows, progress, mask, segment, segment-closed, stopped, error. Exit 0 on a finished file, 1 on error, 2 on usage.
 import Foundation
 import ScreenCaptureKit
 import AVFoundation
@@ -49,10 +51,17 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     var writer: AVAssetWriter?
     var input: AVAssetWriterInput?
     var sessionStarted = false
+    var segIndex = 0, segFrames = 0, segW = 0, segH = 0, segOpenedAt = Date(), lastPTS = CMTime.invalid, firstPTS = CMTime.invalid
+    var pxW = 0, pxH = 0, droppedBusy = 0, droppedOrder = 0, segmentFailures = 0
+    let segGroup = DispatchGroup()
+    let segmentMaxSec = 60.0
+    var lastCloseReason = ""
+    var recent: [String] = []   // last frames (pts ms since segment start, delta ms, content rect, scale): kept with a failure so its cause can be read
     let lock = NSLock()
     var boxes: [Box] = []; var rev = 0
     var frames = 0, masked = 0, windowIds: [CGWindowID] = [], stopping = false
     var firstFrameAt: Date?
+    let startedAt = Date()
     let queue = DispatchQueue(label: "egdesk.recorder.frames")
 
     init(pid: Int32, out: URL, fps: Int, scale: Double) { self.pid = pid; outURL = out; self.fps = fps; self.scale = scale }
@@ -82,17 +91,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
         cfg.showsCursor = true; cfg.queueDepth = 5
-        do {
-            try? FileManager.default.removeItem(at: outURL)
-            let w = try AVAssetWriter(outputURL: outURL, fileType: .mp4)
-            let settings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: pxW, AVVideoHeightKey: pxH,
-                AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 3_000_000, AVVideoExpectedSourceFrameRateKey: fps, AVVideoMaxKeyFrameIntervalKey: fps * 2, AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel]]
-            let inp = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-            inp.expectsMediaDataInRealTime = true
-            w.add(inp); w.movieFragmentInterval = CMTime(value: 5, timescale: 1)
-            guard w.startWriting() else { fail("writer", w.error?.localizedDescription ?? "startWriting failed") }
-            writer = w; input = inp
-        } catch { fail("writer", error.localizedDescription) }
+        self.pxW = pxW; self.pxH = pxH
+        if let why = openSegment(width: pxW, height: pxH, reason: "start") { fail("writer", why) }
         let filter = SCContentFilter(display: d, including: wins)
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         stream = s
@@ -103,6 +103,70 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         emit(["event": "started", "pid": Int(pid), "windows": wins.count, "windowIds": windowIds.map { Int($0) }, "display": ["width": d.width, "height": d.height], "video": ["width": pxW, "height": pxH], "fps": fps, "scale": scale, "out": outURL.path])
         Task { await self.watch() }
         Task { await self.noFrameGuard() }
+    }
+
+    /// Full description of an AVFoundation error: domain, code, reason and the underlying NSError chain.
+    func describe(_ e: Error?) -> [String: Any] {
+        guard let e = e else { return ["localized": "unknown (no error object)"] }
+        var out: [String: Any] = [:]
+        var cur: NSError? = e as NSError; var chain: [[String: Any]] = []
+        while let n = cur, chain.count < 4 {
+            var item: [String: Any] = ["domain": n.domain, "code": n.code, "localized": n.localizedDescription]
+            if let r = n.localizedFailureReason { item["reason"] = r }
+            chain.append(item); cur = n.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        out["localized"] = e.localizedDescription; out["chain"] = chain
+        if let f = chain.first { out["domain"] = f["domain"]; out["code"] = f["code"] }
+        return out
+    }
+    func segmentURL(_ i: Int) -> URL {
+        if i <= 1 { return outURL }
+        let base = outURL.deletingPathExtension().lastPathComponent
+        return outURL.deletingLastPathComponent().appendingPathComponent("\(base).s\(i).mp4")
+    }
+    /// Opens a new segment file. Returns nil on success, or the reason text. Called on the frame queue (and once from start()).
+    func openSegment(width: Int, height: Int, reason: String) -> String? {
+        segIndex += 1
+        let url = segmentURL(segIndex)
+        do {
+            try? FileManager.default.removeItem(at: url)
+            let w = try AVAssetWriter(outputURL: url, fileType: .mp4)
+            let settings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height,
+                AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 3_000_000, AVVideoExpectedSourceFrameRateKey: fps, AVVideoMaxKeyFrameIntervalKey: fps * 2, AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel]]
+            let inp = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+            inp.expectsMediaDataInRealTime = true
+            w.add(inp); // NO movieFragmentInterval: with fragmented MP4 the writer failed every 10-35 s with AVFoundation -11800 / OSStatus -16341 on a
+            // live ScreenCaptureKit feed (measured round d L45: 4 failures in 100 s; 0 in 75 s without it). Crash safety comes from short segments instead.
+            guard w.startWriting() else { return "startWriting failed: \(describe(w.error))" }
+            writer = w; input = inp; sessionStarted = false; segFrames = 0; segW = width; segH = height; segOpenedAt = Date(); firstPTS = .invalid
+            emit(["event": "segment", "index": segIndex, "file": url.path, "reason": reason, "width": width, "height": height, "atMs": Int(Date().timeIntervalSince(startedAt) * 1000)])
+            return nil
+        } catch { return "\(describe(error))" }
+    }
+    /// Closes the current segment (failed or not) and reports it with the real error content.
+    func closeSegment(reason: String, error: [String: Any]? = nil) {
+        guard let w = writer, let inp = input else { return }
+        let idx = segIndex, url = segmentURL(segIndex), n = segFrames, opened = segOpenedAt, started = sessionStarted
+        let failed = w.status == .failed
+        let err: [String: Any]? = error ?? (failed ? describe(w.error) : nil)
+        writer = nil; input = nil; sessionStarted = false
+        let recentAtClose = recent; recent = []; lastCloseReason = reason
+        let lastMs = lastPTS.isValid && firstPTS.isValid ? Int((lastPTS - firstPTS).seconds * 1000) : 0
+        func report() {
+            var ev: [String: Any] = ["event": "segment-closed", "index": idx, "file": url.path, "frames": n, "reason": reason, "durationMs": lastMs,
+                "startMs": Int(opened.timeIntervalSince(startedAt) * 1000), "endMs": Int(Date().timeIntervalSince(startedAt) * 1000), "ok": err == nil && w.status != .failed]
+            if err != nil || w.status == .failed { ev["recentFrames"] = recentAtClose }
+            if let e = err { ev["error"] = e; if let l = e["localized"] { ev["detail"] = l } }
+            if w.status == .failed && err == nil { ev["error"] = describe(w.error); ev["ok"] = false }
+            emit(ev)
+        }
+        if failed || !started {
+            if !started { w.cancelWriting(); try? FileManager.default.removeItem(at: url) }
+            report(); return
+        }
+        inp.markAsFinished()
+        segGroup.enter()
+        w.finishWriting { report(); self.segGroup.leave() }
     }
 
     /// Every second: new or closed windows of the pid (dialogs) change the filter. Never adds another process's window.
@@ -134,7 +198,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     func setMask(_ list: [Box], rev r: Int) { lock.lock(); boxes = list; rev = r; lock.unlock(); emit(["event": "mask", "rev": r, "boxes": list.count]) }
 
     func stream(_ s: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sb.isValid, let inp = input, let w = writer, !stopping else { return }
+        guard type == .screen, sb.isValid, !stopping else { return }
         guard let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = arr.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
         lock.lock(); let list = boxes; lock.unlock()
@@ -151,9 +215,39 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             CVPixelBufferUnlockBaseAddress(pb, [])
         }
-        if !sessionStarted { w.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sb)); sessionStarted = true; firstFrameAt = Date() }
-        if inp.isReadyForMoreMediaData, w.status == .writing {
-            if inp.append(sb) { lock.lock(); frames += 1; if !list.isEmpty { masked += 1 }; lock.unlock() }
+        // Frame size changed (display mode switch): a writer is fixed-size, so continue in a new segment.
+        let fw = CVPixelBufferGetWidth(pb), fh = CVPixelBufferGetHeight(pb)
+        let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+        // A failed writer is reported with its real error, then the recording continues in a new segment file.
+        if let cw = writer, cw.status == .failed || cw.status == .cancelled { segmentFailures += 1; closeSegment(reason: "writer-failed") }
+        if writer != nil && (fw != segW || fh != segH) { closeSegment(reason: "frame-size-changed"); lastPTS = .invalid }
+        // A non-fragmented MP4 only becomes playable when closed, so a long recording is cut into parts of at most segmentMaxSec: a killed tool loses at most one part.
+        if writer != nil && sessionStarted && Date().timeIntervalSince(segOpenedAt) >= segmentMaxSec { closeSegment(reason: "roll") }
+        if writer == nil {
+            if let why = openSegment(width: fw, height: fh, reason: segIndex == 0 ? "start" : (lastCloseReason == "roll" ? "roll" : "continue-after-failure")) { emit(["event": "error", "reason": "writer", "detail": why, "fatal": false]); return }
+        }
+        guard let w2 = writer, let inp2 = input else { return }
+        // Timestamps must rise inside a segment.
+        if lastPTS.isValid && CMTimeCompare(pts, lastPTS) <= 0 && sessionStarted { droppedOrder += 1; return }
+        if !sessionStarted { w2.startSession(atSourceTime: pts); sessionStarted = true; firstPTS = pts; if firstFrameAt == nil { firstFrameAt = Date() } }
+        do {
+            let a = arr.first
+            let cr = (a?[.contentRect] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
+            let dr = (a?[.dirtyRects] as? [NSDictionary])?.count ?? -1
+            let sc = (a?[.scaleFactor] as? NSNumber)?.doubleValue ?? 0
+            let dt = lastPTS.isValid ? Int((pts - lastPTS).seconds * 1000) : 0
+            recent.append("t=\(firstPTS.isValid ? Int((pts - firstPTS).seconds * 1000) : 0) dt=\(dt) cr=\(cr.map { "\(Int($0.width))x\(Int($0.height))" } ?? "-") dirty=\(dr) sc=\(sc) buf=\(fw)x\(fh)")
+            if recent.count > 10 { recent.removeFirst() }
+        }
+        guard w2.status == .writing else { return }
+        if !inp2.isReadyForMoreMediaData { droppedBusy += 1; return }
+        if inp2.append(sb) {
+            lastPTS = pts
+            lock.lock(); frames += 1; segFrames += 1; if !list.isEmpty { masked += 1 }; lock.unlock()
+        } else {
+            // append refused: the writer has failed. Say why now, then continue in a new segment on the next frame.
+            segmentFailures += 1
+            closeSegment(reason: "append-failed", error: describe(w2.error))
         }
     }
 
@@ -166,13 +260,12 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         if !beginFinish() { return }
         try? await stream?.stopCapture()
         queue.sync {}
-        input?.markAsFinished()
-        if let w = writer, sessionStarted { await w.finishWriting() } else { writer?.cancelWriting(); try? FileManager.default.removeItem(at: outURL) }
+        queue.sync { closeSegment(reason: error == nil ? "stop" : "stop-error") }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in segGroup.notify(queue: .global()) { c.resume() } }
         let (f, m, r) = counts()
         if error == nil && f == 0 { emit(["event": "error", "reason": "no-frames", "detail": "stopped before any frame was written", "frames": 0]); exit(1) }
         if let e = error { emit(["event": "error", "reason": e, "detail": detail, "frames": f]); exit(1) }
-        if writer?.status == .failed { emit(["event": "error", "reason": "writer", "detail": writer?.error?.localizedDescription ?? "", "frames": f]); exit(1) }
-        emit(["event": "stopped", "frames": f, "maskedFrames": m, "maskRev": r, "out": outURL.path]); exit(0)
+        emit(["event": "stopped", "segments": segIndex, "segmentFailures": segmentFailures, "droppedBusy": droppedBusy, "droppedOrder": droppedOrder, "frames": f, "maskedFrames": m, "maskRev": r, "out": outURL.path]); exit(0)
     }
 }
 
