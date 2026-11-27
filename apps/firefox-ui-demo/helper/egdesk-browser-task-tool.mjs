@@ -260,7 +260,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const remaining = maxSteps - task.steps
       if (remaining <= 0) { result = { outcome: 'max_steps', reason: 'step_limit' }; break }
       const out = await browser.runDirectTask(run, { cardId: task.cardId, goal: task.goal, ...(Object.keys(values).length ? { values } : {}), userContext: task.userContext, resumeState: task.state,
-        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, actor: 'decision', pageText: pageText === true })
+        maxSteps: Math.min(BROWSER_TASK_LIMITS.segment, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: observer, onPage, today: localDay(now()), textComboboxes: true, valuesFirst: true, actor: 'decision', pageText: pageText === true, spanTexts: [message(run), task.goal].filter(Boolean) })
       values = {}
       task.state = record(out?.state) ? out.state : task.state
       task.steps += Array.isArray(out?.steps) ? out.steps.length : 0

@@ -3,6 +3,7 @@ import { sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { labelKey, priorFacts, recordedChoice, safePath as safePathOf } from './egdesk-browser-task-memory.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
+import { candidateSpans, pickFieldText } from './egdesk-browser-field-text.mjs'
 
 // Browser reflex: the decision model drives one Browser Card toward a short
 // goal; the reasoning model is only needed for free text.
@@ -248,7 +249,8 @@ export function contentBelow(snapshot) {
 
 // u7 (D19): a search box that announces itself as a combobox (role=combobox on a <textarea>, as Google's does) is still a text field; a <select> is not. Only the caller that asks gets it (the page tools);
 // the objective loop keeps treating every combobox as the person's.
-const isTextCombobox = element => String(element.role || '') === 'combobox' && String(element.tag || '').toLowerCase() === 'textarea'
+// a2 (Main 17:3x, real DuckDuckGo card): its search box is an <input role="combobox"> (an autocomplete text input), not a <textarea>; it is a text field too. A <select> never is.
+const isTextCombobox = element => String(element.role || '') === 'combobox' && ['textarea', 'input'].includes(String(element.tag || '').toLowerCase())
 function elementKind(element, { textComboboxes = false } = {}) {
   const role = String(element.role || '')
   if (role === 'link') return httpUrl(element.href) ? 'navigate' : 'press'
@@ -604,11 +606,14 @@ const hostOfUrl = url => { try { return new URL(url).host.toLowerCase() } catch 
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
   thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null, today = null,
-  textComboboxes = false, onPage = null, valuesFirst = false, pageText = pageTextOn() } = {}) {
+  textComboboxes = null, onPage = null, valuesFirst = false, pageText = pageTextOn(), spanTexts = null } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
   const steps = []
+  // a2: a text combobox is a text field when the caller asks, and by default while the page text is withheld (the a1 default); the legacy mode keeps the earlier rule
+  const comboboxFields = textComboboxes === null ? pageText === false : textComboboxes === true
+  const spanTried = new Set() // a2: the fields the person's message was already offered for in this run
   const usedRecorded = new Set() // paths whose recorded choice code already applied in this run
   if (!client) return { outcome: 'fallback', reason: 'not_configured', steps }
   const thresholds = decisionThresholds(overrides)
@@ -765,7 +770,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     steps.push(entry)
     const seen = pageText === false ? withoutPageText(snapshot) : snapshot // a1: what the step's judgments read (the page's own text only when it may be sent)
     // a1: the page this step is on (its title and host), for the task tool only (onPage: a separate observer, so onStep's sequence is as it was)
-    const { options, excluded, personOnly, withheld, offSite } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+    const { options, excluded, personOnly, withheld, offSite } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(comboboxFields ? { textComboboxes: true } : {}) })
     try { onPage?.({ step, title: compactText(typeof snapshot.title === 'string' ? snapshot.title : '', 120) || null, host: hostOfUrl(snapshot.url), offSite: offSite.map(link => ({ label: compactText(link.label, 60), href: link.href })) }) } catch { /* an observer never affects the loop */ }
     entry.excluded = excluded
     // Code rule (R3/R5): nothing on this page may be chosen and something was withheld as the person's own control (submit, payment,
@@ -785,6 +790,24 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       continue
     }
     const fields = options.filter(option => option.item.kind === 'fill')
+    // a2 (Main 17:3x; the real DuckDuckGo card: 47 options, the step's choice undecided at 0.52): the page has exactly one text field, it is empty, nothing is given to type,
+    // and the caller gave the texts to cut spans from (spanTexts: the person's message, the goal). The decision model CHOOSES the field's text among those spans first (one
+    // request, + none); a chosen text is typed before the step's choice (values first), so a search never waits on a choice among dozens of controls.
+    if (Array.isArray(spanTexts) && !pending.size && fields.length === 1 && !String(fields[0].item.element.value ?? '').trim() && !attemptedRefs.has(fieldRef(fields[0]))) {
+      const only = fields[0], key = `${safePathOf(snapshot.url)}|${only.value}`
+      if (!spanTried.has(key)) {
+        spanTried.add(key)
+        const spans = candidateSpans(spanTexts.filter(text => typeof text === 'string'))
+        if (spans.length) {
+          let picked = null
+          try { picked = await pickFieldText({ client, goal, field: compactText(only.item.element.label, 80) || String(only.value), host: (() => { try { return new URL(snapshot.url).host } catch { return null } })(), spans, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch }); warmed = true }
+          catch (error) { if (signal?.aborted) return finish('aborted'); picked = null }
+          if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
+          entry.spanFirst = { asked: spans.length, chosen: Boolean(picked?.text), confidence: picked?.confidence ?? null }
+          if (picked?.text) { pending.set(only.value, picked.text); entry.rule = 'span_first' }
+        }
+      }
+    }
     // a1 (opt-in, the task tool): the values the caller gave are typed where they belong BEFORE the step's choice (one mapping request with the page-state predicates;
     // an exact field name needs none), so typing a given value never waits on the choice picking its field
     if (valuesFirst === true && pending.size && fields.length) {
