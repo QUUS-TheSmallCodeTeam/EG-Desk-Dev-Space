@@ -67,3 +67,23 @@ test('the surface adds the top-level address only to a rejected observe reply, h
   const block = src.slice(at, at + 420)
   assert.match(block, /currentURI\?\.spec/); assert.match(block, /\^https\?:/); assert.match(block, /rejected\.topLocation = \{ url: spec \}/)
 })
+
+// L43: the arrived document is looked at first; an unobservable one settles the submit without the 5 s load wait
+test('POST submit to an unobservable document settles without the load wait', async () => {
+  const { result, calls } = await replay('m-fast', POST)
+  assert.equal(result.outcome, 'done'); assert.equal(result.arrivalUnobserved, true)
+  assert.equal(calls.some(n => n.endsWith('_wait')), false)
+})
+
+test('POST submit with no arrival address still falls back to the load wait', async () => {
+  const { calls } = await replay('m-wait', null)
+  assert.equal(calls.some(n => n.endsWith('_wait')), true)
+})
+
+test('the surface refuses an unobservable process at once and retries once when the document was replaced', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const src = await readFile(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
+  assert.match(src, /cannot be observed \[privileged\]/)
+  assert.match(src, /const replaced = \(\) ?=>|const replaced = \(\(\) =>/)
+  assert.match(src, /error\?\.name === 'NotSupportedError' \|\| replaced/)
+})

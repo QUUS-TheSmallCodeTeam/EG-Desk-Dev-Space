@@ -1230,6 +1230,17 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
           if (result.held) return heldResult()
           if (result.ok && result.result?.status === 'postcondition-observed') return finish('done', { url: to })
           let unobserved = null // 임시 이름: top-level address the parent reported when the arrived document could not be observed (e.g. the JSON viewer)
+          // L43: look at the arrived document first. When the parent reports the top-level address because the document cannot be observed (JSON viewer, privileged
+          // page), that settles the submit at once instead of after a 5 s load wait; a document that is observable but still the form (or mid-load) falls through to the wait.
+          try {
+            const first = await callTool('egdesk_browser_observe', { cardId })
+            if (!signal?.aborted && isDecisionCurrent() && first.snapshot?.url === to && first.snapshot.documentId && first.snapshot.documentId !== snapshot.documentId) return finish('done', { url: to })
+          } catch (err) {
+            if (isBrowserUserHold(err)) return heldResult()
+            unobserved = err?.arrival?.url ?? null
+            if (!signal?.aborted && isDecisionCurrent?.() && postArrived(unobserved, to, snapshot.url)) return finish('done', { url: to, arrivalUnobserved: true })
+            unobserved = null
+          }
           try {
             await callTool('egdesk_browser_wait', { cardId, for:'load', timeoutMs:5000 })
             const landed = await callTool('egdesk_browser_observe', { cardId })
