@@ -13,6 +13,8 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 // The OS keychain is not used yet: EG-Desk has no keychain write path today.
 
 export const DECISION_CREDENTIAL_FILE = 'egdesk-decision-credential.json'
+// The Gemini (Google AI Studio) key is a separate file: switching provider never reads or overwrites the other provider's key.
+export const GEMINI_DECISION_CREDENTIAL_FILE = 'egdesk-decision-credential-gemini.json'
 export const DECISION_CREDENTIAL_VERSION = 1
 export const MAX_DECISION_CREDENTIAL_BYTES = 4096
 // Printable ASCII without spaces, 20 to 512 characters (OpenAI project keys
@@ -56,12 +58,13 @@ function readPrivateFile(file) {
   } finally { closeSync(fd) }
 }
 
-function parseCredential(text) {
+const DEFAULT_FILE = DECISION_CREDENTIAL_FILE
+function parseCredential(text, provider = 'openai') {
   let data
   try { data = JSON.parse(text) } catch { throw new CredentialContentError('not JSON') }
   if (!record(data)) throw new CredentialContentError('not an object')
   if (Number.isSafeInteger(data.version) && data.version > DECISION_CREDENTIAL_VERSION) return { unsupported: true }
-  if (data.version !== DECISION_CREDENTIAL_VERSION || data.provider !== 'openai' || !validDecisionApiKey(data.apiKey)) {
+  if (data.version !== DECISION_CREDENTIAL_VERSION || data.provider !== provider || !validDecisionApiKey(data.apiKey)) {
     throw new CredentialContentError('not a decision credential')
   }
   return { apiKey: data.apiKey, savedAt: Number.isSafeInteger(data.savedAt) ? data.savedAt : null }
@@ -77,7 +80,20 @@ function parseCredential(text) {
  *   for a value that is not a plausible key (never echoed).
  * store.clear() → true when no key file remains.
  */
-export function openDecisionCredentialStore({ dataDir, log = defaultLog, now = Date.now } = {}) {
+// keyFile (optional, Gemini only; temporary env name EGDESK_GEMINI_DECISION_KEY_FILE): a private file with one GEMINI_API_KEY=... line,
+// read only while the store holds no saved key. Never written or removed by the store; the key stays out of every message.
+function readKeyFileLine(keyFile) {
+  try {
+    const read = readPrivateFile(keyFile)
+    if (read.missing) return null
+    const m = /^\s*(?:GEMINI_API_KEY|GOOGLE_API_KEY)=(\S+)\s*$/m.exec(read.text)
+    return m && validDecisionApiKey(m[1]) ? { apiKey: m[1], savedAt: Math.floor(lstatSync(keyFile).mtimeMs) } : null
+  } catch { return null }
+}
+
+export function openDecisionCredentialStore({ dataDir, log = defaultLog, now = Date.now, provider = 'openai', keyFile = null } = {}) {
+  if (provider !== 'openai' && provider !== 'gemini') throw new TypeError('provider must be openai or gemini')
+  const DECISION_CREDENTIAL_FILE = provider === 'gemini' ? GEMINI_DECISION_CREDENTIAL_FILE : DEFAULT_FILE
   const say = message => { try { log(message) } catch {} }
   let status = 'unavailable', writable = false, dir = null, file = null
   let apiKey = null, savedAt = null
@@ -97,7 +113,7 @@ export function openDecisionCredentialStore({ dataDir, log = defaultLog, now = D
       const read = readPrivateFile(file)
       if (read.missing) { status = 'missing'; writable = true }
       else {
-        const parsed = parseCredential(read.text)
+        const parsed = parseCredential(read.text, provider)
         if (parsed.unsupported) {
           status = 'unsupported'
           say(`${DECISION_CREDENTIAL_FILE} is from a newer EG-Desk; it is left as is and the decision model stays off`)
@@ -124,8 +140,13 @@ export function openDecisionCredentialStore({ dataDir, log = defaultLog, now = D
     }
   }
 
+  if (apiKey === null && provider === 'gemini' && typeof keyFile === 'string' && path.isAbsolute(keyFile)) {
+    const fromFile = readKeyFileLine(keyFile)
+    if (fromFile) { ({ apiKey, savedAt } = fromFile); status = 'configured' }
+  }
+
   function write(next) {
-    const body = `${JSON.stringify({ version: DECISION_CREDENTIAL_VERSION, provider: 'openai', apiKey: next.apiKey, savedAt: next.savedAt }, null, 2)}\n`
+    const body = `${JSON.stringify({ version: DECISION_CREDENTIAL_VERSION, provider, apiKey: next.apiKey, savedAt: next.savedAt }, null, 2)}\n`
     const tmp = path.join(dir, `${DECISION_CREDENTIAL_FILE}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`)
     let fd = null
     try {

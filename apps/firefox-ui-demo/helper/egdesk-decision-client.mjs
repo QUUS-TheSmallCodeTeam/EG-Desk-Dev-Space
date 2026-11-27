@@ -17,6 +17,7 @@
 
 import { Buffer } from 'node:buffer'
 import { createHmac } from 'node:crypto'
+import { GEMINI_DECISIONS_ENDPOINT, GEMINI_DECISION_MODEL, classifyGeminiFailure, geminiBlockReason, geminiRequest, geminiToCommon } from './egdesk-decision-gemini.mjs'
 
 // Private, domain-separated recipient identity. Never a renderer DTO, cache key or request field.
 // Bind the grant to the actual key revision, endpoint and model, not a displayed key suffix.
@@ -27,6 +28,13 @@ export function decisionTopicRecipient(key, savedAt, endpoint = DECISIONS_ENDPOI
 
 export const DECISIONS_ENDPOINT = 'https://api.openai.com/v1/decisions'
 export const DECISION_MODEL = 'gpt-6-luna'
+// Decision model providers (temporary name EGDESK_DECISION_PROVIDER, default openai). The caller-facing shapes are the
+// same for both; the Gemini wire translation lives in egdesk-decision-gemini.mjs.
+export const DECISION_PROVIDERS = Object.freeze({
+  openai: Object.freeze({ endpoint: DECISIONS_ENDPOINT, model: DECISION_MODEL }),
+  gemini: Object.freeze({ endpoint: GEMINI_DECISIONS_ENDPOINT, model: GEMINI_DECISION_MODEL }),
+})
+export const decisionProviderFromEnv = (env = process.env) => (String(env?.EGDESK_DECISION_PROVIDER ?? '').trim().toLowerCase() === 'gemini' ? 'gemini' : 'openai')
 // Published request limits (create decision reference, 2026-11).
 export const DECISION_LIMITS = Object.freeze({
   questions: 400, choicesMin: 2, choicesMax: 255, levelsMin: 2, levelsMax: 10,
@@ -292,9 +300,11 @@ async function readBody(response, signal) {
  *   → { answers, model, usage, latencyMs }   throws DecisionError
  * client.verifyKey(apiKey, { timeoutMs?, signal? }) → { status: 'verified' | 'not_verified' | DecisionError code, retryable }
  */
-export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, endpoint = DECISIONS_ENDPOINT, model = DECISION_MODEL,
-  timeoutMs = DEFAULT_DECISION_TIMEOUT_MS, clock = () => performance.now(), budget = null, recipientForKey = null } = {}) {
+export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, provider = 'openai', endpoint = (DECISION_PROVIDERS[provider] ?? DECISION_PROVIDERS.openai).endpoint,
+  model = (DECISION_PROVIDERS[provider] ?? DECISION_PROVIDERS.openai).model, timeoutMs = DEFAULT_DECISION_TIMEOUT_MS, clock = () => performance.now(), budget = null, recipientForKey = null } = {}) {
   if (typeof getApiKey !== 'function') throw new TypeError('getApiKey must be a function')
+  if (!Object.hasOwn(DECISION_PROVIDERS, provider)) throw new TypeError('provider must be openai or gemini')
+  const gemini = provider === 'gemini'
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
 
   async function post(apiKey, { input, questions, promptCacheKey = null, safetyIdentifier = null }, { timeoutMs: limit = timeoutMs, signal, authorizeDispatch, onDispatch, strictChoiceResponse = false } = {}) {
@@ -303,7 +313,8 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
       throw new DecisionError('invalid_request', 'A reviewed selection needs exactly one choice question')
     }
     if (budget && !budget.canSpend()) throw new DecisionError('budget_exceeded', 'The local decision budget for this month is used up')
-    const body = { model, input, questions, ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    const geminiOut = gemini ? geminiRequest({ input, questions }) : null
+    const body = gemini ? { model, ...geminiOut.body } : { model, input, questions, ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
       ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}) }
     // Cancelled before sending: no request leaves the machine.
     if (signal?.aborted) throw new DecisionError('aborted', 'The decision request was cancelled')
@@ -339,7 +350,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
       dispatched = true
       try { onDispatch?.() } catch { /* an observer never changes the request */ }
       response = await fetchImpl(endpoint, { method: 'POST', redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: wire })
+        headers: gemini ? { 'content-type': 'application/json', 'x-goog-api-key': apiKey } : { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: wire })
       // A server can send headers promptly and then stall the body. Keep the
       // timeout and the caller's cancellation wired until the response is read.
       try { parsed = await readBody(response, controller.signal) }
@@ -348,7 +359,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
       if (denied) throw new DecisionError('evidence_unavailable', 'The scoped history transfer is no longer authorized')
       // Sent, but no usage came back (timeout, or a cancel after dispatch): the provider
       // may have processed and billed it, so the local guard counts a labelled estimate.
-      if (dispatched && (timedOut || signal?.aborted)) { try { budget?.recordEstimate?.(estimateInputTokens(wire)) } catch {} }
+      if (dispatched && (timedOut || signal?.aborted)) { try { budget?.recordEstimate?.(estimateInputTokens(gemini ? JSON.stringify({ input, questions }) : wire)) } catch {} }
       if (timedOut) throw new DecisionError('timeout', 'The decision model did not answer in time', { retryable: true, dispatched })
       if (signal?.aborted) throw new DecisionError('aborted', 'The decision request was cancelled')
       if (error instanceof DecisionError) throw error
@@ -358,8 +369,18 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
       signal?.removeEventListener?.('abort', onAbort)
     }
     if (!response.ok) {
-      const failure = classifyDecisionFailure(response.status, parsed)
+      const failure = (gemini ? classifyGeminiFailure : classifyDecisionFailure)(response.status, parsed)
       throw new DecisionError(failure.code, `Decision request failed (${failure.code})`, { status: response.status, retryable: failure.retryable, apiCode: failure.apiCode })
+    }
+    if (gemini) {
+      // A blocked prompt (safety, prohibited content, ...) returns no answers and nothing was evaluated: a closed failure.
+      const blocked = geminiBlockReason(parsed)
+      if (blocked) {
+        budget?.record(normalizeUsage(geminiToCommon(parsed, [], new Map()).usage))
+        throw new DecisionError('invalid_request', 'The decision model refused the input (prompt blocked)', { status: response.status, apiCode: `blocked_${blocked}` })
+      }
+      if (!record(parsed) || !record(parsed.answers)) throw new DecisionError('bad_response', 'Decision response has no answers')
+      parsed = geminiToCommon(parsed, questions, geminiOut.plan)
     }
     if (strictChoiceResponse === true && !validSingleChoiceResponse(parsed, questions[0])) {
       // The paid HTTP exchange already happened, even when its selection is unusable.
@@ -372,7 +393,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
   }
 
   return Object.freeze({
-    model,
+    model, provider, endpoint,
     async decide(request = {}) {
       const apiKey = await getApiKey()
       if (!nonEmptyText(apiKey)) throw new DecisionError('not_configured', 'No decision model API key is saved')
