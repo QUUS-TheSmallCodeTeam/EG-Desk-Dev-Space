@@ -87,3 +87,45 @@ test('the surface refuses an unobservable process at once and retries once when 
   assert.match(src, /const replaced = \(\) ?=>|const replaced = \(\(\) =>/)
   assert.match(src, /error\?\.name === 'NotSupportedError' \|\| replaced/)
 })
+
+// L50: the press itself throws (reply lost while the JSON viewer replaces the document); the step line must not tell a failure when the navigation facts prove arrival
+function replayThrowing({ id, arrival, observeAfter, steps = [] }) {
+  const calls = [], observes = []
+  const callTool = async name => {
+    calls.push(name)
+    if (name.endsWith('_observe')) {
+      if (!observes.length) { observes.push(1); return { observationId: 'o', snapshot: snap } }
+      if (observeAfter) return { observationId: 'o2', snapshot: { ...snap, url: observeAfter.url, documentId: observeAfter.documentId } }
+      throw Object.assign(new Error('unobservable'), { code: 'BROWSER_OBSERVATION_UNAVAILABLE', ...(arrival ? { arrival: { url: arrival } } : {}) })
+    }
+    if (name.endsWith('_click')) throw Object.assign(new Error('lost'), { code: 'BROWSER_UI_TIMEOUT' })
+    if (name.endsWith('_wait')) return { status: 'waited' }
+    throw new Error('unexpected ' + name)
+  }
+  return runBrowserReflex({ authority: conversationAuthority({ ...run, requestId: id }, 'Fill the name and submit the order'), cardId: 'c', goal: 'Fill the name and submit the order',
+    textComboboxes: true, callTool, client, isDecisionCurrent: () => true, maxSteps: 1, onStep: step => steps.push(step) }).then(result => ({ result, calls, steps }))
+}
+const submitSteps = steps => steps.filter(step => step.op === 'submit')
+
+test('L50 JSON viewer landing after a thrown press: done at once, no load wait, step line is a success', async () => {
+  const { result, calls, steps } = await replayThrowing({ id: 'm-l50-json', arrival: POST })
+  assert.equal(result.outcome, 'done'); assert.equal(result.arrivalUnobserved, true)
+  assert.equal(calls.filter(n => n.endsWith('_wait')).length, 0); assert.equal(calls.filter(n => n.endsWith('_click')).length, 1)
+  const sub = submitSteps(steps); assert.equal(sub.length, 1); assert.equal(sub[0].ok, true); assert.equal(sub[0].failed, undefined)
+})
+
+test('L50 ordinary HTML landing after a thrown press: done, step line is a success', async () => {
+  const { result, calls, steps } = await replayThrowing({ id: 'm-l50-html', observeAfter: { url: POST, documentId: 'd2' } })
+  assert.equal(result.outcome, 'done'); assert.equal(result.arrivalUnobserved, undefined)
+  assert.equal(calls.filter(n => n.endsWith('_wait')).length, 0)
+  const sub = submitSteps(steps); assert.equal(sub.length, 1); assert.equal(sub[0].ok, true)
+})
+
+test('L50 real failure (still on the form / error page / no address): escalated, step line says failed, one press, one load wait', async () => {
+  for (const [id, opts] of [['m-l50-stay', { observeAfter: { url: FORM, documentId: 'd' } }], ['m-l50-err', { arrival: 'https://httpbin.org/status/500' }], ['m-l50-none', {}]]) {
+    const { result, calls, steps } = await replayThrowing({ id, ...opts })
+    assert.equal(result.outcome, 'escalated', id); assert.equal(result.reason, 'tool_failed', id)
+    assert.equal(calls.filter(n => n.endsWith('_click')).length, 1, id); assert.equal(calls.filter(n => n.endsWith('_wait')).length, 1, id)
+    const sub = submitSteps(steps); assert.equal(sub.length, 1, id); assert.equal(sub[0].ok, false, id)
+  }
+})
