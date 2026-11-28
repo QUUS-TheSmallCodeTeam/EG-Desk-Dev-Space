@@ -279,7 +279,7 @@ const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'setting
 // file with a GEMINI_API_KEY=... line (default <data>/settings/gemini-decision-key.txt), used only while no Gemini key is saved in the store.
 const decisionProvider = decisionProviderFromEnv(process.env)
 const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings'), provider: decisionProvider,
-  keyFile: process.env.EGDESK_GEMINI_DECISION_KEY_FILE || path.join(dataDir, 'settings', 'gemini-decision-key.txt') })
+  keyFile: process.env.EGDESK_GEMINI_DECISION_KEY_FILE || null, keyFileName: 'gemini-decision-key.txt' })
 const decisionEndpoint = DECISION_PROVIDERS[decisionProvider].endpoint
 const decisionBudgetStore = openDecisionBudgetStore({ dataDir: path.join(dataDir, 'settings') })
 // Content-free threshold-calibration record (canon 5.3): numbers and closed words only, own 0600 file, never exported.

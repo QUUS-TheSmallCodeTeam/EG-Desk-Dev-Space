@@ -98,3 +98,33 @@ test('a directory others can read keeps the decision model off', posixOnly, t =>
   assert.equal(store.save(KEY), false)
   assert.equal(store.clear(), false)
 })
+
+test('default Gemini key file is found through a dataDir spelled with different case; symlinked key file is refused', posixOnly, t => {
+  const root = createPrivateQaTempDirectory('egdesk-decision-keyfile-case-')
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const real = path.join(root, 'Data', 'settings')
+  const wrong = path.join(root, 'data', 'settings')
+  mkdirSync(real, { recursive: true, mode: 0o700 })
+  let insensitive = true
+  try { statSync(wrong) } catch { insensitive = false }
+  const keyText = `GEMINI_API_KEY=${'A'.repeat(39)}\n`
+  const name = 'gemini-decision-key.txt'
+  if (insensitive) {
+    writeFileSync(path.join(real, name), keyText, { mode: 0o600 }); chmodSync(path.join(real, name), 0o600)
+    const store = openDecisionCredentialStore({ dataDir: wrong, provider: 'gemini', keyFileName: name, log: () => {} })
+    assert.equal(store.status, 'configured')
+    assert.equal(store.getApiKey(), 'A'.repeat(39))
+  } else t.diagnostic('case-sensitive volume: case-mismatch part skipped')
+  const linkDir = path.join(root, 'link-settings')
+  mkdirSync(linkDir, { mode: 0o700 })
+  const target = path.join(root, 'target.txt')
+  writeFileSync(target, keyText, { mode: 0o600 })
+  symlinkSync(target, path.join(linkDir, name))
+  const refused = openDecisionCredentialStore({ dataDir: linkDir, provider: 'gemini', keyFileName: name, log: () => {} })
+  assert.equal(refused.getApiKey(), null)
+  // A user-provided non-canonical keyFile stays refused.
+  if (insensitive) {
+    const explicit = openDecisionCredentialStore({ dataDir: path.join(root, 'other'), provider: 'gemini', keyFile: path.join(wrong, name), log: () => {} })
+    assert.equal(explicit.getApiKey(), null)
+  }
+})

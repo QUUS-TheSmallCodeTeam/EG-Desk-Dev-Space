@@ -91,7 +91,7 @@ function readKeyFileLine(keyFile) {
   } catch { return null }
 }
 
-export function openDecisionCredentialStore({ dataDir, log = defaultLog, now = Date.now, provider = 'openai', keyFile = null } = {}) {
+export function openDecisionCredentialStore({ dataDir, log = defaultLog, now = Date.now, provider = 'openai', keyFile = null, keyFileName = null } = {}) {
   if (provider !== 'openai' && provider !== 'gemini') throw new TypeError('provider must be openai or gemini')
   const DECISION_CREDENTIAL_FILE = provider === 'gemini' ? GEMINI_DECISION_CREDENTIAL_FILE : DEFAULT_FILE
   const say = message => { try { log(message) } catch {} }
@@ -140,6 +140,8 @@ export function openDecisionCredentialStore({ dataDir, log = defaultLog, now = D
     }
   }
 
+  // keyFileName: default key file inside the canonical (realpath) store dir, so a dataDir spelled with different case still passes the canonical-path check.
+  if (keyFile === null && dir && typeof keyFileName === 'string' && /^[A-Za-z0-9._-]+$/.test(keyFileName)) keyFile = path.join(dir, keyFileName)
   if (apiKey === null && provider === 'gemini' && typeof keyFile === 'string' && path.isAbsolute(keyFile)) {
     const fromFile = readKeyFileLine(keyFile)
     if (fromFile) { ({ apiKey, savedAt } = fromFile); status = 'configured' }
