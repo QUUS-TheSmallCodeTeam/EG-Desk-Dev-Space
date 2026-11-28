@@ -13,7 +13,7 @@ test('gate: only capabilities.browserProcedures === true turns the UI on', () =>
 })
 
 test('steps block: the save button needs the gate and goes through the capture route', () => {
-  assert.match(js, /const saveOffer = codex\.proceduresUi === true \? ProcedureView\.procedureSaveOffer\(block, \{ busy: threadBusy\(activeThread\) \}\) : null;/)
+  assert.match(js, /const saveOffer = codex\.proceduresUi === true \? ProcedureView\.procedureSaveOffer\(block, \{ busy: codex\.isSending === true \}\)/)
   assert.match(js, /saveOffer \? el\('button'/)
   assert.match(js, /procedureCapture\(saveOffer\.clientThreadId, saveOffer\.cardId\)/)
   const cap = slice('async procedureCapture(', 'procedureEdit(')
