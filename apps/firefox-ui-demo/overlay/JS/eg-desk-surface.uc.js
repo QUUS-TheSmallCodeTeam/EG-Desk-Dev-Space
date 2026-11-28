@@ -16934,7 +16934,7 @@
             return;
           }
           // L54: a step the Agent hands to the person (human_step / handoff) releases that card's lock at once, so nobody waits.
-          if (event.cardId && (event.op === 'handoff' || event.status === 'human_step' || event.code === 'human_step')) document.getElementById(event.cardId)?._cardLease?.handoff();
+          if (event.cardId && CardLease.stepIsHumanStep(event)) document.getElementById(event.cardId)?._cardLease?.handoff();
           const before = state.codex.browserSteps;
           state.codex.browserSteps = BrowserStepsView.addBrowserStep(before, event, { live: true });
           if (state.codex.browserSteps !== before && state.codex.browserStepsUi === true) emit();
@@ -28291,9 +28291,20 @@
         // Wheel and pointer events keep bubbling so the canvas still pans/zooms; keys and IME must not reach the remote page.
         if (!/^(wheel|mouse|pointer|click|dblclick|auxclick|touch)/.test(event.type)) { event.stopPropagation(); event.stopImmediatePropagation?.(); }
       };
+      // IME composition goes straight to the remote page's BrowserParent, so keys are not enough: focus never stays on the page while blocked.
+      const refocusGuard = (event) => {
+        let target = event.target;
+        try { target = event.composedTarget || event.originalTarget || target; } catch {}
+        if (!CardLease.leaseShouldBlurFocus(lease, { inPageArea: inPageArea(event.target) || inPageArea(target) })) return;
+        try { xulBrowser.blur(); } catch {}
+        queueMicrotask(() => { try { if (CardLease.leaseBlocksPerson(lease) && document.activeElement === xulBrowser) xulBrowser.blur(); } catch {} });
+      };
       const setListening = (on) => {
         if (on === listening) return;
         listening = on;
+        for (const name of ['focus', 'focusin']) {
+          try { (on ? window.addEventListener : window.removeEventListener).call(window, name, refocusGuard, { capture: true }); } catch {}
+        }
         for (const name of CardLease.LEASE_BLOCKED_EVENTS) {
           try { (on ? window.addEventListener : window.removeEventListener).call(window, name, swallow, { capture: true, passive: false }); } catch {}
         }

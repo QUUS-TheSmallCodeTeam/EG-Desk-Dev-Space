@@ -86,6 +86,14 @@ export function leaseExpiryIn(lease, now, ms = CARD_LEASE_EXPIRY_MS) {
 /** The person's real input is blocked only while the agent holds the lease. */
 export const leaseBlocksPerson = (lease) => lease?.state === 'agent';
 
+/** Does this browser step ask the PERSON to act on the page (human_step)? Other handoffs (needs_value, low_confidence: the chat model takes over;
+ * needs_user: a question in chat) keep the lease: the run's terminal event releases it. */
+export const stepIsHumanStep = (step) => !!step && [step.status, step.reason, step.code].includes('human_step');
+
+/** Focus must not enter the page area while the agent holds the lease: Gecko sends IME composition straight to the BrowserParent, so chrome DOM
+ * listeners never see it. Pure decision for the focus guard. */
+export const leaseShouldBlurFocus = (lease, { inPageArea = false } = {}) => leaseBlocksPerson(lease) && inPageArea === true;
+
 /** Real (user) events only: synthetic/untrusted events and non-input events pass. */
 export const LEASE_BLOCKED_EVENTS = Object.freeze(['mousedown', 'mouseup', 'click', 'dblclick', 'auxclick', 'pointerdown', 'pointerup', 'wheel',
   'contextmenu', 'dragstart', 'dragenter', 'dragover', 'drop', 'keydown', 'keypress', 'keyup', 'beforeinput', 'input', 'compositionstart',
