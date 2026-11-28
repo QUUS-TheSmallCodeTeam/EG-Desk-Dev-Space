@@ -42,3 +42,6 @@
 - `page-eval.mjs`는 `data:` 프레임 스크립트를 쓴다. Latin-1로 풀리므로 식 안의 한글은 도구가 `\u` 이스케이프로 바꿔 보낸다.
 - 앱 창이 뒤에 있으면 캔버스 애니메이션이 멈춰 좌표 클릭을 믿을 수 없다. 사람 역할은 버튼 DOM 클릭으로 한다.
 - Claude 실행은 Claude 사용량을 쓴다.
+
+## RWS 케이스 세트 (라운드 f, 실제 업무 시나리오 15개)
+`cases-rws.mjs`(케이스 `rws-01`~`rws-15`)와 `fixtures-rws.mjs`(data: URL 모의 포털·에디터). `node run-case.mjs rws-03 Codex [회차]`처럼 id가 `rws-`로 시작하면 `run-case.mjs`가 이 세트를 읽는다(기존 숫자 id는 그대로). 추가 필드: `rws`(원본 RWS id), `patterns`, `handoffs`(기대 사람 넘김), `expected`, `answerNotRe`(답에 나오면 안 되는 말). 구조 검증: `node --test cases-rws.test.mjs`.

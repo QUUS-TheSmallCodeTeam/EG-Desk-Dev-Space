@@ -2,12 +2,12 @@
 import { execFileSync, spawn } from 'node:child_process'; import fs from 'node:fs'; import path from 'node:path'; import { fileURLToPath } from 'node:url'
 const Q = path.dirname(fileURLToPath(import.meta.url)), D = process.env.EGDESK_APP_DIR || path.resolve(Q, '../..'), OUT = process.env.EGDESK_QA_OUT || '/tmp/egdesk-real-window-qa', N = process.env.NODE || process.execPath
 const [, , id, engine = "Codex", rep = "1"] = process.argv
-const { CASES } = await import(`${Q}/cases.mjs`); const c = CASES[id]; if (!c) throw new Error('no case ' + id)
+const { CASES } = await import(`${Q}/${String(id).startsWith('rws-') ? 'cases-rws' : 'cases'}.mjs`); const c = CASES[id]; if (!c) throw new Error('no case ' + id)
 const sh = (cmd, args, opts = {}) => { try { return execFileSync(cmd, args, { cwd: (cmd === N && args[0] === "scripts/egdesk-turn-timeline.mjs") ? D : Q, encoding: 'utf8', timeout: opts.timeout ?? 200000 }).trim() } catch (e) { return String(e.stdout || '') + ' ERR ' + String(e.message).slice(0, 120) } }
 const evalIn = (card, expr) => { const out = sh(N, ['page-eval.mjs', card, expr]); try { return JSON.parse(out) } catch { return { error: out.slice(0, 160) } } }
 const kstIso = () => new Date(Date.now() + 9 * 3600000).toISOString().replace('Z', '+09:00')
 const go = (card, url, title = '') => { const r = sh(N, ['go-card.mjs', card, url, title]); return /"ok":true/.test(r) }
-const rec = { case: Number(id), name: c.name, engine, rep: String(rep), at: new Date().toTimeString().slice(0, 8), setup: true }
+const rec = { case: /^\d+$/.test(id) ? Number(id) : id, name: c.name, engine, rep: String(rep), at: new Date().toTimeString().slice(0, 8), setup: true }
 rec.setup = go(c.card, c.url, c.title || '') && (!c.then || go(c.card, c.then, c.title || '')) && (!c.also || go(c.also.card, c.also.url, ''))
 const EXPECT = {}; for (const [k, expr] of Object.entries(c.expect || {})) EXPECT[k] = evalIn(c.card, expr).value
 sh('bash', ['-c', `sleep 1.5; ./new-dm-grant.sh ${c.card} ${engine} >/dev/null`]); if (c.also) sh('bash', ['./grant-card.sh', c.also.card])
@@ -32,6 +32,7 @@ if (c.anyCard) { const uris = sh(N, ['mn.mjs', 'exec', 'return [...document.quer
 const chat = sh(N, ['read-chat.mjs', '2500']); const lastMsg = chat.slice(Math.max(0, chat.lastIndexOf(c.follow || c.msg)))
 if (c.answerHas) { const want = String(EXPECT[c.answerHas.replace('EXPECT.', '')] ?? ''); rec.checks.push({ expr: 'answer has ' + want.slice(0, 40), ok: !!want && lastMsg.includes(want.slice(0, 20)), got: '' }) }
 if (c.answerRe) rec.checks.push({ expr: 'answer ~ ' + c.answerRe, ok: new RegExp(c.answerRe).test(lastMsg), got: '' })
+if (c.answerNotRe) rec.checks.push({ expr: 'answer !~ ' + c.answerNotRe.slice(0, 40), ok: !new RegExp(c.answerNotRe).test(lastMsg.replace(/\s+/g, ' ').replace(/.*?(Codex|Claude) /, '')), got: '' })
 rec.steps = (lastMsg.match(/브라우저 작업[^]*?(?=[A-Z] (Codex|Claude) |$)/) || [''])[0].replace(/\s+/g, ' ').slice(0, 300)
 rec.answer = lastMsg.replace(/\s+/g, ' ').replace(/.*?(Codex|Claude) /, '').slice(0, 220)
 rec.falseFail = /실패/.test(rec.steps)
