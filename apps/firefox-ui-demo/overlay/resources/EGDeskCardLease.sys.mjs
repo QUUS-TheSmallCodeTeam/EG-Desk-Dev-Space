@@ -41,6 +41,17 @@ export function leaseStop(lease, taskKey, { handoff = false } = {}) {
   return person(lease, handoff ? 'handoff' : 'person', handoff ? 'handoff' : 'task-end');
 }
 
+/** A segment of the run's work ended (an activity 'stop'): the run is not over, the chat model may be thinking before the next segment.
+ * Keep the lease and push the expiry out. Only the run's terminal event (leaseEnd), a handoff, pause, reset or expiry release it. */
+export const leaseSegmentEnd = (lease, taskKey, now) => (lease.state === 'agent' ? leaseBeat(lease, now) : lease);
+
+/** The run keyed by threadKey reached a terminal state (completed, failed, cancelled, stopped, interrupted, unavailable).
+ * Releases only when that thread holds the lease; another thread's run end changes nothing. */
+export function leaseEnd(lease, threadKey) {
+  if (lease.state !== 'agent' || !lease.tasks.includes(threadKey)) return lease;
+  return leaseStop(lease, threadKey);
+}
+
 /** The agent hands a step to the person (login, password, code, payment, permission). Releases at once, whatever tasks remain. */
 export function leaseHandoff(lease) {
   return lease.state === 'agent' ? person(lease, 'handoff', 'handoff') : lease;
