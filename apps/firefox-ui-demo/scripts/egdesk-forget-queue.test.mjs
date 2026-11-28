@@ -67,3 +67,8 @@ test('the surface routes deleteThread through the queue', () => {
   assert.doesNotMatch(js, /void fetchJson\('\/chat\/conversation\/forget'/)
   assert.match(js, /ForgetQueue\(\)\.enqueue\(ChatState\.clientThreadBinding\(thread\)\)/)
 })
+
+test('status 0 or none (no response) is retryable; a 4xx is not', () => {
+  assert.equal(FQ.retryable({ status: 0 }), true); assert.equal(FQ.retryable(new Error('x')), true)
+  assert.equal(FQ.retryable({ status: 502 }), true); assert.equal(FQ.retryable({ status: 404 }), false)
+})

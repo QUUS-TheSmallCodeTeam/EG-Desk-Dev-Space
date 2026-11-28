@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import vm from 'node:vm'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
+import { createForgetQueue } from '../overlay/resources/EGDeskForgetQueue.sys.mjs'
 import { openBriefingBindings } from '../helper/egdesk-briefing-bindings.mjs'
 import { openChatStore } from '../helper/egdesk-chat-store.mjs'
 import { createHash } from 'node:crypto'
@@ -27,7 +28,11 @@ function section(from, to) { const a = surface.indexOf(from), b = surface.indexO
 // The surface's deleteThread with its helpers; requests go to post(path, body).
 function surfaceRooms(post, rooms, { confirm = true } = {}) {
   const state = { codex: { threads: rooms.map(id => ({ id, type: 'dm', title: id, messages: [], conversationId: null })), activeThreadId: rooms[0], threadDrafts: {}, messageThreadMap: {}, threadMenu: null, memberMenu: null, conversationId: null, draft: '' } }
-  const sandbox = { state, ChatState, window: { confirm: () => confirm }, update() {}, emit() {}, fetchJson: async (p, options = {}) => post(p, options.body ? JSON.parse(options.body) : undefined) }
+  const fetchJson = async (p, options = {}) => post(p, options.body ? JSON.parse(options.body) : undefined)
+  // L49: the surface's ForgetQueue() accessor (one queue per window: the request goes through it, as fetchJson does there); the pref is a variable here
+  let stored = []
+  const queue = createForgetQueue({ send: id => fetchJson('/chat/conversation/forget', { method: 'POST', body: JSON.stringify({ clientThreadId: id }) }), load: () => stored, save: list => { stored = list }, setTimer: () => 0, clearTimer() {} })
+  const sandbox = { state, ChatState, window: { confirm: () => confirm }, update() {}, emit() {}, fetchJson, ForgetQueue: () => queue }
   return { state, bridge: vm.runInNewContext([section('  function getCodexThreadById(', '  function withCodexThread('), '({', section('      deleteThread(threadId) {', '      openFreshRoomAfterAccountHold(threadId) {'), '})'].join('\n'), sandbox, { filename: 'eg-desk-surface.uc.js (delete)' }) }
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 5))
