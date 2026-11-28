@@ -9,9 +9,12 @@ export const WAKE_AT = Object.freeze({ width: 640, height: 400 });     // larger
 // Dominance is the visible area as a fraction of the viewport; wake limit > sleep limit keeps hysteresis.
 export const SLEEP_AREA_BELOW = 0.2;   // small AND under 20% of the viewport -> sleep
 export const WAKE_AREA_AT = 0.25;      // 25% of the viewport or more -> wake, whatever the aspect ratio
-// Effective zoom (on-screen width / layout width): below this the page text is unreadable, so the card sleeps with its last frame shown.
-export const SLEEP_SCALE_BELOW = 0.45;
-export const WAKE_SCALE_AT = 0.55;
+// `scale` is the CANVAS zoom (state.zoom), not the browser element's own ratio: the page is scaled again inside the card
+// (about 0.53x), so element width / offsetWidth reads ~0.2 at canvas zoom 0.376 and ~0.53 at 1.0. Below 0.5 the page is
+// unreadable, so the card sleeps with its last frame shown; wake needs 0.58 (a wide band, zoom animates through it).
+export const SLEEP_SCALE_BELOW = 0.5;
+export const WAKE_SCALE_AT = 0.58;
+export const CAPTURE_GRACE_MS = 6000;   // a card whose first snapshot keeps failing (not painted yet) stays awake this long, then sleeps blank
 export const SLEEP_DELAY_MS = 2000;
 export const WAKE_DELAY_MS = 300;
 export const TICK_MS = 500;
@@ -26,7 +29,7 @@ export function visibleSize(rect, viewport) {
   return { width: Math.max(0, width), height: Math.max(0, height) };
 }
 
-// scale: effective zoom, or null/undefined when unknown (then ignored).
+// scale: canvas zoom, or null/undefined when unknown (then ignored).
 export function sleepVerdict({ rect, viewport, asleep, scale = null }) {
   const v = visibleSize(rect, viewport);
   const area = viewport && viewport.width > 0 && viewport.height > 0 ? (v.width * v.height) / (viewport.width * viewport.height) : 0;
@@ -52,20 +55,25 @@ export function setBrowserAwake(browser, awake) {
 }
 
 // ---- last-frame snapshot shown while a card sleeps (no text, no UI). All browser/DOM access is injected or duck-typed, so it is testable. ----
-// Returns { bitmap, width, height } or null (then the card sleeps as before, blank).
+// Returns { bitmap, width, height } or { error: string } (then the card sleeps blank after CAPTURE_GRACE_MS of retries).
+// rect null = the currently visible viewport of the top document, in CSS px times scale (Gecko WindowGlobalParent.drawSnapshot(DOMRect? ...)).
+// DOMRect is an interface, not a dictionary: a plain {x,y,w,h} throws TypeError, so no rect is passed.
 export async function captureSleepFrame(browser, { dpr = 1, maxPixels = FRAME_MAX_PIXELS } = {}) {
   try {
     const wgp = browser?.browsingContext?.currentWindowGlobal;
     const cw = browser?.clientWidth, ch = browser?.clientHeight; // layout px of the page area
-    if (!wgp || typeof wgp.drawSnapshot !== 'function' || !(cw > 0) || !(ch > 0)) return null;
+    if (!wgp || typeof wgp.drawSnapshot !== 'function') return { error: 'no-window-global' };
+    if (!(cw > 0) || !(ch > 0)) return { error: 'no-size' };
+    if (browser.webProgress?.isLoadingDocument === true) return { error: 'loading' };
     const onScreen = browser.getBoundingClientRect();
     let scale = Math.min(1, (onScreen.width * dpr) / cw);
     scale = Math.min(scale, Math.sqrt(maxPixels / (cw * ch)));
-    if (!(scale > 0.02)) return null;
-    const bitmap = await wgp.drawSnapshot({ x: 0, y: 0, w: cw, h: ch }, scale, 'white');
-    if (!bitmap) return null;
-    return { bitmap, width: Math.max(1, Math.round(cw * scale)), height: Math.max(1, Math.round(ch * scale)) };
-  } catch { return null; }
+    if (!(scale > 0.02)) return { error: 'scale-too-small' };
+    const bitmap = await wgp.drawSnapshot(null, scale, 'white');
+    if (!bitmap) return { error: 'empty-bitmap' };
+    if (!(bitmap.width > 0) || !(bitmap.height > 0)) { try { bitmap.close?.(); } catch {} return { error: 'empty-bitmap' }; }
+    return { bitmap, width: bitmap.width, height: bitmap.height };
+  } catch (error) { return { error: String(error?.name || 'Error') + ': ' + String(error?.message || error).slice(0, 120) }; }
 }
 
 export function showSleepFrame(browser, frame) {
@@ -82,7 +90,7 @@ export function showSleepFrame(browser, frame) {
     browser.parentNode.appendChild(canvas);
     browser._egdSleepFrame = canvas;
     return true;
-  } catch { try { frame.bitmap?.close?.(); } catch {} return false; }
+  } catch (error) { try { frame.bitmap?.close?.(); } catch {} browser._egdSleepError = 'show: ' + String(error?.message || error).slice(0, 120); return false; }
 }
 
 export function removeSleepFrame(browser) {
@@ -96,8 +104,12 @@ export function removeSleepFrame(browser) {
 // Sleep = capture, show the frame, then deactivate. Wake = activate, then drop the frame after the page repainted.
 export async function sleepBrowserWithFrame(browser, opts = {}) {
   const frame = await captureSleepFrame(browser, opts);
-  if (frame) showSleepFrame(browser, frame);
-  return { framed: !!frame };
+  if (frame.bitmap) {
+    if (showSleepFrame(browser, frame)) { browser._egdSleepError = ''; return { framed: true }; }
+    return { framed: false, error: browser._egdSleepError || 'show-failed' };
+  }
+  browser._egdSleepError = frame.error || 'unknown';
+  return { framed: false, error: browser._egdSleepError };
 }
 export function wakeBrowserWithFrame(browser, { setTimer = (fn, ms) => setTimeout(fn, ms), delay = FRAME_REMOVE_DELAY_MS } = {}) {
   const canvas = browser?._egdSleepFrame;
@@ -110,7 +122,7 @@ export function wakeBrowserWithFrame(browser, { setTimer = (fn, ms) => setTimeou
 // onForget(id): a card that vanished while asleep (closed) -> release what was kept for it.
 export function createCardSleeper({ cards, viewport, now = () => Date.now(), onForget = null }) {
   const known = new Map(); // id -> { asleep, since, verdict }
-  const wake = (id, entry, card) => { entry.token = (entry.token || 0) + 1; entry.preparing = false; if (entry.asleep) { entry.asleep = false; try { card.setAwake(true); } catch {} } entry.since = 0; entry.verdict = 'keep'; };
+  const wake = (id, entry, card) => { entry.token = (entry.token || 0) + 1; entry.preparing = false; entry.failedAt = 0; if (entry.asleep) { entry.asleep = false; try { card.setAwake(true); } catch {} } entry.since = 0; entry.verdict = 'keep'; };
   return {
     tick() {
       const list = cards() || [], t = now(), vp = viewport();
@@ -122,7 +134,7 @@ export function createCardSleeper({ cards, viewport, now = () => Date.now(), onF
         if (card.excluded()) { wake(card.id, entry, card); continue; }
         const verdict = sleepVerdict({ rect: card.rect(), viewport: vp, asleep: entry.asleep, scale: card.scale ? card.scale() : null });
         if (entry.preparing) continue;
-        if (verdict === 'keep') { entry.since = 0; entry.verdict = 'keep'; continue; }
+        if (verdict === 'keep') { entry.since = 0; entry.verdict = 'keep'; entry.failedAt = 0; continue; }
         if (entry.verdict !== verdict) { entry.verdict = verdict; entry.since = t; }
         const need = verdict === 'sleep' ? SLEEP_DELAY_MS : WAKE_DELAY_MS;
         if (t - entry.since < need) continue;
@@ -130,7 +142,15 @@ export function createCardSleeper({ cards, viewport, now = () => Date.now(), onF
           const doSleep = () => { entry.asleep = true; try { card.setAwake(false); } catch {} };
           if (typeof card.prepareSleep === 'function') {
             const token = entry.token = (entry.token || 0) + 1; entry.preparing = true;
-            const finish = () => { if (entry.token !== token || known.get(card.id) !== entry) return; entry.preparing = false; doSleep(); };
+            const finish = (r) => {
+              if (entry.token !== token || known.get(card.id) !== entry) return;
+              entry.preparing = false;
+              if (r && r.framed === false) { // not painted yet or capture failed: stay awake and retry on the next tick, up to CAPTURE_GRACE_MS
+                entry.failedAt = entry.failedAt || now();
+                if (now() - entry.failedAt < CAPTURE_GRACE_MS) { entry.verdict = 'sleep'; entry.since = -Infinity; return; }
+              }
+              entry.failedAt = 0; doSleep();
+            };
             let p; try { p = Promise.resolve(card.prepareSleep()); } catch { p = Promise.resolve(); }
             p.then(finish, finish);
           } else doSleep();

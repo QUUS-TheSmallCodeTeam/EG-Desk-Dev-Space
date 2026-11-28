@@ -113,7 +113,7 @@ test('L48 rules: the c12 trap (1070x398 asleep) wakes by area; tiny and unreadab
   assert.equal(verdict(rectAt(0, 0, 1100, 340), false), 'keep', '29% area dominates even with a short side')
   assert.equal(verdict(rectAt(100, 100, 547, 342), false, 0.376), 'sleep', 'overview thumbnail')
   assert.equal(verdict(rectAt(0, 0, 1300, 850), false, 0.4), 'sleep', 'unreadable zoom sleeps even when large')
-  assert.equal(verdict(rectAt(0, 0, 1300, 850), true, 0.5), 'keep', 'zoom hysteresis 0.45/0.55')
+  assert.equal(verdict(rectAt(0, 0, 1300, 850), true, 0.55), 'keep', 'zoom hysteresis 0.5/0.58')
   assert.equal(verdict(rectAt(0, 0, 1300, 850), true, 0.6), 'wake')
   assert.equal(verdict(rectAt(1400, 0, 1200, 800), true, 1), 'keep', 'mostly off-screen stays asleep')
   assert.equal(verdict(null, false), 'sleep')
@@ -132,10 +132,10 @@ function fakeBrowser({ drawSnapshot, cw = 1200, ch = 800, onScreenW = 600 } = {}
 
 test('snapshot: scaled to the on-screen size, shown over the page, removed after wake, memory freed', async () => {
   const calls = []; const bitmap = { closed: false, close() { this.closed = true } }
-  const b = fakeBrowser({ drawSnapshot: async (rect, scale, bg) => { calls.push({ rect, scale, bg }); return bitmap } })
+  const b = fakeBrowser({ drawSnapshot: async (rect, scale, bg) => { calls.push({ rect, scale, bg }); bitmap.width = 1200; bitmap.height = 800; return bitmap } })
   const r = await Sleep.sleepBrowserWithFrame(b, { dpr: 2 })
   assert.equal(r.framed, true)
-  assert.deepEqual(calls[0].rect, { x: 0, y: 0, w: 1200, h: 800 })
+  assert.equal(calls[0].rect, null, 'null = visible viewport; a plain object would throw TypeError (DOMRect is an interface)')
   assert.equal(calls[0].scale, 1, 'on-screen 600 css px at dpr 2 = 1200 device px = scale 1 (capped at 1)')
   assert.equal(b._egdSleepFrame.width, 1200)
   assert.equal(bitmap.closed, true, 'ImageBitmap released right after drawing')
@@ -148,17 +148,18 @@ test('snapshot: scaled to the on-screen size, shown over the page, removed after
 
 test('snapshot: small card gets a small bitmap; huge card is capped by the pixel budget', async () => {
   const calls = []
-  const small = fakeBrowser({ drawSnapshot: async (r, s) => { calls.push(s); return { close() {} } }, onScreenW: 450 })
+  const small = fakeBrowser({ drawSnapshot: async (r, s) => { calls.push(s); return { width: 450, height: 300, close() {} } }, onScreenW: 450 })
   await Sleep.captureSleepFrame(small, { dpr: 1 })
   assert.equal(calls[0], 450 / 1200)
-  const huge = fakeBrowser({ drawSnapshot: async (r, s) => { calls.push(s); return { close() {} } }, cw: 6000, ch: 4000, onScreenW: 6000 })
+  const huge = fakeBrowser({ drawSnapshot: async (r, s) => { calls.push(s); return { width: 10, height: 10, close() {} } }, cw: 6000, ch: 4000, onScreenW: 6000 })
   await Sleep.captureSleepFrame(huge, { dpr: 1 })
   assert.ok(calls[1] * calls[1] * 6000 * 4000 <= Sleep.FRAME_MAX_PIXELS + 1)
 })
 
 test('snapshot failure keeps v1 behaviour: no frame, card still sleeps', async () => {
   for (const b of [fakeBrowser(), fakeBrowser({ drawSnapshot: async () => { throw new Error('boom') } }), fakeBrowser({ drawSnapshot: async () => null })]) {
-    assert.deepEqual(await Sleep.sleepBrowserWithFrame(b), { framed: false })
+    const res = await Sleep.sleepBrowserWithFrame(b)
+    assert.equal(res.framed, false); assert.ok(res.error, 'error string for the report'); assert.equal(b._egdSleepError, res.error)
     assert.equal(b._egdSleepFrame, undefined)
   }
   const h = harness({ f: rectAt(3000, 0, 1200, 800) })
@@ -189,6 +190,52 @@ test('L48 wiring: frame helpers, effective zoom, frame release on close, diagnos
   assert.match(js, /prepareSleep: \(\) => CardSleep\.sleepBrowserWithFrame/)
   assert.match(js, /wakeBrowserWithFrame\(browser\)/)
   assert.match(js, /onForget: \(id\)/)
-  assert.match(js, /cardSleepReport: \(\) => cardSleepReport\(\)/)
-  assert.match(js, /scale: \(\) =>/)
+  assert.match(js, /state\.cardSleepReport = \(\) => cardSleepReport\(\)/)
+  assert.match(js, /scale: \(\) => \(state\.zoom > 0 \? state\.zoom : null\)/)
+  assert.match(js, /lastCaptureError: String\(b\._egdSleepError/)
+  assert.doesNotMatch(js, /drawSnapshot\(\{ x: 0/)
+})
+
+// Canvas zoom z; the page sits ~0.53x inside the card (innerRatio), card natural size 1000x650 layout px at zoom 1.
+test('L48 canvas-zoom rule with the inner factor: 0.376 sleeps, >=0.6 mostly visible card awake, hysteresis', () => {
+  const INNER = 0.53
+  const cardAt = (z, left = 50, top = 40) => rectAt(left, top, 1000 * INNER * z * 1.9, 650 * INNER * z * 1.9) // the card rect grows with canvas zoom
+  for (const z of [0.376]) {
+    assert.equal(verdict(cardAt(z), false, z), 'sleep', 'overview, awake -> sleep')
+    assert.equal(verdict(cardAt(z), true, z), 'keep', 'overview, asleep stays')
+  }
+  for (const z of [0.6, 1.0, 1.148]) {
+    const r = rectAt(40, 30, 1100, 780) // mostly visible
+    assert.equal(verdict(r, true, z), 'wake', 'asleep wakes at canvas zoom ' + z)
+    assert.equal(verdict(r, false, z), 'keep', 'awake stays at canvas zoom ' + z)
+  }
+  assert.equal(verdict(rectAt(40, 30, 1100, 780), false, 0.52), 'keep', 'awake at 0.52 (above 0.5) stays')
+  assert.equal(verdict(rectAt(40, 30, 1100, 780), true, 0.52), 'keep', 'asleep at 0.52 (below 0.58) stays: hysteresis')
+  assert.equal(verdict(rectAt(40, 30, 1100, 780), false, 0.48), 'sleep')
+  // the element's own ratio (~0.53 at zoom 1.0, ~0.2 at 0.376) must never be what is fed in
+  assert.equal(verdict(rectAt(40, 30, 1100, 780), true, 0.53), 'keep')
+})
+
+test('first snapshot failing (not yet painted): card stays awake and retries, sleeps blank after the grace cap', async () => {
+  let t = 1000, tries = 0, ok = false
+  const c = { id: 'p', r: rectAt(3000, 0, 1200, 800), awake: true }
+  c.entry = { id: 'p', rect: () => c.r, excluded: () => false, scale: () => 0.376, setAwake: (a) => { c.awake = a }, prepareSleep: async () => { tries++; return ok ? { framed: true } : { framed: false, error: 'loading' } } }
+  const sleeper = Sleep.createCardSleeper({ cards: () => [c.entry], viewport: () => VP, now: () => t })
+  const adv = async (ms) => { for (let i = 0; i < ms; i += Sleep.TICK_MS) { t += Sleep.TICK_MS; sleeper.tick(); await flush() } }
+  await adv(2500)
+  assert.ok(tries >= 1); assert.equal(c.awake, true, 'failed capture does not sleep yet')
+  const before = tries; await adv(2000)
+  assert.ok(tries > before, 'retried on the following ticks'); assert.equal(c.awake, true)
+  ok = true; await adv(1000)
+  assert.equal(c.awake, false, 'sleeps once a frame exists')
+  // cap
+  t = 1000; const d = { ...c, awake: true }
+  const s2 = Sleep.createCardSleeper({ cards: () => [{ ...c.entry, id: 'q', setAwake: (a) => { d.awake = a }, prepareSleep: async () => ({ framed: false, error: 'x' }) }], viewport: () => VP, now: () => t })
+  for (let i = 0; i < 20; i++) { t += Sleep.TICK_MS; s2.tick(); await flush() }
+  assert.equal(d.awake, false, 'after CAPTURE_GRACE_MS sleeps blank, as v1')
+})
+
+test('capture is skipped while the document is loading (retry later)', async () => {
+  const b = fakeBrowser({ drawSnapshot: async () => ({ width: 1, height: 1, close() {} }) }); b.webProgress = { isLoadingDocument: true }
+  assert.equal((await Sleep.captureSleepFrame(b)).error, 'loading')
 })
