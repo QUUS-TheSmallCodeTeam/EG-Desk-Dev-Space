@@ -26397,12 +26397,19 @@
   // L42 (egdesk.perf.sleepHiddenCards, default off): a Browser card off the screen or shown small is put to sleep (inactive <browser>),
   // woken when it is seen again or an Agent/Decision-model tool reaches it. See EGDeskCardSleep.sys.mjs. No UI, no text.
   let cardSleeper = null, cardSleepTimer = 0;
+  const cardSleepFrames = new Map(); // card id -> browser whose sleep frame must be released if the card closes asleep
   let cardSleepModule = null; // imported only when the flag is on
   const CardSleep = new Proxy({}, { get: (_, key) => (cardSleepModule ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCardSleep.sys.mjs'))[key] });
   function perfSleepHiddenCardsEnabled() { try { return readSurfacePref('egdesk.perf.sleepHiddenCards') === 'on'; } catch { return false; } }
   function cardSleepEntry(card) {
     const browser = card._xulBrowser;
-    return { id: card.id, rect: () => browser.getBoundingClientRect(), setAwake: (awake) => { CardSleep.setBrowserAwake(browser, awake); } };
+    return {
+      id: card.id,
+      rect: () => browser.getBoundingClientRect(),
+      scale: () => { const w = browser.offsetWidth; return w > 0 ? browser.getBoundingClientRect().width / w : null; }, // effective zoom of the canvas
+      prepareSleep: () => CardSleep.sleepBrowserWithFrame(browser, { dpr: window.devicePixelRatio || 1 }).then(r => { cardSleepFrames.set(card.id, browser); return r; }),
+      setAwake: (awake) => { CardSleep.setBrowserAwake(browser, awake); if (awake) CardSleep.wakeBrowserWithFrame(browser); else if (!browser._egdSleepFrame) { /* no snapshot: blank, as in v1 */ } },
+    };
   }
   function cardSleepExcluded(card) {
     try {
@@ -26421,6 +26428,7 @@
   function installCardSleep() {
     if (cardSleeper || !perfSleepHiddenCardsEnabled()) return;
     cardSleeper = CardSleep.createCardSleeper({
+      onForget: (id) => { const gone = cardSleepFrames.get(id); cardSleepFrames.delete(id); try { CardSleep.removeSleepFrame(gone); } catch {} },
       viewport: () => ({ width: window.innerWidth, height: window.innerHeight }),
       cards: () => Array.from(document.querySelectorAll('.egd-browser-card'))
         .filter(card => card._xulBrowser?.isConnected && card.dataset?.codexRole !== 'auth')
@@ -26428,6 +26436,17 @@
     });
     cardSleepTimer = window.setInterval(() => { try { cardSleeper.tick(); } catch (error) { console.warn(TAG, 'card sleep tick failed', error); } }, CardSleep.TICK_MS);
     window.addEventListener('unload', () => window.clearInterval(cardSleepTimer), { once: true });
+  }
+  // L48 diagnostics: window.__egdesk.cardSleepReport() -> [{ id, asleep, framed, visible:'WxH', areaPct, scale }]
+  function cardSleepReport() {
+    const vp = { width: window.innerWidth, height: window.innerHeight };
+    const asleepIds = new Set((cardSleeper?.states?.() || []).filter(e => e.asleep).map(e => e.id));
+    return Array.from(document.querySelectorAll('.egd-browser-card')).filter(c => c._xulBrowser?.isConnected).map(card => {
+      const b = card._xulBrowser, r = b.getBoundingClientRect(), v = CardSleep.visibleSize(r, vp);
+      return { id: card.id, enabled: !!cardSleeper, asleep: asleepIds.has(card.id), framed: !!b._egdSleepFrame,
+        visible: Math.round(v.width) + 'x' + Math.round(v.height), areaPct: Math.round(1000 * v.width * v.height / (vp.width * vp.height)) / 10,
+        scale: b.offsetWidth > 0 ? Math.round(1000 * r.width / b.offsetWidth) / 1000 : null };
+    });
   }
   // Before any tool (entry, work, observe, capture) uses a card: wake it first; keep it awake while the call runs and for a while after.
   function guardCardForTools(card, controls) {
@@ -33459,6 +33478,7 @@
       try { installCardSleep(); } catch { /* L42 optional: default off */ }
       try { if (readSurfacePref('egdesk.perf.flatFrost') === 'on') document.documentElement.setAttribute('egd-perf-flat-frost', ''); } catch { /* L38 optional: default off */ }
       window.__egdesk = {
+        cardSleepReport: () => cardSleepReport(),
         state,
         semantic,
         codexBridge: state.codexBridge,
