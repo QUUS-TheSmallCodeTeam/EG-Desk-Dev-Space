@@ -27130,9 +27130,6 @@
         title: readBrowserTitle(),
       };
     };
-    // L52: lazy handle on the act race module (kept out of browserToolAct so that function stays self-contained)
-    let actDocumentGoneCache = null;
-    const actDocumentGoneModule = () => (actDocumentGoneCache ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskActDocumentGone.sys.mjs'));
     const browserAgentActorRequest = async (method, payload = {}) => {
       if (!ensureBrowserAgentActor()) throw new Error('Browser actor registration failed');
       const context = xulBrowser?.browsingContext;
@@ -28631,21 +28628,12 @@
       // chrome-document fallbacks do not enforce document/target revisions.
       let result;
       try {
-        // L52: a click that navigates the top document away (a POST submit) can lose the actor's reply; reject promptly once the document is gone.
-        // The module is resolved BEFORE the request is sent and any failure to load it only turns the race off: the act itself must never depend on it.
-        let gone = null;
-        try { gone = typeof actDocumentGoneModule === 'function' ? actDocumentGoneModule() : null; } catch { gone = null; }
-        const watched = gone && typeof gone.actCanLeaveDocument === 'function' && typeof gone.raceActWithDocumentGone === 'function' && gone.actCanLeaveDocument(action);
-        const actRequest = browserAgentActorRequest('act', {
+        result = await browserAgentActorRequest('act', {
           action, options: { guard,
             lease: { leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs },
             ...(lease.callId ? { callId: lease.callId } : {}), budgetMs,
             snapshot: { textLimit: 60, elementLimit: 80 } },
         });
-        result = watched
-          ? await gone.raceActWithDocumentGone(actRequest, { isReplaced: () =>
-              xulBrowser.browsingContext !== context || xulBrowser.browsingContext.currentWindowGlobal !== windowGlobal })
-          : await actRequest;
       } catch (error) {
         showAgentActivity('조작 결과 미확인 · 다시 관찰 필요');
         const modal = toolDialogs.read(dialogRevision);
