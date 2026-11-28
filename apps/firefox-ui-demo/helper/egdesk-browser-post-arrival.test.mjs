@@ -129,3 +129,19 @@ test('L50 real failure (still on the form / error page / no address): escalated,
     const sub = submitSteps(steps); assert.equal(sub.length, 1, id); assert.equal(sub[0].ok, false, id)
   }
 })
+
+// L52: the answer turn is told where the submitted form landed (the form action's host and path), also when the arrived document cannot be read
+test('L52: a POST submit that landed carries postedTo, and the note names it (host and path only, never a query), only on a done task', async () => {
+  const { result } = await replay('m-posted', POST)
+  assert.equal(result.postedTo, POST)
+  const task = { taskId: 't', steps: 2, actions: {}, goalChanges: 0 }
+  const note = JSON.parse(subjectiveNote(task, { status: 'done', arrivalUnobserved: true, postedTo: 'https://httpbin.org/post?secret=1#x' })).egdesk_browser_task
+  assert.equal(note.submittedTo, 'httpbin.org/post'); assert.equal(note.arrivalUnobserved, true)
+  assert.ok(!JSON.stringify(note).includes('secret'))
+  for (const status of ['cannot_proceed', 'needs_value']) assert.equal('submittedTo' in JSON.parse(subjectiveNote(task, { status, postedTo: POST })).egdesk_browser_task, false)
+  assert.equal('submittedTo' in JSON.parse(subjectiveNote(task, { status: 'done' })).egdesk_browser_task, false)
+})
+test('L52: a failed submit has no postedTo', async () => {
+  const { result } = await replay('m-noposted', null)
+  assert.equal(result.postedTo, undefined)
+})

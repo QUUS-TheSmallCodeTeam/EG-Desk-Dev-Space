@@ -5671,7 +5671,11 @@ export class CodexChatRuntime {
       if (run && event && ['open', 'submit', 'press', 'fill', 'select', 'scroll'].includes(event.op) && typeof event.ok === 'boolean') {
         const target = typeof event.target === 'string' ? event.target.replace(/\s+/g, ' ').trim().slice(0, 60) : ''
         const lines = (run.decisionSteps ??= [])
-        if (lines.length < 8) lines.push(`${event.op}${target ? ` "${target}"` : ''}: ${event.ok ? 'went through' : 'did not go through'}`)
+        if (lines.length < 8) {
+          // L52: a filled/selected value is evidence the answer may state; displayValue is already classified at the observed field (a masked or sensitive field is '●●●', never the text)
+          const shown = ['fill', 'select'].includes(event.op) && event.ok && typeof event.displayValue === 'string' && event.displayValue.trim() ? ` = "${[...event.displayValue.replace(/\s+/g, ' ').trim()].slice(0, 40).join('')}"` : ''
+          lines.push(`${event.op}${target ? ` "${target}"` : ''}${shown}: ${event.ok ? 'went through' : 'did not go through'}`)
+        }
       }
       const channel = this.decisionContext?.browserSteps
       if (typeof channel?.publish !== 'function' || !run?.clientThreadId || this.deletedConversations.has(run.clientThreadId)) return false
@@ -7197,7 +7201,7 @@ export class CodexChatRuntime {
     const note = this.draftCheckTurns.get(run)?.browserNote
     if (typeof note === 'string' && note.trim() && egress.allows('browser_task_record') && (run.executionPolicy?.mode !== BROWSER_BOUNDED || pageTextOn())) out.push({ id: 'task', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The browser task's outcome note: ${publicText(note, 1000)}` })
     if (Array.isArray(run.decisionSteps) && run.decisionSteps.length && egress.allows('browser_task_record') && (run.executionPolicy?.mode !== BROWSER_BOUNDED || pageTextOn()))
-      out.push({ id: 'task_steps', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The steps EG-Desk's browser task carried out in this turn on the person's Card, each as the control's own name and whether it went through (a step that went through really happened on the page; the page's resulting state is not quoted here): ${run.decisionSteps.join('; ')}` })
+      out.push({ id: 'task_steps', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The steps EG-Desk's browser task carried out in this turn on the person's Card, each as the control's own name and whether it went through (a step that went through really happened on the page; a filled value is shown after = unless the field is masked, shown as ●●●; the page's resulting state is not quoted here): ${run.decisionSteps.join('; ')}` })
     return out
   }
 

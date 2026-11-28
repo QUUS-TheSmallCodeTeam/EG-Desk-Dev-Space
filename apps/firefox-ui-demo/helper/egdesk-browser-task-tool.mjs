@@ -300,7 +300,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
     store.touch(task)
     const elapsedMs = Math.max(0, clock() - started)
     emit({ op: 'end', code: body.code, ok: body.status === 'done', stepMs: elapsedMs }, 'decision', body.status)
-    return { ...body, ...(body.status === 'done' && result.searchedFor && pageText === true ? { searchedFor: result.searchedFor } : {}), ...(body.status === 'done' && result.arrivalUnobserved === true ? { arrivalUnobserved: true } : {}), taskId: task.taskId,
+    return { ...body, ...(body.status === 'done' && result.searchedFor && pageText === true ? { searchedFor: result.searchedFor } : {}), ...(body.status === 'done' && result.arrivalUnobserved === true ? { arrivalUnobserved: true } : {}), ...(body.status === 'done' && typeof result.postedTo === 'string' ? (() => { try { const u = new URL(result.postedTo); return { submittedTo: compactText(u.host + u.pathname, 120) } } catch { return {} } })() : {}), taskId: task.taskId,
       steps: steps.map(step => ({ op: step.op, ...(step.target ? { target: step.target } : {}), ...(step.valueName ? { valueName: step.valueName } : {}), ok: step.ok, ms: step.ms, ...(step.by === 'model' ? { by: 'model' } : {}) })),
       page: { title: page?.title ?? null, host: page?.host ?? null }, elapsedMs }
   }

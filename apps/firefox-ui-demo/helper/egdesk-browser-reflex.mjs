@@ -1276,11 +1276,11 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
           const result = await act(entry, 'egdesk_browser_click', { cardId, observationId, expectedRevision: snapshot.revision, ref: option.item.element.ref, expectedTarget: expectedTargetOf(option.item.element), postcondition: { kind: 'url', value: to } },
             { op: 'submit', target: label, landed: async () => (await settle()) !== 'no', landedStatus: 'form-result-observed' })
           if (result.held) return heldResult()
-          if (result.ok && result.result?.status === 'postcondition-observed') return finish('done', { url: to })
+          if (result.ok && result.result?.status === 'postcondition-observed') return finish('done', { url: to, postedTo: to })
           try {
             const kind = await settle()
-            if (kind === 'arrived') return finish('done', { url: to })
-            if (kind === 'unobserved') return finish('done', { url: to, arrivalUnobserved: true })
+            if (kind === 'arrived') return finish('done', { url: to, postedTo: to })
+            if (kind === 'unobserved') return finish('done', { url: to, postedTo: to, arrivalUnobserved: true })
           } catch (err) { if (isBrowserUserHold(err)) return heldResult() }
           return finish('escalated', { reason: 'tool_failed', code: result.code || 'BROWSER_OUTCOME_UNKNOWN' })
         }
