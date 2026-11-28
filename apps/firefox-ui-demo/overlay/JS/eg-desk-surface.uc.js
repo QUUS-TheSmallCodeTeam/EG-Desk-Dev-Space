@@ -26437,7 +26437,7 @@
     cardSleepTimer = window.setInterval(() => { try { cardSleeper.tick(); } catch (error) { console.warn(TAG, 'card sleep tick failed', error); } }, CardSleep.TICK_MS);
     window.addEventListener('unload', () => window.clearInterval(cardSleepTimer), { once: true });
   }
-  // L48 diagnostics: window.__egdesk.cardSleepReport() -> [{ id, asleep, framed, visible:'WxH', areaPct, scale (canvas zoom), innerRatio, lastCaptureError }]
+  // L48 diagnostics: window.__egdesk.state.cardSleepReport() -> [{ id, asleep, framed, visible:'WxH', areaPct, scale (canvas zoom), innerRatio, lastCaptureError }]
   function cardSleepReport() {
     const vp = { width: window.innerWidth, height: window.innerHeight };
     const asleepIds = new Set((cardSleeper?.states?.() || []).filter(e => e.asleep).map(e => e.id));
@@ -33478,8 +33478,8 @@
       try { installDeskPresence(); } catch { /* optional: the Desk works the same without presence */ }
       try { installCardSleep(); } catch { /* L42 optional: default off */ }
       try { if (readSurfacePref('egdesk.perf.flatFrost') === 'on') document.documentElement.setAttribute('egd-perf-flat-frost', ''); } catch { /* L38 optional: default off */ }
+      state.cardSleepReport = () => cardSleepReport(); // L48 diagnostics under the existing 'state' key: the public root key list is frozen
       window.__egdesk = {
-        cardSleepReport: () => cardSleepReport(),
         state,
         semantic,
         codexBridge: state.codexBridge,

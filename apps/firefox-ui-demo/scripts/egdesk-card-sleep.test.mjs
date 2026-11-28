@@ -190,7 +190,7 @@ test('L48 wiring: frame helpers, effective zoom, frame release on close, diagnos
   assert.match(js, /prepareSleep: \(\) => CardSleep\.sleepBrowserWithFrame/)
   assert.match(js, /wakeBrowserWithFrame\(browser\)/)
   assert.match(js, /onForget: \(id\)/)
-  assert.match(js, /cardSleepReport: \(\) => cardSleepReport\(\)/)
+  assert.match(js, /state\.cardSleepReport = \(\) => cardSleepReport\(\)/)
   assert.match(js, /scale: \(\) => \(state\.zoom > 0 \? state\.zoom : null\)/)
   assert.match(js, /lastCaptureError: String\(b\._egdSleepError/)
   assert.doesNotMatch(js, /drawSnapshot\(\{ x: 0/)
