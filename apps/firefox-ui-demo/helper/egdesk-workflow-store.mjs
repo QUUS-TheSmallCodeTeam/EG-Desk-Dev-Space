@@ -26,6 +26,9 @@ const VERSION = 1
 export const WORKFLOW_STORE_FILE = 'workflow.sqlite'
 export const LEGACY_PARTS = Object.freeze(['task-events', 'native-ledger', 'task-sources', 'task-plans'])
 export const RECORD_KINDS = Object.freeze(['plan', 'source', 'gate-answer'])
+// g (procedures): saved Browser procedures. The `records` table has a CHECK on its kinds that older databases keep, so this kind lives in its own table,
+// created on first use (a database that never saves a procedure is unchanged). The API is the same as for the other kinds.
+export const PROCEDURE_RECORD_KIND = 'browser_procedure'
 export const LEDGER_COLLECTIONS = Object.freeze(['graphs', 'attempts', 'approvals', 'boardFences'])
 const REQUIRED = ['task_events', 'ledger_meta', 'ledger_rows', 'records', 'store_meta',
   'task_events_append_only', 'task_events_kept', 'task_events_in_order']
@@ -210,15 +213,35 @@ export function openWorkflowStore({ directory } = {}) {
     },
   }
 
+  const procedureTable = () => {
+    db.exec('CREATE TABLE IF NOT EXISTS procedure_records (record_key TEXT PRIMARY KEY, ord INTEGER NOT NULL, record_json TEXT NOT NULL)')
+    db.exec('CREATE INDEX IF NOT EXISTS procedure_records_order ON procedure_records (ord)')
+  }
+  let procedureQ = null
+  const proc = () => {
+    if (!procedureQ) {
+      procedureTable()
+      procedureQ = {
+        list: db.prepare('SELECT record_key, record_json FROM procedure_records ORDER BY ord'),
+        count: db.prepare('SELECT COUNT(*) AS n FROM procedure_records'),
+        insert: db.prepare('INSERT INTO procedure_records (record_key, ord, record_json) VALUES (?, (SELECT COALESCE(MAX(ord), 0) + 1 FROM procedure_records), ?)'),
+        replace: db.prepare('UPDATE procedure_records SET record_json = ? WHERE record_key = ?'),
+        remove: db.prepare('DELETE FROM procedure_records WHERE record_key = ?'),
+      }
+    }
+    return procedureQ
+  }
+  const isProc = kind => kind === PROCEDURE_RECORD_KIND
   const records = {
-    list(kind) { ensureOpen(); return q.records.all(kindOf(kind)).map(row => ({ key: row.record_key, json: row.record_json })) },
-    count(kind) { ensureOpen(); return q.recordCount.get(kindOf(kind)).n },
-    insert(kind, key, json) { ensureOpen(); q.insertRecord.run(kindOf(kind), text(key, 'key'), kind, text(json, 'json')) },
+    list(kind) { ensureOpen(); return isProc(kind) ? proc().list.all().map(row => ({ key: row.record_key, json: row.record_json })) : q.records.all(kindOf(kind)).map(row => ({ key: row.record_key, json: row.record_json })) },
+    count(kind) { ensureOpen(); return isProc(kind) ? proc().count.get().n : q.recordCount.get(kindOf(kind)).n },
+    insert(kind, key, json) { ensureOpen(); if (isProc(kind)) proc().insert.run(text(key, 'key'), text(json, 'json')); else q.insertRecord.run(kindOf(kind), text(key, 'key'), kind, text(json, 'json')) },
     replace(kind, key, json) {
       ensureOpen()
-      if (q.replaceRecord.run(text(json, 'json'), kindOf(kind), text(key, 'key')).changes !== 1) fail('WORKFLOW_STORE_CONFLICT', 'Workflow record is missing')
+      const changes = isProc(kind) ? proc().replace.run(text(json, 'json'), text(key, 'key')).changes : q.replaceRecord.run(text(json, 'json'), kindOf(kind), text(key, 'key')).changes
+      if (changes !== 1) fail('WORKFLOW_STORE_CONFLICT', 'Workflow record is missing')
     },
-    remove(kind, key) { ensureOpen(); return q.removeRecord.run(kindOf(kind), text(key, 'key')).changes === 1 },
+    remove(kind, key) { ensureOpen(); return (isProc(kind) ? proc().remove.run(text(key, 'key')) : q.removeRecord.run(kindOf(kind), text(key, 'key'))).changes === 1 },
   }
 
   const markerName = part => {
