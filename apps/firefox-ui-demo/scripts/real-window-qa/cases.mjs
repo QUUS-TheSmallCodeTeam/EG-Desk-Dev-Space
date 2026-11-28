@@ -8,7 +8,9 @@ const formPath = 'location.pathname === "/forms/post"'
 const firstHost = 'new URL([...document.querySelectorAll("article a[data-testid=result-title-a], a[data-testid=result-title-a]")][0].href).host'
 const firstTitle = '[...document.querySelectorAll("a[data-testid=result-title-a]")][0].textContent.trim()'
 const secondHost = 'new URL([...document.querySelectorAll("a[data-testid=result-title-a]")][1].href).host'
+import { CASES_CHANGE } from './change-fixture.mjs'
 export const CASES = {
+  ...CASES_CHANGE,
   1: { name: '그대로 검색', card: 'egd-browser-card-1', url: DDG, title: '보호', msg: '덕덕고 카드에서 장화 신은 고양이 검색해줘', checks: [`${q} === "장화 신은 고양이"`] },
   2: { name: '값 추론 검색', card: 'egd-browser-card-1', url: DDG, title: '보호', msg: '덕덕고 카드에서 비 올 때 쓰는 거 검색해줘', checks: [`/우산|우비|레인|장화/.test(${q} || "")`] },
   3: { name: '글 칸 여러 개', card: 'egd-browser-card-13', url: FORM, msg: '이름 차민수, 전화 010-1234-5678, 이메일 test@example.com 채워줘, 제출하지 마',
