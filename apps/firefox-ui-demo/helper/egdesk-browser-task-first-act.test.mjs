@@ -66,7 +66,7 @@ test('a1b: a refusal that repeats still ends the task: two attempts at most, not
   const sent = await w.browserSend('구글 카드에서 장화 신은 고양이 검색해줘'); await w.drain()
   const out = await callTool(w, BROWSER_TASK_TOOL_NAME, { goal: '장화 신은 고양이 검색', values: { 검색어: '장화 신은 고양이' } })
   assert.notEqual(out.status, 'done', JSON.stringify(out))
-  assert.equal(seen.fills.length, 2, 'once more, never in a loop')
+  assert.equal(seen.fills.length, 4, 'L55: the refused fill is looked at again and decided up to three times (1 + 3 tries), never in a loop')
   assert.equal(w.pw.state.cur.path, '/', 'nothing ran')
   assert.ok(JSON.stringify(out).includes('BROWSER_OBSERVATION_STALE'), JSON.stringify(out))
   // the model's own tools still work on the same Card in the same run
@@ -104,14 +104,22 @@ function loopRun(staleBy, { refuse = 1 } = {}) {
 test('a1b, the loop: a fill refused on the same document (target, revision, viewport, focus, observation) is decided anew on a new observation, once; typed once', async () => {
   for (const word of ['target', 'revision', 'viewport', 'focus', 'observation']) {
     const { result, fills, effects } = await loopRun(word)
-    assert.deepEqual(fills, [['obs-1', 1], ['obs-2', 2]], `${word}: the second fill is on a new observation, after a new decision`)
+    assert.deepEqual(fills, [['obs-1', 1], ['obs-3', 2]], `${word}: L55: obs-2 is the look the decision model sees (what changed), obs-3 the look the second fill is guarded by`)
     assert.deepEqual(effects, ['egdesk_browser_fill'], word)
-    assert.equal(result.steps[0].rule, 'fill_not_sent', word)
+    assert.equal(result.steps[0].rule, undefined, word + ': L55: the fill happens inside the same step (no extra loop step)')
+    assert.equal(result.steps[0].change.rounds[0].decided, 'same', word)
   }
 })
 
-test('a1b, the loop, unchanged: a replaced document, a refusal of another kind or an unnamed one ends the task at once (one fill, nothing typed)', async () => {
-  for (const word of ['document', 'identity', 'url', 'site-rule', 'binding', 'input-authority', 'other', null]) {
+test('L55: a refusal because the document was replaced is decided anew on the new page (bounded); the new page here accepts the fill: two fills, typed once', async () => {
+  for (const word of ['document', 'identity', 'url']) {
+    const { result, fills, effects } = await loopRun(word)
+    assert.equal(result.outcome, 'done', word); assert.equal(fills.length, 2, word); assert.deepEqual(effects, ['egdesk_browser_fill'], word)
+  }
+})
+
+test('a1b, the loop, unchanged: a refusal of another kind or an unnamed one ends the task at once (one fill, nothing typed)', async () => {
+  for (const word of ['site-rule', 'binding', 'input-authority', 'other', null]) {
     const { result, fills, effects } = await loopRun(word)
     assert.deepEqual([result.outcome, result.reason, result.code], ['escalated', 'tool_failed', 'BROWSER_OBSERVATION_STALE'], String(word))
     assert.equal(fills.length, 1, String(word)); assert.deepEqual(effects, [], String(word))

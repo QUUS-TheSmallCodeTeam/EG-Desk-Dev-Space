@@ -6,6 +6,7 @@ import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded } from 
 import { isBrowserUserHold, NAMED_CHANGE, sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { labelKey, priorFacts, recordedChoice, safePath as safePathOf } from './egdesk-browser-task-memory.mjs'
+import { CHANGE_REDECISIONS, CHANGE_REPLACED_DOCUMENT, CHANGE_SAME_DOCUMENT, CHANGE_WAIT_QUESTION, changeEligible, changeEvidence, changeRetargetable, summarizeChange, targetKey } from './egdesk-browser-change.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
 // Browser reflex: the decision model drives one Browser Card toward a short
@@ -580,7 +581,7 @@ function fannedChoice(next, answers, fan, thresholds) {
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, directEntry = false, popupProof = false, typedSearchOffered = false, finalArrival = false, resultOnly = false, entrySiteLinks = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+export async function decideReflexStep({ chatTask = false, goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], arrived = null, memoryPacket = null, historyConflict = false, directEntry = false, popupProof = false, typedSearchOffered = false, finalArrival = false, resultOnly = false, entrySiteLinks = false, today = null, change = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const motion = requestedMotion(goal)
   // A bounded prefix suffices to identify a requested rank; never skip an unclassified row to reach it.
   const links = resultOnly ? options.filter(o => o.item.kind === 'navigate').slice(0, 32) : []
@@ -603,6 +604,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
     : [...options.map(optionChoice), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
     `Goal: ${goal}`, ...(isDay(today) ? [`Today: ${today}`] : []), `URL: ${snapshot.url}`,
+    change?.evidence ?? null,
     arrived ? `Verified browser outcome on the already selected target Card: ${arrived === 'search' ? 'the search submitted with the typed words has landed at its results' : 'the selected link has opened'}. The target card is settled, not a remaining choice.` : null,
     pendingValues.length ? `Values the caller supplied for fields: ${pendingValues.join(', ')}` : null,
     userContext.length ? `Context the user gave in the chat (not page text):\n${userContext.slice(-4).map(item => compactText(item, 400)).join('\n')}` : null,
@@ -624,6 +626,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...(options.some(o => o.item.kind === 'choice' && !lists.includes(o)) ? [predicateQuestion('choice_requested', 'In the person’s request ' + JSON.stringify(goal) + ', does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
       ...pageStateQuestions(),
+      ...(change ? [predicateQuestion('change_wait', CHANGE_WAIT_QUESTION)] : []),
       predicateQuestion('goal_met', chatTask ? GOAL_MET_ASK : 'Does the current page already satisfy the goal?'),
       ...(typedSearchOffered ? [predicateQuestion('search_only', 'Is running a search with the resolved field value the entire browser request? No if the person wants to open a result, filter, select, or take any further browser action.')] : []),
       ...(popupProof && !resultOnly ? [predicateQuestion('open_only', 'Is opening the selected link itself the whole request, with no reading, typing or other action requested on the destination?')] : []),
@@ -689,6 +692,8 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   if (arrived && (finalArrival || readPredicate(result.answers, 'arrival_finishes', thresholds.done).state === 'yes')) return { kind: 'done', rule: arrived + '_arrived', ...out }
   if (directEntry && !arrived && !pendingValues.length && readPredicate(result.answers, 'read_here', thresholds.done).state === 'yes') return { kind: 'done', rule: 'read_here', ...out }
   if (goalMet.state === 'yes') return { kind: 'done', ...out }
+  // L55: the page changed under a decided action and the model says the target area is still changing: wait for it to settle (the loop bounds how often)
+  if (change && readPredicate(result.answers, 'change_wait', thresholds.done).state === 'yes') return { kind: 'wait', rule: 'change_wait', ...out }
   // c16 (real s10: needs_user_context at 0.70, below the bar, ended as "uncertain" with no candidates): an undecided next step whose top is
   // the fixed ask option, or a page holding two or more same-kind elements, asks the person which; the candidates are built by code.
   const group = sameKindCandidates(options)
@@ -963,6 +968,7 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
     try {
       const result = await callTool(tool, args)
       entry.actions.push({ tool, ok: true, status: typeof result?.status === 'string' ? result.status : null })
+      if (tool !== 'egdesk_browser_wait') changeReplans = 0
       tell({ step: entry.step, action: tool, ok: true, ms: Date.now() - t0, stepMs: Date.now() - stepStart, ...described(tool, meta) })
       lastFailure = null
       return { ok: true, result }
@@ -987,6 +993,95 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
       return { ok: false, code, repeated, ...(typeof error?.staleBy === 'string' ? { staleBy: error.staleBy } : {}), ...(typeof error?.targetBy === 'string' ? { targetBy: error.targetBy } : {}) }
     }
   }
+
+  // L55 (round f, owner: "그런 것들도 decision model이 보고 결정하게끔 해줘"; BROWSER_FRACTURE_ANALYSIS P0 #4 mandatory reobserve): an act the page actor refused as not sent because the
+  // observation moved (a clock, a ticker, a rotating banner moves `revision` on any DOM change) is not refused mechanically. The loop looks again, builds the closed change summary
+  // (egdesk-browser-change.mjs), and asks the decision model ONE request on the fresh observation (the step's own next_step plus the page-state predicates plus a change_wait predicate):
+  // the same target (proceed), another target of the same kind (re-target), wait for the page to settle, or anything else (the loop's own decision on a fresh observation, which also
+  // asks the person-only page states again). The act itself uses a look taken AFTER that request, and only when the decided target is the same element by code (targetKey); if it
+  // changed under the request it is decided again. At most CHANGE_REDECISIONS looks per refused act; the document replaced or no look that settles = an honest hand-off.
+  // Person-only controls never become candidates (buildReflexCandidates), a POST submit and a site request keep their own gates (changeEligible), a refused change never widens a gate.
+  let changeReplans = 0 // L55: replaced-document re-decisions in a row (reset by a real act); bounded like the rounds
+  const changeStale = done => !done.ok && !done.held && done.code === 'BROWSER_OBSERVATION_STALE' &&
+    ((CHANGE_SAME_DOCUMENT.has(done.staleBy) && done.targetBy !== 'not-editable') || CHANGE_REPLACED_DOCUMENT.has(done.staleBy))
+  // -> { done, option } (acted: the act result of the last try) | { replan: true } (the loop decides anew on a fresh observation) | { unsettled: true } | { held: true } | { aborted: true } |
+  //    { fallback: reason } | { result } (a finished loop result)
+  async function actThroughChange(entry, failed, ctx) {
+    const rounds = (entry.change = { rounds: [] }).rounds
+    const replan = () => (++changeReplans > CHANGE_REDECISIONS ? { unsettled: true } : { replan: true })
+    if (CHANGE_REPLACED_DOCUMENT.has(failed.staleBy)) {
+      rounds.push({ replaced: true })
+      return replan()
+    }
+    let before = ctx.snapshot, option = ctx.option, approved = null
+    const look = async () => {
+      const fresh = await callTool('egdesk_browser_observe', { cardId })
+      const now = fresh?.snapshot
+      if (!record(now) || typeof fresh?.observationId !== 'string' || !Number.isSafeInteger(now.revision)) throw Object.assign(new Error('observe'), { code: 'OBSERVE_FAILED' })
+      return { id: fresh.observationId, now }
+    }
+    const candidates = now => {
+      const built = buildReflexCandidates(now, { authority, namedButtonRequest, askSite: textComboboxes, ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}), ...(textComboboxes === true ? { textComboboxes: true } : {}) })
+      return notEditable.size ? built.options.filter(o => !(o.item.kind === 'fill' && notEditable.has(fieldKey(now, o.item.element.ref)))) : built.options
+    }
+    const sameDocument = now => now.url === before.url && now.documentId === before.documentId
+    for (let round = 1; round <= CHANGE_REDECISIONS; round++) {
+      if (signal?.aborted) return { aborted: true }
+      let seenNow
+      try { seenNow = await look() } catch (error) { return isBrowserUserHold(error) ? { held: true } : { result: finish('escalated', { reason: 'observe_failed', code: typeof error?.code === 'string' ? error.code : null }) } }
+      if (signal?.aborted) return { aborted: true }
+      if (!sameDocument(seenNow.now)) { rounds.push({ replaced: true }); return replan() }
+      const find = (now, wanted) => candidates(now).find(o => fieldRef(o) === wanted.ref && o.item.kind === wanted.kind && targetKey(o.item.element, { value: wanted.kind !== 'fill' }) === wanted.key)
+      let current = approved ? find(seenNow.now, approved) : null
+      const summary = summarizeChange(before, seenNow.now, fieldRef(option))
+      const row = { round, target: summary.target, fields: summary.targetFields, changed: summary.changedElements, added: summary.addedElements, removed: summary.removedElements,
+        onTarget: summary.overlapsTarget, dialog: summary.dialogAppeared, text: summary.textLines }
+      rounds.push(row)
+      if (!current) {
+        // ONE decision request on the fresh observation: what changed (code), the page's own judgments (the predicates), the step's choice (next_step)
+        const now = seenNow.now, options = candidates(now)
+        const intended = `${optionOp(option)} ${JSON.stringify(compactText(optionTarget(option) ?? option.value, 80))}`
+        let decision
+        try {
+          decision = await decideReflexStep({ chatTask: valuesFirst, goal, snapshot: pageText === false ? withoutPageText(now) : now, options, history, pendingValues: ctx.valueName ? [ctx.valueName] : [], userContext: contextLines, today,
+            change: { evidence: changeEvidence(summary, { intended, round, total: CHANGE_REDECISIONS }) }, client, thresholds, timeoutMs, signal, authorizeDispatch })
+        } catch (error) { return signal?.aborted ? { aborted: true } : { fallback: failure(error) } }
+        if (signal?.aborted) return { aborted: true }
+        if (isDecisionCurrent && !isDecisionCurrent()) return { result: finish('fallback', { reason: 'evidence_unavailable' }) }
+        row.decided = decision.kind === 'act' ? (fieldRef(decision.option) === fieldRef(option) ? 'same' : 'other') : decision.kind
+        if (decision.kind === 'handoff') return { result: finish('handoff', { pageState: decision.pageState, url: now.url }) }
+        if (decision.kind === 'blocked') return { result: finish('escalated', { reason: BLOCKED_STATES.has(decision.pageState) ? decision.pageState : 'blocked', ranked: decision.ranked }) }
+        if (decision.kind === 'wait') {
+          try { await callTool('egdesk_browser_wait', { cardId, for: 'idle', timeoutMs: 3000 }) } catch (error) { if (isBrowserUserHold(error)) return { held: true } }
+          before = now
+          continue
+        }
+        if (decision.kind !== 'act') return replan()
+        const chosen = decision.option
+        if (fieldRef(chosen) !== fieldRef(option) && !changeRetargetable(option, chosen)) return replan()
+        if (!changeEligible(chosen)) return replan()
+        approved = { ref: fieldRef(chosen), kind: chosen.item.kind, key: targetKey(chosen.item.element, { value: chosen.item.kind !== 'fill' }) }
+        option = chosen
+        // the guard is taken from a look AFTER the request (it took longer than the page's changes): the decided target must still be the same element
+        try { seenNow = await look() } catch (error) { return isBrowserUserHold(error) ? { held: true } : { result: finish('escalated', { reason: 'observe_failed' }) } }
+        if (signal?.aborted) return { aborted: true }
+        if (!sameDocument(seenNow.now)) { row.replaced = true; return replan() }
+        current = find(seenNow.now, approved)
+        if (!current) { before = seenNow.now; approved = null; continue }
+      }
+      option = current
+      const action = reflexActionArgs(option, { cardId, observationId: seenNow.id, snapshot: seenNow.now, text: ctx.text })
+      if (action.needsText || action.escalate) return replan()
+      const done = await act(entry, action.tool, action.args, ctx.meta(option, action))
+      if (done.held) return { held: true }
+      row.acted = done.ok ? 'ok' : done.code
+      if (done.ok || !changeStale(done)) return { done, option, action }
+      before = seenNow.now
+      if (CHANGE_REPLACED_DOCUMENT.has(done.staleBy)) return replan()
+    }
+    return { unsettled: true }
+  }
+  const unsettledResult = () => finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OBSERVATION_STALE', unsettled: true })
 
   // The supplied values for this page: bind each (an exact field name first, else one mapping request) and type the first ready one. -> { result } (the loop returns it) |
   // { typed: true } (a field was typed: next step) | { typed: false } | { retry: true } (L6 a1b: the fill was refused as not sent: next step, decided anew). firstPass (a1 valuesFirst):
@@ -1059,12 +1154,29 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
       }
       const ready = answered ?? readyFields.keys().next().value
       if (ready) {
-        const option = readyFields.get(ready)
-        const action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
+        let option = readyFields.get(ready)
+        let action = reflexActionArgs(option, { cardId, observationId, snapshot, text: pending.get(ready) })
         if (action.needsText) return { result: finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) }) }
         attemptedRefs.add(action.args.ref)
-        const done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready, ...optionStepDisplay(option, action.args.text) })
+        let done = await act(entry, action.tool, action.args, { op: 'fill', target: optionTarget(option), valueName: ready, ...optionStepDisplay(option, action.args.text) })
         if (done.held) return { result: heldResult() }
+        if (changeStale(done)) {
+          // L55: the page changed under the decided fill: the decision model sees what changed and decides (same field, another field, wait, or the loop decides anew)
+          const via = await actThroughChange(entry, done, { option, snapshot, text: pending.get(ready), valueName: ready, meta: (opt, act2) => ({ op: 'fill', target: optionTarget(opt), valueName: ready, ...optionStepDisplay(opt, act2.args.text) }) })
+          if (via.held) return { result: heldResult() }
+          if (via.aborted) return { result: finish('aborted') }
+          if (via.fallback) return { result: finish('fallback', { reason: via.fallback }) }
+          if (via.result) return { result: via.result }
+          if (via.unsettled) return { result: unsettledResult() }
+          if (via.replan) {
+            if (staleRetried.has(ready)) return { result: unsettledResult() } // once per value, as before (L6 a1b)
+            staleRetried.add(ready)
+            attemptedRefs.delete(action.args.ref); assigned.delete(ready); unmatched.delete(ready)
+            for (const tried of [...triedHere]) if (tried.startsWith(`${ready}|`)) triedHere.delete(tried)
+            return { retry: true }
+          }
+          if (via.done) { done = via.done; option = via.option; action = via.action; attemptedRefs.add(action.args.ref) }
+        }
         if (done.ok && option.item.element.role === 'time' && done.result?.status !== 'postcondition-observed') return { result: finish('escalated', { reason: 'tool_failed', code: 'BROWSER_OUTCOME_UNKNOWN' }) }
         if (done.ok) { pending.delete(ready); history.push(`filled ${option.value}`); typedTexts.push(action.args.text) }
         else if (done.code === 'BROWSER_OBSERVATION_STALE' && SAME_DOCUMENT_NOT_SENT.has(done.staleBy) && !staleRetried.has(ready)) {
@@ -1279,7 +1391,7 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
         continue
       }
       default: {
-        const option = decision.option
+        let option = decision.option
         let origin = { cardId, observationId, snapshot }
         if (option.item.postUrl) {
           const label = option.item.element.label
@@ -1343,7 +1455,7 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
           }
           origin = { cardId, observationId: fresh.observationId, snapshot: now }
         }
-        const action = reflexActionArgs(option, origin)
+        let action = reflexActionArgs(option, origin)
         if (action.needsText) return finish('needs_free_text', { field: option.value, label: compactText(option.item.element.label, 100), fieldTarget: askedFieldTarget(snapshot, option) })
         if (action.escalate) {
           return finish('escalated', { reason: action.escalate, observationId,
@@ -1359,8 +1471,19 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
           const seen = await callTool('egdesk_browser_observe', { cardId })
           return navigationLanded({ actual: seen?.snapshot?.url, expected: expectedUrl, from: snapshot.url, submitted })
         } : null
-        const done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...optionStepDisplay(option, action.args.text), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
+        let done = await act(entry, action.tool, action.args, { op: optionOp(option), target: optionTarget(option), ...optionStepDisplay(option, action.args.text), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) })
         if (done.held) return heldResult()
+        if (changeStale(done) && changeEligible(option)) {
+          // L55: the page changed under the decided press: the decision model sees what changed and decides (same target, another target, wait, or the loop decides anew)
+          const via = await actThroughChange(entry, done, { option, snapshot, text: null, valueName: null, meta: (opt, act2) => ({ op: optionOp(opt), target: optionTarget(opt), ...optionStepDisplay(opt, act2.args.text), ...(landed ? { landed, landedStatus: submitted ? 'form-result-observed' : 'navigation-observed' } : {}) }) })
+          if (via.held) return heldResult()
+          if (via.aborted) return finish('aborted')
+          if (via.fallback) return finish('fallback', { reason: via.fallback })
+          if (via.result) return via.result
+          if (via.unsettled) return unsettledResult()
+          if (via.replan) continue
+          if (via.done) { done = via.done; option = via.option; action = via.action }
+        }
         if ((done.ok || done.code === 'POSTCONDITION_UNVERIFIED') && popupDone()) { entry.rule = 'popup_loaded'; return finish('done') }
         if (!done.ok) {
           if (option.item.named || option.item.kind === 'choice' || option.item.askSite || done.repeated) return finish('escalated', { reason: 'tool_failed', code: done.code })
