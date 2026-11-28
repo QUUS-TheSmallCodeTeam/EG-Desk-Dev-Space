@@ -26406,7 +26406,7 @@
     return {
       id: card.id,
       rect: () => browser.getBoundingClientRect(),
-      scale: () => { const w = browser.offsetWidth; return w > 0 ? browser.getBoundingClientRect().width / w : null; }, // effective zoom of the canvas
+      scale: () => (state.zoom > 0 ? state.zoom : null), // canvas zoom; the browser element's own ratio is ~0.53x of it (scaled again inside the card)
       prepareSleep: () => CardSleep.sleepBrowserWithFrame(browser, { dpr: window.devicePixelRatio || 1 }).then(r => { cardSleepFrames.set(card.id, browser); return r; }),
       setAwake: (awake) => { CardSleep.setBrowserAwake(browser, awake); if (awake) CardSleep.wakeBrowserWithFrame(browser); else if (!browser._egdSleepFrame) { /* no snapshot: blank, as in v1 */ } },
     };
@@ -26437,7 +26437,7 @@
     cardSleepTimer = window.setInterval(() => { try { cardSleeper.tick(); } catch (error) { console.warn(TAG, 'card sleep tick failed', error); } }, CardSleep.TICK_MS);
     window.addEventListener('unload', () => window.clearInterval(cardSleepTimer), { once: true });
   }
-  // L48 diagnostics: window.__egdesk.cardSleepReport() -> [{ id, asleep, framed, visible:'WxH', areaPct, scale }]
+  // L48 diagnostics: window.__egdesk.cardSleepReport() -> [{ id, asleep, framed, visible:'WxH', areaPct, scale (canvas zoom), innerRatio, lastCaptureError }]
   function cardSleepReport() {
     const vp = { width: window.innerWidth, height: window.innerHeight };
     const asleepIds = new Set((cardSleeper?.states?.() || []).filter(e => e.asleep).map(e => e.id));
@@ -26445,7 +26445,8 @@
       const b = card._xulBrowser, r = b.getBoundingClientRect(), v = CardSleep.visibleSize(r, vp);
       return { id: card.id, enabled: !!cardSleeper, asleep: asleepIds.has(card.id), framed: !!b._egdSleepFrame,
         visible: Math.round(v.width) + 'x' + Math.round(v.height), areaPct: Math.round(1000 * v.width * v.height / (vp.width * vp.height)) / 10,
-        scale: b.offsetWidth > 0 ? Math.round(1000 * r.width / b.offsetWidth) / 1000 : null };
+        scale: Math.round(1000 * (state.zoom || 0)) / 1000, innerRatio: b.offsetWidth > 0 ? Math.round(1000 * r.width / b.offsetWidth) / 1000 : null,
+        lastCaptureError: String(b._egdSleepError || '') };
     });
   }
   // Before any tool (entry, work, observe, capture) uses a card: wake it first; keep it awake while the call runs and for a while after.
