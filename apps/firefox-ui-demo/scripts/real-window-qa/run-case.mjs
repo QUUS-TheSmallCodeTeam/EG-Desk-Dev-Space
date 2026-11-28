@@ -2,7 +2,10 @@
 import { execFileSync, spawn } from 'node:child_process'; import fs from 'node:fs'; import path from 'node:path'; import { fileURLToPath } from 'node:url'
 const Q = path.dirname(fileURLToPath(import.meta.url)), D = process.env.EGDESK_APP_DIR || path.resolve(Q, '../..'), OUT = process.env.EGDESK_QA_OUT || '/tmp/egdesk-real-window-qa', N = process.env.NODE || process.execPath
 const [, , id, engine = "Codex", rep = "1"] = process.argv
-const { CASES } = await import(`${Q}/${String(id).startsWith('rws-') ? 'cases-rws' : 'cases'}.mjs`); const c = CASES[id]; if (!c) throw new Error('no case ' + id)
+const { CASES } = await import(`${Q}/${String(id).startsWith('rws-') ? 'cases-rws' : 'cases'}.mjs`); if (!CASES[id]) throw new Error('no case ' + id)
+// data: URL fixtures are rejected by the EG-Desk fixture-QA policy (QA_POLICY_UNVERIFIED): write them to $EGDESK_QA_OUT/fixtures and serve them as http://127.0.0.1:<port>/<file> (default 8770, EGDESK_QA_FIXTURE_PORT). Cases without data: urls are untouched.
+const { rewriteFixtureUrls, spawnFixtureServer } = await import(`${Q}/fixture-server.mjs`); const FX = `${OUT}/fixtures`; const fx = rewriteFixtureUrls(CASES[id], id, { dir: FX }); const c = fx.c
+const fxServer = fx.files.length ? await spawnFixtureServer({ dir: FX, node: N }) : null; const stopFx = async () => { try { await fxServer?.stop() } catch {} }; process.on('exit', () => { try { fxServer?.stop() } catch {} })
 const sh = (cmd, args, opts = {}) => { try { return execFileSync(cmd, args, { cwd: (cmd === N && args[0] === "scripts/egdesk-turn-timeline.mjs") ? D : Q, encoding: 'utf8', timeout: opts.timeout ?? 200000 }).trim() } catch (e) { return String(e.stdout || '') + ' ERR ' + String(e.message).slice(0, 120) } }
 const evalIn = (card, expr) => { const out = sh(N, ['page-eval.mjs', card, expr]); try { return JSON.parse(out) } catch { return { error: out.slice(0, 160) } } }
 const kstIso = () => new Date(Date.now() + 9 * 3600000).toISOString().replace('Z', '+09:00')
@@ -46,3 +49,4 @@ rec.pass = rec.setup && rec.checks.length > 0 && rec.checks.every(x => x.ok)
 fs.mkdirSync(`${OUT}`, { recursive: true }); fs.appendFileSync(`${OUT}/matrix.jsonl`, JSON.stringify(rec) + '\n')
 console.log(`${rec.pass ? 'PASS' : 'FAIL'} case ${id} ${c.name} ${engine}#${rep} | ${rec.checks.map(x => (x.ok ? 'ok' : 'NO') + ':' + x.expr.slice(0, 28) + (x.ok ? '' : '=' + JSON.stringify(x.got).slice(0, 40))).join(' ; ')}`)
 console.log(`   turns: ${rec.turns.join(' || ')} | decision(steps line): ${JSON.stringify(rec.decisionFromSteps)}`); console.log(`   steps: ${rec.steps.slice(0, 220)}`); console.log(`   answer: ${rec.answer.slice(0, 160)}`)
+await stopFx()
