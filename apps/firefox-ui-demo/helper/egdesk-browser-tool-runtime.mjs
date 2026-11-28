@@ -47,10 +47,6 @@ const SCREENSHOT_OBSERVE_OPTIONS = Object.freeze({ textLimit: 1, elementLimit: 1
 // short budget of its own. Never a retry of the action (REA EG-01).
 const RECONCILE_TIMEOUT_MS = 3000
 const DIALOG_TYPES = new Set(['alert', 'confirm', 'prompt', 'beforeunload'])
-// Fill text and its full-value postcondition share one bounded UI request
-// (codex-browser-tool-transport.mjs refuses requests over 48000 characters).
-const MAX_FILL_TEXT = 8000
-const MAX_FILL_REQUEST_JSON = 40000
 const OBSERVED_VALUE_MAX = 120
 // BRW-07: history moves EG-Desk chrome dispatches on the Card; Cards per run.
 const HISTORY_ACTIONS = ['back', 'forward', 'reload']
@@ -75,7 +71,7 @@ export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_click', 'Request one guarded DOM click on an observed element without pointerdown or a focus step. A site may ignore synthetic clicks or focus another element itself. Requires a fresh observation, exact target precondition and testable DOM postcondition; an interaction grant is not proof of external authorization or submission success. A click that would land on another element is refused before input, and the error names what covers it (obscuredBy) so you can deal with that element first.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'postcondition']),
-  spec('egdesk_browser_fill', 'Fill an observed non-password field, or replace the text of an observed contenteditable editor, in the bound Browser Card with up to 8000 characters, without moving focus. Requires a fresh observation, exact target precondition and a target-value postcondition holding the full value you expect. Observations show a field value over 120 characters as a prefix with its length and fingerprint, and editor text only as its length and fingerprint; EG-Desk compares the postcondition in that form. An editor may handle the input itself, so a multi-line editor value can stay unverified.',
+  spec('egdesk_browser_fill', 'Fill an observed non-password field, or replace the text of an observed contenteditable editor, in the bound Browser Card of any length, without moving focus. Requires a fresh observation, exact target precondition and a target-value postcondition holding the full value you expect. Observations show a field value over 120 characters as a prefix with its length and fingerprint, and editor text only as its length and fingerprint; EG-Desk compares the postcondition in that form. An editor may handle the input itself, so a multi-line editor value can stay unverified.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, text: { type: 'string' }, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition']),
   spec('egdesk_browser_scroll', 'Scroll the bound Browser Card with the DOM scroll API, without focus or pointer input: either direction (up, down, top, bottom) by amount (page or half, default page) for the page, ref with expectedTarget to bring one observed element into view, or ref and expectedTarget of an element listed in scrollContainers together with direction (and amount) to scroll inside that element. Requires a fresh observation and returns the observed scroll position change; scrolling does not prove that more content loaded.',
@@ -111,7 +107,7 @@ export const BROWSER_TOOL_SPECS = [
   spec('egdesk_browser_pointer_click', 'Press an observed element like a person: one trusted pointer move, button down and button up at the centre of its observed bounds, for menus and buttons that react to pointerdown, mousedown or hover and ignore egdesk_browser_click. Use it only after egdesk_browser_click on the same element was dispatched and a quiet settle reported no observed effect. Observe again first: the document, exact URL and revision must still match, with no intervening state-changing Browser request in this run. The point comes only from the fresh observation and is used only while the page, its scroll position, the viewport size, devicePixelRatio and page zoom are unchanged; otherwise it is refused before input. It is never retried and never replaces a click on its own. It moves the page\'s own focus to the pressed element, may let the page open a popup or download as after a person\'s click, and a press that would land on another element is refused with obscuredBy. Requires the exact target precondition and a testable postcondition; neither a quiet settle nor a dispatched press proves anything about external effects.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'postcondition']),
-  spec('egdesk_browser_type', 'Type text like a person into the observed text field or editor that already has the focus in its page (observe focusedElement; egdesk_browser_pointer_click on a field focuses it), through the browser\'s own text input path, then optionally press one key the same way (key; the browser runs that key\'s default action, so Enter may submit a form). EG-Desk never moves focus; an unfocused, password or sensitive target is refused. Text goes in at the caret and does not replace the existing value (use egdesk_browser_fill to replace). Up to 8000 characters, or empty text with a key. Requires a fresh observation, exact target precondition and a testable postcondition; never retried.',
+  spec('egdesk_browser_type', 'Type text like a person into the observed text field or editor that already has the focus in its page (observe focusedElement; egdesk_browser_pointer_click on a field focuses it), through the browser\'s own text input path, then optionally press one key the same way (key; the browser runs that key\'s default action, so Enter may submit a form). EG-Desk never moves focus; an unfocused, password or sensitive target is refused. Text goes in at the caret and does not replace the existing value (use egdesk_browser_fill to replace). Any length, or empty text with a key. Requires a fresh observation, exact target precondition and a testable postcondition; never retried.',
     { ...base, ref: { type: 'string' }, expectedTarget: target, text: { type: 'string' }, key: { type: 'string', enum: PRESS_KEYS }, postcondition },
     ['cardId', 'observationId', 'expectedRevision', 'ref', 'expectedTarget', 'text', 'postcondition']),
 ]
@@ -245,7 +241,7 @@ function fingerprint(text) {
 }
 export function boundedFieldValue(raw, { editor = false } = {}) {
   const text = String(raw ?? '')
-  const size = text.length > MAX_FILL_TEXT ? `over ${MAX_FILL_TEXT} chars` : `${text.length} chars, #${fingerprint(text)}`
+  const size = `${text.length} chars, #${fingerprint(text)}`
   if (editor) return text ? `[editor text hidden: ${size}]` : '[editor text hidden: empty]'
   return text.length <= OBSERVED_VALUE_MAX ? compact(text, OBSERVED_VALUE_MAX) : `${compact(text, 96)} [${size}]`
 }
@@ -357,7 +353,7 @@ function validateArgs(tool, args) {
     }
     return
   }
-  if (!(tool === 'egdesk_browser_click' && args.postcondition === NAMED_CHANGE) && !validPostcondition(args.postcondition, ['egdesk_browser_fill', 'egdesk_browser_type'].includes(tool) ? MAX_FILL_TEXT : 512)) {
+  if (!(tool === 'egdesk_browser_click' && args.postcondition === NAMED_CHANGE) && !validPostcondition(args.postcondition, ['egdesk_browser_fill', 'egdesk_browser_type'].includes(tool) ? Infinity : 512)) {
     reject('INVALID_BROWSER_TOOL', 'Fresh observation and postcondition are required')
   }
   if (tool === 'egdesk_browser_navigate') {
@@ -366,15 +362,12 @@ function validateArgs(tool, args) {
     return
   }
   if (!validTarget(args)) reject('INVALID_BROWSER_TOOL', 'An exact observed element precondition is required')
-  if (tool === 'egdesk_browser_fill' && (typeof args.text !== 'string' || args.text.length > MAX_FILL_TEXT ||
-      args.postcondition.kind !== 'target-value' ||
-      JSON.stringify(args.text).length + JSON.stringify(args.postcondition.value).length > MAX_FILL_REQUEST_JSON)) {
-    reject('INVALID_BROWSER_TOOL', 'Fill requires text up to 8000 characters and a target-value postcondition')
+  if (tool === 'egdesk_browser_fill' && (typeof args.text !== 'string' || args.postcondition.kind !== 'target-value')) {
+    reject('INVALID_BROWSER_TOOL', 'Fill requires text and a target-value postcondition')
   }
-  if (tool === 'egdesk_browser_type' && (typeof args.text !== 'string' || args.text.length > MAX_FILL_TEXT ||
-      (Object.hasOwn(args, 'key') && !PRESS_KEYS.includes(args.key)) || (!args.text && !Object.hasOwn(args, 'key')) ||
-      JSON.stringify(args.text).length + JSON.stringify(args.postcondition.value).length > MAX_FILL_REQUEST_JSON)) {
-    reject('INVALID_BROWSER_TOOL', 'Type requires text up to 8000 characters (or a guarded key) and a postcondition')
+  if (tool === 'egdesk_browser_type' && (typeof args.text !== 'string' ||
+      (Object.hasOwn(args, 'key') && !PRESS_KEYS.includes(args.key)) || (!args.text && !Object.hasOwn(args, 'key')))) {
+    reject('INVALID_BROWSER_TOOL', 'Type requires text (or a guarded key) and a postcondition')
   }
 }
 function sameClickScope(left, right) {

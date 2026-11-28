@@ -1008,11 +1008,11 @@ function fillFixture(readback) {
 const fillArgs = (seen, ref, text, value = text) => ({ cardId: 'browser-1', observationId: seen.observationId,
   expectedRevision: 3, ref, expectedTarget: targetOf(seen, ref), text, postcondition: { kind: 'target-value', value } })
 
-test('fill advertises editors, frame refs and the 8000-character bound without changing its schema', () => {
+test('fill advertises editors, frame refs and no length bound without changing its schema', () => {
   const fill = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_fill')
   const observe = BROWSER_TOOL_SPECS.find(item => item.name === 'egdesk_browser_observe')
   assert.match(fill.description, /contenteditable editor/)
-  assert.match(fill.description, /up to 8000 characters/)
+  assert.match(fill.description, /of any length/)
   assert.match(fill.description, /without moving focus/)
   assert.match(observe.description, /same-origin frames/)
   assert.match(observe.description, /inaccessibleFrames/)
@@ -1057,21 +1057,18 @@ test('an editor that restructures or drops the text leaves the fill unverified a
   assert.equal(f.acts().length, 1)
 })
 
-test('fill text and its postcondition stay bounded before any UI request', async () => {
+test('fill text of any length reaches the UI; other postconditions keep 512', async () => {
   const f = fillFixture(text => text)
   await f.bind()
   const seen = await f.observe()
-  for (const [text, value] of [['x'.repeat(8001), 'x'], ['x', 'x'.repeat(8001)],
-    ['\u0001'.repeat(8000), '\u0001'.repeat(8000)]]) {
-    await assert.rejects(f.dispatch('egdesk_browser_fill', fillArgs(seen, 'el_2', text, value)), { code: 'INVALID_BROWSER_TOOL' })
-  }
   await assert.rejects(f.dispatch('egdesk_browser_click', { cardId: 'browser-1', observationId: seen.observationId,
     expectedRevision: 3, ref: 'el_2', expectedTarget: targetOf(seen, 'el_2'),
     postcondition: { kind: 'target-value', value: 'x'.repeat(513) } }), { code: 'INVALID_BROWSER_TOOL' },
     'other tools keep their 512-character postcondition bound')
   assert.equal(f.acts().length, 0)
-  const longest = '가'.repeat(8000)
+  const longest = '가😀\n'.repeat(70000)
   assert.equal((await f.dispatch('egdesk_browser_fill', fillArgs(seen, 'el_2', longest))).status, 'postcondition-observed')
+  assert.equal(f.acts().at(-1).action.text.length, 280000)
 })
 
 test('a frame-ref fill after Stop reaches the UI zero times, and a timed-out long fill stays unknown', async t => {
@@ -1941,7 +1938,7 @@ test('BRW-10: typing needs the observed focused element and sends text (and an o
   assert.equal(f.acts().length, 0)
   f.current = focusedSearch()
   seen = await f.observe()
-  for (const bad of [{ text: '' }, { text: 'x'.repeat(8001) }, { key: 'F5' }, { text: 1 }]) {
+  for (const bad of [{ text: '' }, { key: 'F5' }, { text: 1 }]) {
     await assert.rejects(f.dispatch('egdesk_browser_type', typeArgs(seen, bad)), { code: 'INVALID_BROWSER_TOOL' })
   }
   f.setAct(request => { f.current = typedSnapshot('hello'); return f.acted(request, f.current, typeReceipt()) })

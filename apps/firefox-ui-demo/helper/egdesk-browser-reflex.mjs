@@ -37,7 +37,6 @@ export const DEFAULT_REFLEX_MAX_STEPS = 6
 const MAX_REFLEX_STEPS = 12
 const MAX_GOAL = 500
 const MAX_VALUES = 20
-const MAX_VALUE_TEXT = 8000 // egdesk_browser_fill limit
 const TEXT_BUDGET = 4000
 
 export const BROWSER_REFLEX_TOOL_SPEC = Object.freeze({
@@ -824,8 +823,8 @@ export function validateReflexArgs(args) {
     if (!record(args.values)) return 'values must be an object of strings'
     const entries = Object.entries(args.values)
     if (entries.length > MAX_VALUES) return `at most ${MAX_VALUES} values`
-    if (entries.some(([key, value]) => !key || key.length > 200 || typeof value !== 'string' || value.length > MAX_VALUE_TEXT)) {
-      return `values must map names to strings of at most ${MAX_VALUE_TEXT} characters`
+    if (entries.some(([key, value]) => !key || key.length > 200 || typeof value !== 'string')) {
+      return 'values must map names to strings'
     }
   }
   if (args.maxSteps !== undefined && !(Number.isSafeInteger(args.maxSteps) && args.maxSteps >= 1 && args.maxSteps <= MAX_REFLEX_STEPS)) {

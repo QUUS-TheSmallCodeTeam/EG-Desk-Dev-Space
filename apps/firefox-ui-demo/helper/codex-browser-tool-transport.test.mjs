@@ -36,6 +36,28 @@ test('Browser request targets only its selected v2 UI stream and accepts one mat
   assert.throws(() => h.transport.receive(chosen, { requestId, status: 'observed' }), error => error.code === 'BROWSER_UI_RESPONSE_STALE')
 })
 
+test('a 200000-character fill request crosses the stream whole, on one SSE data line', async () => {
+  const h = harness()
+  const chosen = h.transport.registerClient(h.client('chosen'))
+  h.transport.bindRun('run-1', 'ui-thread-1', chosen)
+  const text = '가😀 line\n"quote"\\\u2028'.repeat(20000).slice(0, 200000)
+  assert.equal(text.length, 200000)
+  const pending = h.transport.sendToUi({ ...h.request(), kind: 'act', action: { type: 'fill', ref: 'el_1', text } })
+  assert.equal(h.sent.length, 1)
+  const frame = h.sent[0].frame
+  assert.equal(frame.split('\n').length, 4, 'event, data, blank, trailing: no raw newline inside the payload')
+  assert.equal(h.wire().action.text, text, 'text arrives identical, in order')
+  h.transport.receive(chosen, { requestId: h.wire().requestId, status: 'acted' })
+  assert.equal((await pending).status, 'acted')
+})
+
+test('a closed stream is still an honest failure for a very long request', async () => {
+  const h = harness()
+  const chosen = h.transport.registerClient({ chatProtocol: 2, closed: false, send: () => false })
+  h.transport.bindRun('run-1', 'ui-thread-1', chosen)
+  await assert.rejects(h.transport.sendToUi({ ...h.request(), action: { text: 'x'.repeat(300000) } }), error => error.code === 'BROWSER_UI_DISCONNECTED')
+})
+
 test('Browser stream loss and account changes cannot complete a pending action', async () => {
   const h = harness()
   const chosen = h.transport.registerClient(h.client('chosen'))

@@ -20,7 +20,6 @@ const IMPLICIT_SUBMIT_TYPES = ["text", "search", "email", "url", "tel", "passwor
   "week", "time", "datetime-local", "number"];
 const MAX_WAIT_MS = 10000;
 // Longest guarded fill text, and longest current value a guard can compare.
-const MAX_FILL_TEXT = 8000;
 // Values up to this length are observed as text; longer field values as a
 // prefix plus length and fingerprint, editor text only as length and
 // fingerprint. helper/egdesk-browser-tool-runtime.mjs boundedFieldValue
@@ -29,7 +28,6 @@ const OBSERVED_VALUE_MAX = 120;
 const MAX_FRAME_DEPTH = 4;
 const MAX_SHADOW_DEPTH = 16;
 const MAX_SCAN_ELEMENTS = 20000;
-const MAX_EDITOR_NODES = 20000;
 const MAX_INACCESSIBLE_FRAMES = 20;
 // BRW-09 screenshot cover pass: form controls and editors (sensitive ones
 // are covered), and embedded documents the observation did not read.
@@ -161,8 +159,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
 
   boundedValue(raw, { editor = false } = {}) {
     const text = String(raw ?? "");
-    const size = text.length > MAX_FILL_TEXT ? `over ${MAX_FILL_TEXT} chars`
-      : `${text.length} chars, #${this.fingerprint(text)}`;
+    const size = `${text.length} chars, #${this.fingerprint(text)}`;
     if (editor) return text ? `[editor text hidden: ${size}]` : "[editor text hidden: empty]";
     return text.length <= OBSERVED_VALUE_MAX ? this.compact(text, OBSERVED_VALUE_MAX)
       : `${this.compact(text, 96)} [${size}]`;
@@ -819,22 +816,22 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
   // Editor text as EG-Desk writes it: text nodes, with <br> as a line break.
   // Paragraphs an editor builds itself are not inferred, so a multi-line value
   // the page restructured reads back as different (unverified), never equal.
-  // Past the node or length bound it reads as over the bound.
+  // No length or node bound: the whole text is read (iteratively, in document
+  // order) so its fingerprint covers every character.
   editorText(host) {
-    if (!host?.childNodes) return String(host?.textContent || "").slice(0, MAX_FILL_TEXT + 1);
-    let text = "", visited = 0, overflow = false;
-    const walk = node => {
-      for (const child of Array.from(node.childNodes || [])) {
-        if (++visited > MAX_EDITOR_NODES || text.length > MAX_FILL_TEXT) { overflow = true; return; }
-        if (child.nodeType === 3) text += child.nodeValue || "";
-        else if (child.nodeType === 1) {
-          if (String(child.tagName || "").toUpperCase() === "BR") text += "\n";
-          else walk(child);
-        }
+    if (!host?.childNodes) return String(host?.textContent || "");
+    const parts = [], stack = [Array.from(host.childNodes || []).reverse()];
+    while (stack.length) {
+      const list = stack[stack.length - 1];
+      const child = list.pop();
+      if (!child) { stack.pop(); continue; }
+      if (child.nodeType === 3) parts.push(child.nodeValue || "");
+      else if (child.nodeType === 1) {
+        if (String(child.tagName || "").toUpperCase() === "BR") parts.push("\n");
+        else stack.push(Array.from(child.childNodes || []).reverse());
       }
-    };
-    walk(host);
-    return (overflow ? text.padEnd(MAX_FILL_TEXT + 1, "\u0000") : text).slice(0, MAX_FILL_TEXT + 1);
+    }
+    return parts.join("");
   }
 
   writeEditorText(host, text) {
@@ -1477,14 +1474,11 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (action.type === "fill" && !this.isFillableControl(target)) {
       throw new Error("Browser target is not an editable field [not-editable]; observe again");
     }
-    if (action.type === "fill" && (typeof action.text !== "string" || action.text.length > MAX_FILL_TEXT)) {
-      throw new Error("Browser fill text exceeds the bounded input; use the native user path");
+    if (action.type === "fill" && typeof action.text !== "string") {
+      throw new Error("Browser fill needs text");
     }
     // Long current values are compared by length and fingerprint (valueFor),
     // so an edit past the first 120 characters still makes the target stale.
-    if (this.currentValueLength(target) > MAX_FILL_TEXT) {
-      throw new Error("Browser target value exceeds the bounded observation; use the native user path");
-    }
     this.assertSameTarget(target, action.ref, guard.target);
     if (action.type === "press") this.assertKeyTarget(action, guard, target);
     if (action.type === "click") this.assertTopmost(target, "Browser target is obscured");
@@ -1527,9 +1521,7 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (!this.isFillableControl(target) || tag === "select") {
       throw new Error("Browser target is not a text field or editor; observe again");
     }
-    if (typeof action.text !== "string" || action.text.length > MAX_FILL_TEXT) {
-      throw new Error("Browser typed text exceeds the bounded input; use the native user path");
-    }
+    if (typeof action.text !== "string") throw new Error("Browser typing needs text or a key");
     if (action.key != null && !Object.hasOwn(GUARDED_KEYS, action.key)) throw new Error("Browser key is outside the guarded key set");
     if (!action.text && action.key == null) throw new Error("Browser typing needs text or a key");
     if (guard.focusedRef !== action.ref || this.deepActiveElement(this.document) !== target) {

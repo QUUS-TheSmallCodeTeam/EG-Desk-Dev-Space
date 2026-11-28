@@ -84,7 +84,8 @@ export class BrowserToolTransport {
     // ends. No retired-ID history is needed, and an old response stays stale.
     const wireRequestId = randomUUID()
     const data = JSON.stringify({ ...request, requestId: wireRequestId })
-    if (data.length > 48000) throw fail('BROWSER_UI_PROTOCOL', 'Browser UI request exceeds the bounded transport size', 413)
+    // No size bound: the request is one SSE data line (JSON escapes newlines) and
+    // EventSource has no event size limit. A real failure is client.send below.
     return new Promise((resolve, reject) => {
       // Capture the binding generation, not just a reusable run ID.
       const entry = { requestId: request.requestId, wireRequestId, runId: request.runId, runBinding: bound, transportId: bound.transportId,

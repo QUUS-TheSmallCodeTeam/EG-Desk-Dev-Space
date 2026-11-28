@@ -1340,7 +1340,7 @@ test('editor fill fails closed for nested, read-only, private or event-less edit
   }
 })
 
-test('long field values are observed by prefix, length and fingerprint, fill up to 8000 characters and stay guarded', async () => {
+test('long field values are observed by prefix, length and fingerprint, fill any length and stay guarded', async () => {
   const f = localDocumentFixture()
   f.win.KeyboardEvent = class { constructor(name, init) { this.name = name; Object.assign(this, init) } }
   let seen = f.actor.snapshot()
@@ -1370,15 +1370,18 @@ test('long field values are observed by prefix, length and fingerprint, fill up 
     /target changed/, 'a human edit past the first 120 characters changes the fingerprint')
   seen = f.actor.snapshot()
   input = seen.interactiveElements.find(item => item.tag === 'input')
-  await assert.rejects(f.actor.act({ type: 'fill', ref: input.ref, text: 'x'.repeat(8001) }, guarded(guardFrom(seen, input))),
-    /exceeds the bounded input/)
-  f.input.value = 'y'.repeat(8001)
+  const big = '가😀\n'.repeat(50000)
+  f.input.value = big
   seen = f.actor.snapshot()
   input = seen.interactiveElements.find(item => item.tag === 'input')
-  assert.match(input.value, /\[over 8000 chars\]$/)
-  await assert.rejects(f.actor.act({ type: 'fill', ref: input.ref, text: 'short' }, guarded(guardFrom(seen, input))),
-    /exceeds the bounded observation/)
-  assert.equal(f.actor.actorPerformCalls, performCalls)
+  assert.equal(input.value, boundedFieldValue(big), 'a 200000-char value is observed with length and fingerprint')
+  assert.match(input.value, /\[200000 chars, #[0-9a-f]{14}\]$/)
+  f.input.value = big.slice(0, -1) + 'x'
+  const edited = f.actor.snapshot().interactiveElements.find(item => item.tag === 'input')
+  assert.notEqual(edited.value, input.value, 'an edit at the very end changes the fingerprint')
+  f.input.value = big
+  await f.actor.act({ type: 'fill', ref: input.ref, text: big + '끝' }, guarded(guardFrom(seen, input)))
+  assert.equal(f.input.value, big + '끝', 'fill of 200001 chars lands whole')
   assert.equal(f.focusCalls, 0)
 })
 
@@ -2252,8 +2255,8 @@ test('typing commits text and one guarded key through the text input processor o
   assert.equal(f.input.listenerCount(), 0)
 })
 
-test('typing is refused before perform without focus, for a sensitive or non-text target, past 8000 characters or without TIP', async () => {
-  for (const reason of ['unfocused', 'guard-focus', 'password', 'button', 'too-long', 'no-tip', 'bad-key', 'empty', 'budget']) {
+test('typing is refused before perform without focus, for a sensitive or non-text target, or without TIP', async () => {
+  for (const reason of ['unfocused', 'guard-focus', 'password', 'button', 'no-tip', 'bad-key', 'empty', 'budget']) {
     const { f, tip } = typingFixture()
     const before = f.actor.snapshot()
     let target = inputItem(before)
@@ -2268,7 +2271,6 @@ test('typing is refused before perform without focus, for a sensitive or non-tex
       action = { type: 'type-text', ref: target.ref, text: 'hi' }
       Object.assign(options, guarded(guardFrom(before, target)))
     }
-    if (reason === 'too-long') action.text = 'x'.repeat(8001)
     if (reason === 'no-tip') f.actor.createTextInputProcessor = () => null
     if (reason === 'bad-key') action.key = 'F5'
     if (reason === 'empty') action.text = ''
@@ -2341,4 +2343,22 @@ test('Parent receipt filter copies only fixed pointer and typing fields, never t
   for (const bad of [{ key: 'F5' }, { focusPolicy: 'after-fill' }, { textLength: -1 }, { trustedInput: false }]) {
     assert.deepEqual(browserToolDispatchReceiptFields('type-text', { ...typing, ...bad }), {})
   }
+})
+
+test('editor text is read whole at any length and depth, and fingerprinted like a field', () => {
+  const actor = new EGDeskBrowserAgentRuntimeChild()
+  const text = node => ({ nodeType: 3, nodeValue: node })
+  const br = { nodeType: 1, tagName: 'BR', childNodes: [] }
+  const children = []
+  let expected = ''
+  for (let i = 0; i < 30000; i++) { children.push(text('가😀')); children.push(br); expected += '가😀\n' }
+  let deep = { nodeType: 1, tagName: 'SPAN', childNodes: [text('끝')] }
+  for (let i = 0; i < 5000; i++) deep = { nodeType: 1, tagName: 'SPAN', childNodes: [deep] }
+  children.push(deep); expected += '끝'
+  const host = { childNodes: children }
+  const read = actor.editorText(host)
+  assert.equal(read.length, expected.length)
+  assert.equal(read, expected, 'order and content intact past 20000 nodes and 5000 levels')
+  assert.equal(actor.boundedValue(read, { editor: true }), boundedFieldValue(expected, { editor: true }))
+  assert.match(actor.boundedValue(read, { editor: true }), /^\[editor text hidden: \d+ chars, #[0-9a-f]{14}\]$/)
 })
