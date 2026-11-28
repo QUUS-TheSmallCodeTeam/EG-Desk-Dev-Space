@@ -45,3 +45,6 @@
 
 ## RWS 케이스 세트 (라운드 f, 실제 업무 시나리오 15개)
 `cases-rws.mjs`(케이스 `rws-01`~`rws-15`)와 `fixtures-rws.mjs`(data: URL 모의 포털·에디터). `node run-case.mjs rws-03 Codex [회차]`처럼 id가 `rws-`로 시작하면 `run-case.mjs`가 이 세트를 읽는다(기존 숫자 id는 그대로). 추가 필드: `rws`(원본 RWS id), `patterns`, `handoffs`(기대 사람 넘김), `expected`, `answerNotRe`(답에 나오면 안 되는 말). 구조 검증: `node --test cases-rws.test.mjs`.
+
+### data: 픽스처는 http로 서빙된다 (QA_POLICY_UNVERIFIED 회피)
+EG-Desk 픽스처 QA 정책이 data: 페이지를 거절하므로 `run-case.mjs`는 케이스의 `url`/`then`/`also.url`이 data:면 디코드해 `$EGDESK_QA_OUT/fixtures/<케이스id>[-2].html`(UTF-8)로 쓰고 `http://127.0.0.1:8770/<파일>`로 바꿔 이동한다(포트: `EGDESK_QA_FIXTURE_PORT`). 서버(`fixture-server.mjs serve`)는 별도 프로세스로 뜨고 이미 떠 있으면 재사용, 직접 띄운 것만 끝에 종료한다. 대상: `cases-rws.mjs` 전부와 21번(`change-fixture.mjs`). 숫자 케이스 중 data: 없는 것은 그대로. 테스트: `node --test fixture-server.test.mjs cases-rws.test.mjs`.
