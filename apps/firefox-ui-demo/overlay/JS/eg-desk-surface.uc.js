@@ -16389,8 +16389,8 @@
       return response.json();
     };
 
-    // L49: a deleted room's forget goes through one queue (one request at a time, retried, kept in a pref until the bridge answers; resumed at
-    // start and on every bridge connection). See EGDeskForgetQueue.sys.mjs.
+    // L49: a deleted room's forget goes through one queue (one request at a time, retried, kept in a pref until the bridge answers; resumed on
+    // every bridge connection, which includes the first one after a start; nothing runs at load). See EGDeskForgetQueue.sys.mjs.
     let forgetQueueModule = null, forgetQueueInstance = null;
     const ForgetQueue = () => {
       if (forgetQueueInstance) return forgetQueueInstance;
@@ -16409,7 +16409,6 @@
       });
       return forgetQueueInstance;
     };
-    window.setTimeout(() => { try { void ForgetQueue().resume(); } catch {} }, 5000);
 
     // The conversation on the screen was closed or left (another room opened, back to the room list, the room deleted): its live
     // session ends at the bridge, once per leave (POST /chat/session/close; memory only there). Hiding the chat is not leaving, and
