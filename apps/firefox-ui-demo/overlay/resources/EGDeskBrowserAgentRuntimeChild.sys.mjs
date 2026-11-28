@@ -19,7 +19,6 @@ const GUARDED_KEYS = Object.freeze({
 const IMPLICIT_SUBMIT_TYPES = ["text", "search", "email", "url", "tel", "password", "date", "month",
   "week", "time", "datetime-local", "number"];
 const MAX_WAIT_MS = 10000;
-// Longest guarded fill text, and longest current value a guard can compare.
 // L57: the options of a list a snapshot carries (was 32: a time or year list lost its tail, choice.truncated says so). The helper offers the same number (MAX_SELECT_OFFERS).
 const MAX_SELECT_OPTIONS = 64;
 // Values up to this length are observed as text; longer field values as a
