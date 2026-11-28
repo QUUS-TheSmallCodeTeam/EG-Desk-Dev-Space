@@ -48,3 +48,26 @@
 
 ### data: 픽스처는 http로 서빙된다 (QA_POLICY_UNVERIFIED 회피)
 EG-Desk 픽스처 QA 정책이 data: 페이지를 거절하므로 `run-case.mjs`는 케이스의 `url`/`then`/`also.url`이 data:면 디코드해 `$EGDESK_QA_OUT/fixtures/<케이스id>[-2].html`(UTF-8)로 쓰고 `http://127.0.0.1:8770/<파일>`로 바꿔 이동한다(포트: `EGDESK_QA_FIXTURE_PORT`). 서버(`fixture-server.mjs serve`)는 별도 프로세스로 뜨고 이미 떠 있으면 재사용, 직접 띄운 것만 끝에 종료한다. 대상: `cases-rws.mjs` 전부와 21번(`change-fixture.mjs`). 숫자 케이스 중 data: 없는 것은 그대로. 테스트: `node --test fixture-server.test.mjs cases-rws.test.mjs`.
+
+## 브라우저 절차 케이스 (라운드 g, P1~P7)
+`cases-proc.mjs`(케이스 `P1`~`P7`, 배송지 폼 픽스처: 6칸 폼, "수령인" 변형, POST 제출 버튼, 비밀번호 칸)와 `run-proc.mjs`. 계약: `round-g-procedures.md` 5절. 절차 API(`/v1/procedures*`)는 브리지 `http://127.0.0.1:39218`(`EGDESK_BRIDGE`로 변경), 픽스처는 `fixture-server.mjs`가 `http://127.0.0.1:8770/proc-P<n>.html`로 서빙한다.
+
+| 케이스 | 내용 |
+|---|---|
+| P1 | 채팅으로 6칸 입력 → `POST /v1/procedures/capture` → 6 fill/6 params/start.url/confirm 없음 확인 → 저장·목록 확인 |
+| P2 | 절차를 시드 → 이름 변경, 기본값 하나 변경, 단계 하나 삭제로 PUT → GET에 반영 |
+| P3 | 새 페이지 사본에서 "‘이름’ 절차를 실행해줘. 받는 분: 이하늘" → 덮어쓰기, 기본값, 삭제된 단계의 칸은 빈 채로, 제출 없음 |
+| P4 | L55 변화 픽스처에서 1단계 절차 실행 → 이름 칸 채워짐 |
+| P5 | 마지막이 제출 클릭(confirm:submit)인 절차 → 제출 전에 멈춤 → "응 제출해" 뒤 제출 |
+| P6 | 비밀번호 단계는 person·sensitive, 값 미저장, 실행은 거기서 멈춤 |
+| P7 | "받는 분"이 "수령인"이 된 페이지 → 폴백으로 채우거나 단계를 짚어 깔끔히 멈춤(anyOf) |
+
+명령(앱 실행 중, `$EGDESK_QA_OUT`과 `NODE` 설정, `cd apps/firefox-ui-demo/scripts/real-window-qa`):
+```
+node run-proc.mjs P1          # 한 케이스 (두 번째 인자는 회차)
+node run-proc.mjs all         # P1~P7 순서대로
+node cases-proc.mjs P3        # 케이스 하나 출력
+node --test cases-proc.test.mjs   # 구조 테스트 (앱 불필요)
+```
+- 결과는 `$EGDESK_QA_OUT/matrix-proc.jsonl`에 한 줄씩 쌓인다. `/v1/state`에 `capabilities.browserProcedures`가 없으면(플래그 `EGDESK_BROWSER_PROCEDURES=on` 필요) SKIP을 출력하고 종료 코드 0으로 끝난다.
+- 엔진은 `EGDESK_QA_ENGINE`(기본 Codex). 케이스가 만든 절차는 끝에 DELETE로 지운다(`EGDESK_QA_KEEP=1`이면 남김). 캡처에 필요한 clientThreadId는 `/v1/state`의 `chat.runs` 또는 `/chat/history/threads`에서 찾고, 못 찾으면 `EGDESK_QA_THREAD`로 지정한다.
