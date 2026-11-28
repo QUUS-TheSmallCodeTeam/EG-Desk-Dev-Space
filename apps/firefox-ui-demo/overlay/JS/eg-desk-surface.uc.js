@@ -15714,6 +15714,8 @@
     let browserTransportAbort = null;
 
     const clearBrowserToolTransport = ({ revoke = false } = {}) => {
+      // L54: a lost transport/run never leaves a card locked (no-op unless the flag made card._cardLease).
+      for (const card of (globalThis.document?.querySelectorAll('.egd-browser-card') || [])) card._cardLease?.reset('transport');
       if (revoke) for (const card of (globalThis.document?.querySelectorAll('.egd-browser-card[data-egd-task-working]') || [])) card._browserTaskActivity?.(null);
       const hadTransport = !!browserTransportId;
       try { detachBrowserToolTransport?.(); } catch {}
@@ -16931,6 +16933,8 @@
             if (state.codex.browserStepsUi === true) document.getElementById(event.cardId)?._browserTaskActivity?.(event);
             return;
           }
+          // L54: a step the Agent hands to the person (human_step / handoff) releases that card's lock at once, so nobody waits.
+          if (event.cardId && (event.op === 'handoff' || event.status === 'human_step' || event.code === 'human_step')) document.getElementById(event.cardId)?._cardLease?.handoff();
           const before = state.codex.browserSteps;
           state.codex.browserSteps = BrowserStepsView.addBrowserStep(before, event, { live: true });
           if (state.codex.browserSteps !== before && state.codex.browserStepsUi === true) emit();
@@ -26422,6 +26426,11 @@
   const cardSleepFrames = new Map(); // card id -> browser whose sleep frame must be released if the card closes asleep
   let cardSleepModule = null; // imported only when the flag is on
   const CardSleep = new Proxy({}, { get: (_, key) => (cardSleepModule ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCardSleep.sys.mjs'))[key] });
+  // L54 (egdesk.cardLease, default off): while an Agent task works on a Browser card the person's input on its page area is blocked until pause/stop,
+  // task end, handoff, bridge loss or the inactivity expiry. See EGDeskCardLease.sys.mjs. No new text: a shield with a not-allowed cursor.
+  let cardLeaseModule = null; // imported only when the flag is on
+  const CardLease = new Proxy({}, { get: (_, key) => (cardLeaseModule ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskCardLease.sys.mjs'))[key] });
+  function cardLeaseFlagOn() { try { return readSurfacePref('egdesk.cardLease') === 'on'; } catch { return false; } }
   function perfSleepHiddenCardsEnabled() { try { return readSurfacePref('egdesk.perf.sleepHiddenCards') === 'on'; } catch { return false; } }
   function cardSleepEntry(card) {
     const browser = card._xulBrowser;
@@ -28257,15 +28266,75 @@
       return panel;
     };
     card._browserState = browserState;
+    // ---- L54: card operation lock (flag egdesk.cardLease, default off: card._cardLease stays undefined and nothing below runs) ----
+    if (cardLeaseFlagOn()) {
+      let lease = CardLease.createLease();
+      let expiryTimer = 0, listening = false;
+      const shield = el('div', { class: 'egd-card-lease-shield', 'aria-hidden': 'true' });
+      shield.hidden = true;
+      body.append(shield);
+      const inPageArea = (target) => !!target && (target === xulBrowser || shield.contains(target) || wrap.contains(target));
+      // Only trusted events are swallowed: the Agent works through the page actor / dispatched events, never through the chrome window's real input.
+      const swallow = (event) => {
+        let target = event.target;
+        try { target = event.composedTarget || event.originalTarget || target; } catch {}
+        const inside = inPageArea(event.target) || inPageArea(target) || (event.type.startsWith('key') || event.type.startsWith('composition') || event.type === 'beforeinput' || event.type === 'input' || event.type === 'paste' || event.type === 'cut')
+          && document.activeElement === xulBrowser;
+        if (!CardLease.leaseShouldBlock(lease, event, { inPageArea: inside })) return;
+        event.preventDefault();
+        // Wheel and pointer events keep bubbling so the canvas still pans/zooms; keys and IME must not reach the remote page.
+        if (!/^(wheel|mouse|pointer|click|dblclick|auxclick|touch)/.test(event.type)) { event.stopPropagation(); event.stopImmediatePropagation?.(); }
+      };
+      const setListening = (on) => {
+        if (on === listening) return;
+        listening = on;
+        for (const name of CardLease.LEASE_BLOCKED_EVENTS) {
+          try { (on ? window.addEventListener : window.removeEventListener).call(window, name, swallow, { capture: true, passive: false }); } catch {}
+        }
+        if (!on) return;
+        // Focus leaves the page so typed keys go nowhere; the pause control and card frame keep their own focus.
+        try { if (document.activeElement === xulBrowser) xulBrowser.blur(); } catch {}
+      };
+      const apply = () => {
+        if (expiryTimer) { window.clearTimeout(expiryTimer); expiryTimer = 0; }
+        const blocked = CardLease.leaseBlocksPerson(lease);
+        shield.hidden = !blocked;
+        card.dataset.egdCardLease = lease.state;
+        card.dataset.egdCardLeaseGeneration = String(lease.generation);
+        setListening(blocked);
+        if (blocked && card.isConnected) {
+          expiryTimer = window.setTimeout(() => { expiryTimer = 0; set(CardLease.leaseExpire(lease, Date.now())); apply(); }, CardLease.leaseExpiryIn(lease, Date.now()));
+        }
+      };
+      const set = (next) => { lease = next; };
+      const run = (next) => { if (next !== lease) { lease = next; apply(); } };
+      for (const name of ['dragenter', 'dragover', 'drop', 'contextmenu', 'wheel', 'mousedown', 'click', 'dblclick']) {
+        shield.addEventListener(name, event => { if (name !== 'wheel' || event.cancelable) event.preventDefault(); }, { passive: false });
+      }
+      card._cardLease = {
+        start: (key, options) => run(CardLease.leaseStart(lease, key, Date.now(), options)),
+        stop: (key, options) => run(CardLease.leaseStop(lease, key, options)),
+        handoff: () => run(CardLease.leaseHandoff(lease)),
+        pause: () => run(CardLease.leasePause(lease)),
+        reset: (reason) => run(CardLease.leaseReset(lease, reason)),
+        beat: () => { const next = CardLease.leaseBeat(lease, Date.now()); if (next !== lease) { lease = next; apply(); } },
+        state: () => lease,
+        shield,
+        dispose: () => { lease = CardLease.leaseReset(lease, 'closed'); apply(); },
+      };
+      apply();
+    }
     // ---- BRW-13: Agent activity on this Card (display; authority stays in the transport) ----
     const agentControl = { hold: null, inFlight: 0, count: 0, lastActiveAt: 0, timer: 0, popover: null, prior: null };
     const activeBrowserTasks = new Set();
     card._browserTaskActivity = frame => {
-      if (!frame) activeBrowserTasks.clear();
+      if (!frame) { activeBrowserTasks.clear(); card._cardLease?.reset('cleared'); }
       else {
         const key = JSON.stringify([frame.clientThreadId, frame.taskId]);
         if (frame.phase === 'start' && !agentControl.hold) activeBrowserTasks.add(key);
         else if (frame.phase === 'stop') activeBrowserTasks.delete(key);
+        if (frame.phase === 'start') card._cardLease?.start(key, { hold: !!agentControl.hold });
+        else if (frame.phase === 'stop') card._cardLease?.stop(key, { handoff: frame.reason === 'human_step' });
       }
       refreshAgentControl();
     };
@@ -28423,6 +28492,7 @@
         },
       };
       agentControl.inFlight++;
+      card._cardLease?.beat();
       try { refreshAgentControl(); } catch {}
       return activity;
     };
@@ -28440,6 +28510,7 @@
       const threads = revokeBrowserToolCard(card.id);
       agentProjection.invalidate();
       activeBrowserTasks.clear();
+      card._cardLease?.pause();
       agentControl.hold = { since: Date.now(), noticed: new Set() };
       for (const clientThreadId of threads) noticeAgentHold(clientThreadId);
       refreshAgentControl();
@@ -29129,6 +29200,7 @@
       agentProjection.dispose();
       browserStepDisplay.dispose();
       disposeAgentControl();
+      try { card._cardLease?.dispose(); } catch {}
       unregisterBrowserAuthorizer = null;
       presentation.dispose();
       delete card._browserPresentation;

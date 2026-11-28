@@ -2981,6 +2981,17 @@
   pointer-events: auto;
 }
 
+/* L54 card operation lock: the person's input is blocked while an Agent works (flag egdesk.cardLease). A cue without text. */
+.egd-card-lease-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 13;
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--egd-primary) 5%, transparent);
+  pointer-events: auto;
+}
+.egd-card-lease-shield[hidden] { display: none; }
+
 .egd-canvas-card.egd-entity-active .egd-card-body-capture,
 .egd-canvas-card.egd-site-ask-open .egd-card-body-capture {
   display: none;
