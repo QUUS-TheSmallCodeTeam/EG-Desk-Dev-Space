@@ -167,7 +167,7 @@ test('wiring: activity frames, pause, heartbeat, transport loss, human step and 
   assert.match(js, /activeBrowserTasks\.clear\(\);\n      card\._cardLease\?\.pause\(\);/)
   assert.match(js, /agentControl\.inFlight\+\+;\n      card\._cardLease\?\.beat\(\);/)
   assert.match(js, /card\._cardLease\?\.reset\('transport'\)/)
-  assert.match(js, /event\.status === 'human_step'[^\n]*_cardLease\?\.handoff\(\)/)
+  assert.match(js, /stepIsHumanStep\(event\)[^\n]*_cardLease\?\.handoff\(\)/)
   assert.match(js, /try \{ card\._cardLease\?\.dispose\(\); \} catch \{\}/)
   assert.match(css, /\.egd-card-lease-shield \{[^}]*cursor: not-allowed/)
   assert.match(css, /\.egd-card-lease-shield\[hidden\] \{ display: none; \}/)
@@ -204,4 +204,53 @@ test('wiring: two segments in one thread stay agent between them; run end, hando
   const realNow = Date.now; Date.now = () => realNow() + L.CARD_LEASE_EXPIRY_MS + 1
   try { timer.f() } finally { Date.now = realNow }
   assert.deepEqual([c.state().state, c.state().reason], ['person', 'expired'])
+})
+
+// ---- round f fixes: only human_step is a release; focus never enters the page while blocked ----
+test('handoff filter: needs_value / low_confidence / needs_user keep the lease, human_step releases', () => {
+  const step = (status, extra = {}) => ({ op: 'handoff', status, reason: status, ...extra })
+  for (const s of ['needs_value', 'low_confidence', 'needs_user']) assert.equal(L.stepIsHumanStep(step(s)), false, s)
+  assert.equal(L.stepIsHumanStep(step('human_step')), true)
+  assert.equal(L.stepIsHumanStep({ op: 'handoff', status: 'needs_value', code: 'human_step' }), true)
+  assert.equal(L.stepIsHumanStep({ op: 'end', status: 'needs_value', code: 'detail_needed' }), false)
+  assert.equal(L.stepIsHumanStep(null), false)
+  assert.match(js, /if \(event\.cardId && CardLease\.stepIsHumanStep\(event\)\)/)
+  assert.doesNotMatch(js, /event\.op === 'handoff' \|\| event\.status === 'human_step'/)
+  // end to end on the card: a needs_value handoff mid-run changes nothing, human_step releases at once
+  const h = harness(), c = h.card._cardLease
+  c.start('T1', {}); c.segmentEnd('T1', {})
+  if (L.stepIsHumanStep(step('needs_value'))) c.handoff()
+  assert.equal(c.state().state, 'agent')
+  if (L.stepIsHumanStep(step('low_confidence'))) c.handoff()
+  assert.equal(c.state().state, 'agent')
+  if (L.stepIsHumanStep(step('human_step'))) c.handoff()
+  assert.equal(c.state().state, 'handoff')
+})
+
+test('IME bypass: focus entering the page while blocked is blurred at once; not blurred otherwise', () => {
+  const h = harness(), c = h.card._cardLease
+  // not blocked: focus stays
+  h.document.activeElement = h.xulBrowser
+  h.fire('focus', h.xulBrowser); h.fire('focusin', h.xulBrowser)
+  assert.equal(h.xulBrowser.blurred, 0, 'person lease never blurs')
+  c.start('T1', {})
+  const afterStart = h.xulBrowser.blurred
+  h.document.activeElement = h.xulBrowser // e.g. toolBrowser().focus() or Tab navigation
+  h.fire('focus', h.xulBrowser)
+  assert.equal(h.xulBrowser.blurred, afterStart + 1); assert.equal(h.document.activeElement, null)
+  h.document.activeElement = h.xulBrowser
+  h.fire('focusin', h.wrap.children[0] || h.xulBrowser)
+  assert.equal(h.xulBrowser.blurred, afterStart + 2)
+  // focus on the pause control or anything outside the page area is left alone
+  h.document.activeElement = h.pauseBtn
+  h.fire('focus', h.pauseBtn); h.fire('focusin', h.pauseBtn)
+  assert.equal(h.xulBrowser.blurred, afterStart + 2); assert.equal(h.document.activeElement, h.pauseBtn)
+  // released: listeners gone, focus may enter again
+  c.pause()
+  assert.equal(h.listeners.get('focus').size, 0); assert.equal(h.listeners.get('focusin').size, 0)
+  h.document.activeElement = h.xulBrowser; h.fire('focus', h.xulBrowser)
+  assert.equal(h.xulBrowser.blurred, afterStart + 2)
+  assert.equal(L.leaseShouldBlurFocus(L.createLease(), { inPageArea: true }), false)
+  assert.equal(L.leaseShouldBlurFocus(L.leaseStart(L.createLease(), 'a', 1), { inPageArea: true }), true)
+  assert.equal(L.leaseShouldBlurFocus(L.leaseStart(L.createLease(), 'a', 1), { inPageArea: false }), false)
 })
