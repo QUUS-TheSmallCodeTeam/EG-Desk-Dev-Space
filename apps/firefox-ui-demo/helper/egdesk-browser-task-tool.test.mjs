@@ -430,7 +430,7 @@ test('live field previews fail closed and choice labels match the visible select
   for (const element of [{ displayValueSafe: true }, { label: '  ', displayValueSafe: true }, { label: '검색' }, { label: 'OTP', displayValueSafe: true }, { label: '인증 코드', displayValueSafe: true }, { label: 'Sensitive field' }, { label: '카드 번호', displayValueSafe: true }, { role: 'hidden' }]) assert.equal(fill(element), '●●●')
   for (const [tag, role, desired, expected] of [['select','combobox','m','Medium'],['input','radio','checked','크기'],['input','checkbox','unchecked','크기']]) {
     const element = { tag, role, label: '크기', options: [{ value: 'm', label: 'Medium' }], displayValueSafe: true }
-    assert.deepEqual(optionStepDisplay({ item: { kind: 'choice', element, desired } }), { op: 'select', target: tag === 'select' ? '크기' : null, displayValue: expected })
+    assert.deepEqual(optionStepDisplay({ item: { kind: 'choice', element, desired } }), { op: 'select', target: tag === 'select' ? '크기' : null, displayValue: expected, evidenceValue: expected })
   }
 })
 

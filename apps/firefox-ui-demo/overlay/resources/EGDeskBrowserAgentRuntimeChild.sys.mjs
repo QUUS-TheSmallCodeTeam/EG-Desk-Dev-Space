@@ -21,6 +21,8 @@ const IMPLICIT_SUBMIT_TYPES = ["text", "search", "email", "url", "tel", "passwor
 const MAX_WAIT_MS = 10000;
 // Longest guarded fill text, and longest current value a guard can compare.
 const MAX_FILL_TEXT = 8000;
+// L57: the options of a list a snapshot carries (was 32: a time or year list lost its tail, choice.truncated says so). The helper offers the same number (MAX_SELECT_OFFERS).
+const MAX_SELECT_OPTIONS = 64;
 // Values up to this length are observed as text; longer field values as a
 // prefix plus length and fingerprint, editor text only as length and
 // fingerprint. helper/egdesk-browser-tool-runtime.mjs boundedFieldValue
@@ -982,9 +984,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
     if (toggle) return { choice, checked: !!node.checked, choiceValue: this.boundedValue(node.value || '') };
     if (tag !== 'select') return { choice };
     choice.multiple = !!node.multiple;
-    choice.truncated = (node.options?.length ?? 0) > 32;
+    choice.truncated = (node.options?.length ?? 0) > MAX_SELECT_OPTIONS;
     const options = [];
-    for (let i = 0; i < Math.min(32, node.options?.length ?? 0); i++) {
+    for (let i = 0; i < Math.min(MAX_SELECT_OPTIONS, node.options?.length ?? 0); i++) {
       const o = node.options[i];
       options.push({ label: this.compact(o.label, 100), value: String(o.value).slice(0, 120), disabled: !!o.disabled || o.parentElement?.disabled === true || o.value.length > 120 });
     }

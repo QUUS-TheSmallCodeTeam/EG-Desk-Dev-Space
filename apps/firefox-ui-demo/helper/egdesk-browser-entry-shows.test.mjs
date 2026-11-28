@@ -43,11 +43,11 @@ test('on: one observation per card (a read, no Decision request); the card predi
   assert.deepEqual(w.observed, [['egdesk_browser_observe', 'card', 'card']])
   assert.equal(w.bodies.length, 1, 'still one Decision request for the entry')
   const card = JSON.parse(w.bodies[0]).questions.find(q => q.name === 'browser_entry_card_0')
-  assert.equal(card.instructions, 'Does this request need to be done on this open page: "알림 설정 | 계정" at "account.example.test", which now shows "알림 설정" / "마케팅 정보 알림: 켜짐" / "보안 알림: 켜짐"?')
-  assert.doesNotMatch(card.instructions, /약관 안내/, 'at most three lines')
+  assert.equal(card.instructions, 'Does this request need to be done on this open page: "알림 설정 | 계정" at "account.example.test", which now shows "알림 설정" / "마케팅 정보 알림: 켜짐" / "보안 알림: 켜짐" / "약관 안내"?')
+  assert.doesNotMatch(card.instructions, /PRIVATE|이용약관 전문/, 'L57: ONE card is quoted up to eight lines (was three); the lines the page has are quoted')
   const off = world({ allow: false }); await off.say(MSG)
-  assert.ok(Buffer.byteLength(w.bodies[0]) - Buffer.byteLength(off.bodies[0]) < 200, 'the card lines are a small addition (the c27 evidence adds the same lines once more)')
-  assert.match(JSON.parse(w.bodies[0]).input[1].content, /\n- "알림 설정 \| 계정" at "account.example.test" shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐"$/, 'c27: the open page and its first lines are evidence for the request predicate')
+  assert.ok(Buffer.byteLength(w.bodies[0]) - Buffer.byteLength(off.bodies[0]) < 400, 'the card lines are a small addition (the c27 evidence adds the same lines once more)')
+  assert.match(JSON.parse(w.bodies[0]).input[1].content, /\n- "알림 설정 \| 계정" at "account.example.test" shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐" \/ "약관 안내"$/, 'c27: the open page and its first lines are evidence for the request predicate')
   assert.deepEqual(JSON.parse(w.bodies[0]).questions.map(q => q.name), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'], 'c23: the first entry request is unchanged; the interruption predicate is a follow-up only where it can matter')
 })
 
@@ -100,7 +100,7 @@ test('ride-along, on: one observation per card, the same quoting as the standalo
   const client = { decide: async request => { standalone = request.questions; return { answers: {} } } }
   await decideBrowserEntry({ message: MSG, cards: await observeCardLines({ provider: rideProvider(), run: {}, message: MSG, cards: RIDE_CARDS, enabled: true }), client })
   assert.equal(JSON.stringify(ride.questions), JSON.stringify(standalone))
-  assert.match(ride.questions[2].instructions, /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐"\?$/)
+  assert.match(ride.questions[2].instructions, /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐" \/ "약관 안내"\?$/)
   const failing = { reflexScope: () => ({ callTool: async () => { throw new Error('gone') } }) }
   assert.equal(JSON.stringify((await rideAlongEntry({ provider: failing, run: {}, message: MSG, cards: RIDE_CARDS, cardText: true })).questions), JSON.stringify(entryQuestions(RIDE_CARDS)), 'a card that cannot be observed: title and host')
   const named = []
@@ -214,12 +214,12 @@ test('one unnamed card: both entry paths use a fresh title and bounded controls;
   process.env.EGDESK_BROWSER_TASK_PAGE_TEXT = 'on'
   t.after(() => { if (saved === undefined) delete process.env.EGDESK_BROWSER_TASK_PAGE_TEXT; else process.env.EGDESK_BROWSER_TASK_PAGE_TEXT = saved })
   const cards = [{ cardId: 'form', host: 'pizza.example', title: 'stale' }]
-  const snapshot = { url: 'https://pizza.example/', title: 'Pizza order', text: ['PRIVATE BODY'], interactiveElements: Array.from({ length: 22 }, (_, i) => ({ ref: `f${i}`, role: 'textbox', tag: 'input', label: i ? `Item ${i}` : 'Delivery time' })) }
+  const snapshot = { url: 'https://pizza.example/', title: 'Pizza order', text: ['PRIVATE BODY'], interactiveElements: Array.from({ length: 50 }, (_, i) => ({ ref: `f${i}`, role: 'textbox', tag: 'input', label: i ? `Item ${i}` : 'Delivery time' })) }
   const provider = { reflexScope: () => ({ callTool: async () => ({ snapshot }) }) }
   const message = '배달 시간 저녁 7시 반으로 넣어줘, 제출하지 마'
   const ride = await rideAlongEntry({ cards, provider, message })
   assert.match(ride.evidence, /"Pizza order"/); assert.match(ride.evidence, /Delivery time/)
-  assert.doesNotMatch(ride.evidence, /PRIVATE BODY|Item 16|stale/)
+  assert.doesNotMatch(ride.evidence, /PRIVATE BODY|Item 45|stale/) // L57: one card quotes 40 controls (was 16): Item 16 is quoted, Item 45 is not
   assert.match(ride.questions[0].instructions, /without a site name/)
   const client = { decide: async request => { assert.deepEqual(request.questions, ride.questions); assert.ok(request.input[1].content.endsWith(ride.evidence)); return { answers: P2({ browser_entry: 1, browser_entry_answer: 0, browser_entry_card_0: 1 }) } } }
   assert.equal((await decideBrowserEntry({ message, cards: await observeCardLines({ cards, message, provider }), client })).cardId, 'form')

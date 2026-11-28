@@ -100,7 +100,7 @@ test('what the checker cannot read keeps the rule off: an opaque item, a page cu
   const wrongSup = () => client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)), draft = '벤치마크에서 쓰기 지연이 40% 줄었습니다.'
   const opaque = await checkDraft({ draft, evidence: [PAGE, { id: 'mem2', kind: 'context', time: 'past', source: 'memory', opaque: true }], mode: 'on', client: wrongSup() })
   assert.equal(opaque.findings.filter(f => f.kind === 'unverified').length, 0, 'a guarded page the checker cannot read')
-  const long = { ...PAGE, text: `${PAGE.text}\n${'부록 '.repeat(400)}` } // longer than the check's per-item bound: the tail is not seen
+  const long = { ...PAGE, text: `${PAGE.text}\n${'부록 '.repeat(1200)}` } // longer than the check's per-item bound: the tail is not seen
   const cut = await checkDraft({ draft, evidence: [long], mode: 'on', client: wrongSup() })
   assert.equal(cut.findings.filter(f => f.kind === 'unverified').length, 0, 'a page cut for the check')
   const withheld = await checkDraft({ draft, evidence: [PAGE], mode: 'on', client: wrongSup(), egress: { allows: () => true, filterEvidence: items => items.filter(i => i.kind !== 'memory') } })
@@ -144,7 +144,7 @@ test('the 40%/18% case with memory pages beyond the bound: the related page is k
   const bench = PG('mem11', 'past', 'unknown', '쓰기 지연 벤치마크\n벤치마크 결과 쓰기 지연이 18% 줄었다. 읽기 지연은 변하지 않았다.')
   const wrong = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 40% 줄었습니다.', evidence: [...OTHER, bench], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
   assert.ok(wrong.findings.some(f => f.kind === 'unverified'), '40% against the page that says 18%')
-  const long = { ...bench, text: `${bench.text}\n${'부록 '.repeat(400)}` }
+  const long = { ...bench, text: `${bench.text}\n${'부록 '.repeat(1200)}` }
   const right = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 18% 줄었습니다.', evidence: [...OTHER, long], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
   assert.equal(right.findings.filter(f => f.kind === 'unverified').length, 0, 'a page cut for the check may hold the figure: not called unsupported')
 })

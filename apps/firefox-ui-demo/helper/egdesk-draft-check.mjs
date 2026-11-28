@@ -27,7 +27,7 @@ import { claimsEdit, claimsMerge, claimsPass, claimsRunState, runFactFindings } 
 //                 a correctly worded plan ("...발송 예정입니다"): it reads "states a plan" rather than "states a plan AS a present fact".
 
 export const DRAFT_CHECK_LIMITS = Object.freeze({
-  claims: 12, claimChars: 240, terms: 8, evidenceItems: 8, evidenceChars: 1200,
+  claims: 12, claimChars: 240, terms: 8, evidenceItems: 8, evidenceChars: 3000,
   // Added wait before posting. Warm Decisions calls take about 0.3-0.6 s and the first call after a long
   // pause 1.3-1.4 s (measured by the owner); 1.5 s covers the cold call, and warm calls use a fraction.
   firstCheckMs: 1500,
