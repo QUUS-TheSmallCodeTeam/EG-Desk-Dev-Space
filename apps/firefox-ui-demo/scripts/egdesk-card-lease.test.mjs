@@ -159,8 +159,10 @@ test('wiring: release paths (handoff, reset, expiry, dispose) leave no lock and 
 })
 
 test('wiring: activity frames, pause, heartbeat, transport loss, human step and cleanup call the lease', () => {
-  assert.match(js, /card\._cardLease\?\.start\(key, \{ hold: !!agentControl\.hold \}\)/)
-  assert.match(js, /card\._cardLease\?\.stop\(key, \{ handoff: frame\.reason === 'human_step' \}\)/)
+  assert.match(js, /card\._cardLease\?\.start\(leaseKey, \{ hold: !!agentControl\.hold \}\)/)
+  assert.match(js, /card\._cardLease\?\.segmentEnd\(leaseKey, \{ handoff: frame\.reason === 'human_step' \}\)/)
+  assert.match(js, /event\.event === 'run\.completed' \|\| event\.event === 'run\.unavailable'/)
+  assert.match(js, /card\._cardLease\?\.endRun\(leaseThread\)/)
   assert.match(js, /if \(!frame\) \{ activeBrowserTasks\.clear\(\); card\._cardLease\?\.reset\('cleared'\); \}/)
   assert.match(js, /activeBrowserTasks\.clear\(\);\n      card\._cardLease\?\.pause\(\);/)
   assert.match(js, /agentControl\.inFlight\+\+;\n      card\._cardLease\?\.beat\(\);/)
@@ -169,4 +171,37 @@ test('wiring: activity frames, pause, heartbeat, transport loss, human step and 
   assert.match(js, /try \{ card\._cardLease\?\.dispose\(\); \} catch \{\}/)
   assert.match(css, /\.egd-card-lease-shield \{[^}]*cursor: not-allowed/)
   assert.match(css, /\.egd-card-lease-shield\[hidden\] \{ display: none; \}/)
+})
+
+// ---- run-spanning lease (keyed by the run's thread) ----
+test('pure: segment end keeps the lease and pushes the expiry; run end releases only that thread', () => {
+  let l = L.leaseStart(L.createLease(), 'T1', 1000)
+  l = L.leaseSegmentEnd(l, 'T1', 5000)
+  assert.equal(l.state, 'agent'); assert.equal(l.lastBeatAt, 5000); assert.equal(l.generation, 1)
+  l = L.leaseStart(l, 'T1', 11000)
+  assert.deepEqual([l.state, l.generation, [...l.tasks].length], ['agent', 1, 1], 'second segment is the same lease')
+  assert.equal(L.leaseEnd(l, 'T2'), l, 'another thread ending changes nothing')
+  const e = L.leaseEnd(l, 'T1'); assert.deepEqual([e.state, e.reason], ['person', 'task-end'])
+  assert.equal(L.leaseEnd(L.createLease(), 'T1').state, 'person')
+  assert.equal(L.leaseSegmentEnd(L.createLease(), 'T1', 5).state, 'person')
+})
+
+test('wiring: two segments in one thread stay agent between them; run end, handoff, other thread, expiry', () => {
+  const h = harness(), c = h.card._cardLease
+  const frames = (phase, key = 'T1') => phase === 'start' ? c.start(key, {}) : c.segmentEnd(key, {})
+  frames('start'); frames('stop')
+  assert.equal(c.state().state, 'agent', 'held while the chat model thinks between segments'); assert.equal(h.body.shield.hidden, false)
+  assert.equal(h.fire('click', h.xulBrowser).defaultPrevented, true, 'person click still blocked between segments')
+  frames('start'); assert.equal(c.state().generation, 1); frames('stop')
+  c.endRun('T2'); assert.equal(c.state().state, 'agent', 'another thread run end does not release')
+  c.endRun('T1'); assert.equal(c.state().state, 'person'); assert.equal(h.body.shield.hidden, true)
+  assert.equal(h.fire('click', h.xulBrowser).defaultPrevented, false)
+  // handoff mid-run releases at once, even right after a segment ended
+  frames('start'); frames('stop'); c.segmentEnd('T1', { handoff: true }); assert.equal(c.state().state, 'handoff')
+  // expiry still works after a segment end
+  frames('start'); frames('stop')
+  const timer = h.win.timers.filter(Boolean).at(-1)
+  const realNow = Date.now; Date.now = () => realNow() + L.CARD_LEASE_EXPIRY_MS + 1
+  try { timer.f() } finally { Date.now = realNow }
+  assert.deepEqual([c.state().state, c.state().reason], ['person', 'expired'])
 })

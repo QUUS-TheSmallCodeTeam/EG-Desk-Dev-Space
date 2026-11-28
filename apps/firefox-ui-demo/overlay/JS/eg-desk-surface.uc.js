@@ -17018,6 +17018,12 @@
             // Cycle 8 (state hooks, like noteChatAttention): an older result card of the same output key is marked superseded; the briefing observer is off unless egdesk.briefingFlow is "advisory".
             if (run && event.event === 'output.published') state.noteOutputSuperseded?.(event.details?.output);
             if (run && event.event === 'run.completed') state.observeBriefing?.(run);
+            // L54: the run's terminal event (run.completed carries completed/failed/cancelled/interrupted; run.unavailable is a lost run) ends its lease on every card.
+            if (event.event === 'run.completed' || event.event === 'run.unavailable') {
+              const leaseThread = event.clientThreadId || run?.clientThreadId
+                || ChatState.clientThreadBinding(state.codex.threads.find(thread => thread.id === run?.localThreadId)) || null;
+              if (leaseThread) for (const card of document.querySelectorAll('.egd-browser-card')) card._cardLease?.endRun(leaseThread);
+            }
           }
           return;
         }
@@ -28314,6 +28320,8 @@
       card._cardLease = {
         start: (key, options) => run(CardLease.leaseStart(lease, key, Date.now(), options)),
         stop: (key, options) => run(CardLease.leaseStop(lease, key, options)),
+        segmentEnd: (key, options) => run(options?.handoff ? CardLease.leaseHandoff(lease) : CardLease.leaseSegmentEnd(lease, key, Date.now())),
+        endRun: (threadKey) => run(CardLease.leaseEnd(lease, threadKey)),
         handoff: () => run(CardLease.leaseHandoff(lease)),
         pause: () => run(CardLease.leasePause(lease)),
         reset: (reason) => run(CardLease.leaseReset(lease, reason)),
@@ -28333,8 +28341,10 @@
         const key = JSON.stringify([frame.clientThreadId, frame.taskId]);
         if (frame.phase === 'start' && !agentControl.hold) activeBrowserTasks.add(key);
         else if (frame.phase === 'stop') activeBrowserTasks.delete(key);
-        if (frame.phase === 'start') card._cardLease?.start(key, { hold: !!agentControl.hold });
-        else if (frame.phase === 'stop') card._cardLease?.stop(key, { handoff: frame.reason === 'human_step' });
+        // L54: the lease is keyed by the run's thread, not by the segment's task: it spans segments and the chat model's turns between them.
+        const leaseKey = typeof frame.clientThreadId === 'string' && frame.clientThreadId ? frame.clientThreadId : key;
+        if (frame.phase === 'start') card._cardLease?.start(leaseKey, { hold: !!agentControl.hold });
+        else if (frame.phase === 'stop') card._cardLease?.segmentEnd(leaseKey, { handoff: frame.reason === 'human_step' });
       }
       refreshAgentControl();
     };
