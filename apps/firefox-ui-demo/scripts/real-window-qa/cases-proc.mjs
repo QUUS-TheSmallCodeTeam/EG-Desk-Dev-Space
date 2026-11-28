@@ -53,7 +53,7 @@ export const CASES = {
       { do: 'capture', name: '배송지 입력 (QA)' },
       { do: 'proc', on: 'draft', checks: [
         'p.steps.length === 6', 'p.steps.every(s => s.op === "fill")', 'p.params.length === 6', 'p.params.every(q => typeof q.default === "string" && q.default && !q.sensitive)',
-        `${JSON.stringify(six)}.every(([l, v]) => p.params.some(q => q.name === l && q.default === v))`, 'p.start.url === ctx.url', 'p.start.host === "127.0.0.1"', '!p.steps.some(s => s.confirm)', '!p.steps.some(s => s.person)'] },
+        `${JSON.stringify(six)}.every(([l, v]) => p.params.some(q => q.name === l && q.default === v))`, 'p.start.url === ctx.url', 'p.start.host.split(":")[0] === "127.0.0.1"', '!p.steps.some(s => s.confirm)', '!p.steps.some(s => s.person)'] },
       { do: 'save', from: 'draft' },
       { do: 'proc', on: 'proc', checks: ['/^proc-[0-9a-f]{12,32}$/.test(p.id)', 'p.steps.length === 6'] },
     ] },
