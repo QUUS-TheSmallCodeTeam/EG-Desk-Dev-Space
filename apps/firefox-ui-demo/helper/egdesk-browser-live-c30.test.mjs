@@ -26,7 +26,7 @@ test('holdout2-v2: the membership request, entry then step, under 3k; its entry 
   assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
   const seen = []
   const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
-  assert.deepEqual(out.requests.map(r => [r.stage, r.sha256.slice(0, 8)]), [['entry', '0ebd5b23'], ['step', '6f728e9e']], 'the entry is byte-identical to c36\'s measured one')
+  assert.deepEqual(out.requests.map(r => [r.stage, r.sha256.slice(0, 8)]), [['entry', '8b72163c'], ['step', '6f728e9e']], 'the entry is c36\'s measured one plus L57\'s wider one-card quote (up to 8 lines: the card\'s 4th line "결제 금액: 14,900원" is now quoted; was 0ebd5b23); the step is unchanged')
   for (const body of seen) assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
   const phase = out.phases[0]
   assert.deepEqual([phase.first.status, phase.acts.length], ['done', 0])
