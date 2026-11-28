@@ -1112,17 +1112,15 @@ test('Browser measurement candidate follows the shared projected-size policy; fo
 test('selected cards keep a sage accent edge and the active card a quiet sage ring across zoom and compact views', () => {
   const selected = ['.egd-canvas-card.egd-entity-selected:not(.egd-entity-active)', '.egd-browser-card.egd-entity-selected:not(.egd-entity-active)'];
   const active = ['.egd-canvas-card.egd-entity-active', '.egd-browser-card.egd-entity-active', '.egd-chat-card.egd-entity-active'];
-  const multiActive = '#egd-canvas-layer:has(> .egd-entity-selected:not(.egd-entity-active)) > .egd-canvas-card.egd-entity-active';
   for (const scheme of ['light', 'dark']) {
     const env = { scheme };
     for (const selector of selected) assert.equal(declarationsFor(selector, env)['border-color'], 'var(--egd-card-selection)', selector);
-    for (const selector of active) assert.equal(declarationsFor(selector, env)['border-color'], 'var(--egd-card-active-border)', selector);
+    for (const selector of active) assert.equal(declarationsFor(selector, env)['border-color'], 'var(--egd-card-selection)', selector);
     assert.equal(declarationsFor(selected[0], env).outline, 'calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-selection)');
-    assert.equal(declarationsFor(active[0], env).outline, 'calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-active-ring)');
+    assert.equal(declarationsFor(active[0], env).outline, 'calc(3px / var(--egd-camera-zoom, 1)) solid var(--egd-card-selection)');
+    // The active card is thicker than the other selected cards and adds a zoom-compensated halo.
+    assert.equal(declarationsFor('.egd-canvas-card.egd-entity-active:not(.egd-card-fullscreen)', env)['box-shadow'], '0 0 0 calc(8px / var(--egd-camera-zoom, 1)) var(--egd-card-active-ring), var(--egd-card-shadow-active)');
     assert.equal(declarationsFor(active[0], env)['box-shadow'], 'var(--egd-card-shadow-active)');
-    // Among several selected windows the active one is not the weakest edge.
-    assert.equal(declarationsFor(multiActive, env)['border-color'], 'var(--egd-card-selection)');
-    assert.equal(declarationsFor(multiActive, env)['outline-color'], 'var(--egd-card-selection)');
     const root = readRootProperties(surfaceCss, env);
     assert.equal(root['--egd-card-selection'], 'var(--egd-primary)', 'the selection edge is the approved sage accent, not a separate blue');
     const selection = resolveColor('var(--egd-card-selection)', root);

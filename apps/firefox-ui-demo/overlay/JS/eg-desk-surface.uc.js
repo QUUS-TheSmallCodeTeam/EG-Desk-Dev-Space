@@ -28252,7 +28252,7 @@
       if (agentBadge.textContent !== view.label) agentBadge.textContent = view.label;
       // AGENT-05: the Agent chip beside the badge (absent where this block runs alone, as in tests).
       if (typeof codexCardAgentIdentityRender === 'function') codexCardAgentIdentityRender(agentIdentityChip, view, agentControl, card.id);
-      agentBadge.dataset.compactLabel = activeBrowserTasks.size ? view.label : view.mode === 'user' ? '직접'
+      agentBadge.dataset.compactLabel = activeBrowserTasks.size ? '' : view.mode === 'user' ? '직접'
         : view.mode === 'operating' ? (view.label === 'Agent 읽는 중' ? '읽기' : '조작') : '';
       const badgeName = view.label ? `${view.label} · Agent 활동 기록 보기` : 'Agent 활동 기록 보기';
       if (agentBadge.title !== badgeName) agentBadge.title = badgeName;

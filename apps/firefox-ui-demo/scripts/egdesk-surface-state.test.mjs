@@ -10713,6 +10713,8 @@ test('compact Browser Agent header keeps its height and exposes short status and
   assert.match(compact, /\.egd-card-page-title\s*\{\s*min-width:\s*1\.5em;/);
   assert.match(compact, /\.egd-browser-agent-status\s*\{\s*flex:\s*0 0 auto;/);
   assert.match(compact, /\.egd-browser-agent-badge::after\s*\{[^}]*content:\s*attr\(data-compact-label\)/);
+  assert.match(compact, /\.egd-browser-agent-badge\[data-compact-label=""\]::before\s*\{\s*display:\s*block;/, 'a long task-working label degrades to the dot');
+  assert.match(compact, /\.egd-browser-agent-badge\[data-compact-label=""\]::after\s*\{\s*content:\s*none;/);
   assert.match(compact, /\.egd-browser-agent-hand\[data-action="pause"\]::after\s*\{\s*content:\s*"Ⅱ"/);
   assert.match(compact, /\.egd-browser-agent-hand\[data-action="handback"\]::after\s*\{\s*content:\s*"↩"/);
   assert.match(compact, /\.egd-desk-window-board\s*\{\s*font-size:\s*calc\(11px/);
@@ -26417,6 +26419,8 @@ test('browser task badge lasts across calls, clears per task and gives pause pri
   const frame = (taskId, phase) => h.card._browserTaskActivity({ clientThreadId: 't', taskId, phase });
   frame('a', 'start'); frame('b', 'start');
   assert.equal(h.agentBadge.textContent, 'Agent 작업 중');
+  assert.equal(h.agentBadge.dataset.compactLabel, '', 'compact bar shows the dot only; full text stays in textContent/title/aria');
+  assert.match(h.agentBadge.getAttribute('aria-label'), /Agent 작업 중/);
   assert.equal(h.agentHandButton.textContent, '일시중지');
   frame('a', 'stop');
   assert.equal(h.card.dataset.egdTaskWorking, 'true');
