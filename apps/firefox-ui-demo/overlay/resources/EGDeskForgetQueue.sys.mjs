@@ -8,7 +8,7 @@ export const FORGET_BACKOFF_MS = Object.freeze([1000, 2000, 4000, 8000, 15000, 3
 
 export function retryable(error) {
   const status = error?.status
-  if (!Number.isInteger(status)) return true // no response: the bridge is down, restarting or the connection dropped
+  if (!Number.isInteger(status) || status < 100) return true // no response (no status, or 0): the bridge is down, restarting or the connection dropped
   return status >= 500 || status === 408 || status === 429
 }
 
