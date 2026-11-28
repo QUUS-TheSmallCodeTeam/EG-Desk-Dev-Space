@@ -27130,6 +27130,9 @@
         title: readBrowserTitle(),
       };
     };
+    // L52: lazy handle on the act race module (kept out of browserToolAct so that function stays self-contained)
+    let actDocumentGoneCache = null;
+    const actDocumentGoneModule = () => (actDocumentGoneCache ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskActDocumentGone.sys.mjs'));
     const browserAgentActorRequest = async (method, payload = {}) => {
       if (!ensureBrowserAgentActor()) throw new Error('Browser actor registration failed');
       const context = xulBrowser?.browsingContext;
@@ -28636,8 +28639,8 @@
         });
         // L52: a click that navigates the top document away (a POST submit) can lose the actor's reply; reject promptly once the document is gone.
         // See EGDeskActDocumentGone.sys.mjs.
-        const gone = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskActDocumentGone.sys.mjs');
-        result = gone.actCanLeaveDocument(action)
+        const gone = typeof actDocumentGoneModule === 'function' ? actDocumentGoneModule() : null;
+        result = gone?.actCanLeaveDocument(action)
           ? await gone.raceActWithDocumentGone(actRequest, { isReplaced: () =>
               xulBrowser.browsingContext !== context || xulBrowser.browsingContext.currentWindowGlobal !== windowGlobal })
           : await actRequest;

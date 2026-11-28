@@ -31,5 +31,5 @@ test('L52: a failing document probe counts as gone, and only input actions are w
 })
 test('L52: the surface races the act request only for input actions and never presses again (wiring)', () => {
   const src = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
-  assert.match(src, /EGDeskActDocumentGone\.sys\.mjs/); assert.match(src, /gone\.actCanLeaveDocument\(action\)\s*\n?\s*\? await gone\.raceActWithDocumentGone\(actRequest/)
+  assert.match(src, /EGDeskActDocumentGone\.sys\.mjs/); assert.match(src, /gone\?\.actCanLeaveDocument\(action\)\s*\n?\s*\? await gone\.raceActWithDocumentGone\(actRequest/)
 })
