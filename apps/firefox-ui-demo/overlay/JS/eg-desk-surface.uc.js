@@ -16389,6 +16389,28 @@
       return response.json();
     };
 
+    // L49: a deleted room's forget goes through one queue (one request at a time, retried, kept in a pref until the bridge answers; resumed at
+    // start and on every bridge connection). See EGDeskForgetQueue.sys.mjs.
+    let forgetQueueModule = null, forgetQueueInstance = null;
+    const ForgetQueue = () => {
+      if (forgetQueueInstance) return forgetQueueInstance;
+      forgetQueueModule ||= ChromeUtils.importESModule('chrome://userchrome/content/EGDeskForgetQueue.sys.mjs');
+      const mod = forgetQueueModule;
+      forgetQueueInstance = mod.createForgetQueue({
+        send: (clientThreadId) => fetchJson('/chat/conversation/forget', { method: 'POST', body: JSON.stringify({ clientThreadId }) }),
+        load: () => { try { return mod.parsePending(servicesRef().prefs.getStringPref(mod.FORGET_QUEUE_PREF, '[]')); } catch { return []; } },
+        save: (list) => {
+          const prefs = servicesRef().prefs;
+          if (list.length) prefs.setStringPref(mod.FORGET_QUEUE_PREF, JSON.stringify(list));
+          else if (prefs.prefHasUserValue(mod.FORGET_QUEUE_PREF)) prefs.clearUserPref(mod.FORGET_QUEUE_PREF);
+        },
+        setTimer: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimer: (id) => window.clearTimeout(id),
+      });
+      return forgetQueueInstance;
+    };
+    window.setTimeout(() => { try { void ForgetQueue().resume(); } catch {} }, 5000);
+
     // The conversation on the screen was closed or left (another room opened, back to the room list, the room deleted): its live
     // session ends at the bridge, once per leave (POST /chat/session/close; memory only there). Hiding the chat is not leaving, and
     // scrolling changes nothing here. A failed request is dropped: the bridge also ends idle sessions when the window is gone.
@@ -17040,6 +17062,7 @@
         ) {
           ensureCodexAuthBrowserCard(buildCodexVerificationUrl(status), status.authSessionId);
         }
+        try { void ForgetQueue().resume(); } catch {}
         update({
           provider: bridgeState?.provider || state.codex.provider,
           protocolVersion: Number(bridgeState?.protocolVersion || 0),
@@ -19251,8 +19274,8 @@
         const nextThreads = state.codex.threads.filter((entry) => entry.id !== threadId);
         state.codex.threads = nextThreads;
         // The bridge deletes the conversation: what it holds for it while it lives, its saved history, a run still working in it (interrupted)
-        // and readings heard there that are still pending; memory pages and records stay (L2 c16/c17). A failed request is dropped.
-        if (typeof fetchJson === 'function') void fetchJson('/chat/conversation/forget', { method: 'POST', body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread) }) }).catch(() => {});
+        // and readings heard there that are still pending; memory pages and records stay (L2 c16/c17). L49: queued, retried and persisted until the bridge answers.
+        try { ForgetQueue().enqueue(ChatState.clientThreadBinding(thread)); } catch {}
         if (state.codex.activeThreadId === threadId) {
           state.codex.activeThreadId = nextThreads[0]?.id || null;
         }

@@ -6074,7 +6074,16 @@ export class CodexChatRuntime {
    * work placement). Not touched: the chat store's history, ontology pages and records, the write store, calibration rows (see the cycle-16
    * report). Counts only. Idempotent: an unknown or already forgotten conversation answers zeros.
    */
-  async forgetConversation(target) {
+  // L49: forgets run one at a time. A burst of deletes (each deletes native engine threads and scrubs backups, ~1 s) used to overlap, and 120 of 342
+  // conversations stayed stored. A failed forget does not hold up the next one.
+  forgetConversation(target) {
+    const run = () => this.forgetConversationNow(target)
+    const next = (this.forgetChain ??= Promise.resolve()).then(run, run)
+    this.forgetChain = next.catch(() => {})
+    return next
+  }
+
+  async forgetConversationNow(target) {
     const key = typeof target === 'string' ? target : idText(target?.clientThreadId)
     if (!key?.trim()) throw chatError('INVALID_CONVERSATION_FORGET', 'clientThreadId is required', 400)
     const native = new Set()
