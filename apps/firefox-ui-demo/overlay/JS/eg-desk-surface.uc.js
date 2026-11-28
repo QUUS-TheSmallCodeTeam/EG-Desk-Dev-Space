@@ -1525,6 +1525,8 @@
   const ChatStatusView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskChatStatusView.sys.mjs');
   // a1 (L1): who did what in a Browser task: the step lines in Chat and the frame on the Card (display only).
   const BrowserStepsView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserStepsView.sys.mjs');
+  // Round g (L61): Browser procedures (save, edit, run); shown only with capabilities.browserProcedures.
+  const ProcedureView = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskProcedureView.sys.mjs');
 
   function codexRunLabel(run) {
     if (!run) return '대화 준비';
@@ -4984,6 +4986,92 @@
       row.taskPreview ? el('small', { class: 'egd-codex-subagent-task' }, row.taskPreview) : null,
       display.blockedLabel ? el('p', { class: 'egd-codex-subagent-blocked' }, display.blockedLabel) : null,
       row.message ? el('p', { class: 'egd-codex-subagent-message' }, row.message) : null))));
+  }
+
+  // Round g (L61): the procedure panel (list, editor, run form); one fixed panel, drawn only with capabilities.browserProcedures.
+  function renderProcedurePanel() {
+    const bridge = state.codexBridge;
+    const ui = state.codex?.proceduresUi === true ? bridge?.procedureUi?.() : null;
+    const existing = document.getElementById('egd-proc-panel');
+    if (!ui) { existing?.remove(); return; }
+    // A re-render must not cut typing: keep the panel while a field inside has focus and only structure changed elsewhere.
+    if (existing && existing._mode === ui.mode && existing._ui === ui && existing.contains(document.activeElement)) return;
+    const C = ProcedureView.COPY;
+    const close = () => bridge.procedureClose();
+    const head = (title) => el('div', { class: 'egd-proc-head' }, el('span', { class: 'egd-proc-title' }, title),
+      el('button', { type: 'button', class: 'egd-proc-btn', 'aria-label': C.close, data: { testid: 'procedure-close' }, onclick: close }, C.close));
+    const error = (message) => (message ? el('div', { class: 'egd-proc-error', role: 'alert' }, message) : null);
+    let body;
+    if (ui.mode === 'capture') {
+      body = el('div', { class: 'egd-proc-body' }, head(C.editorTitleNew), ui.error ? error(ui.error) : el('div', { class: 'egd-proc-note' }, C.capturing));
+    } else if (ui.mode === 'list') {
+      body = el('div', { class: 'egd-proc-body', data: { testid: 'procedure-list' } }, head(C.listTitle),
+        ui.loading ? el('div', { class: 'egd-proc-note' }, C.listLoading) : null,
+        !ui.loading && !ui.rows.length && !ui.error ? el('div', { class: 'egd-proc-note' }, C.listEmpty) : null,
+        error(ui.error),
+        ...ui.rows.map((row) => el('div', { class: 'egd-proc-row', data: { testid: 'procedure-row', procedureId: row.id } },
+          el('div', { class: 'egd-proc-row-main' },
+            el('span', { class: 'egd-proc-row-name' }, row.name),
+            el('span', { class: 'egd-proc-row-meta' }, [row.site, row.stepsText, row.updatedText].filter(Boolean).join(' · '))),
+          ui.confirmDeleteId === row.id
+            ? el('div', { class: 'egd-proc-row-actions' }, el('span', { class: 'egd-proc-note' }, C.deleteConfirm),
+              el('button', { type: 'button', class: 'egd-proc-btn egd-proc-danger', data: { testid: 'procedure-delete-yes' }, onclick: () => void bridge.procedureRemove(row.id) }, C.deleteYes),
+              el('button', { type: 'button', class: 'egd-proc-btn', onclick: () => { bridge.procedureSet({ ...ui, confirmDeleteId: '' }); } }, C.deleteNo))
+            : el('div', { class: 'egd-proc-row-actions' },
+              el('button', { type: 'button', class: 'egd-proc-btn egd-proc-primary', data: { testid: 'procedure-run' }, onclick: () => void bridge.procedureLoad(row.id, 'run') }, C.actionRun),
+              el('button', { type: 'button', class: 'egd-proc-btn', data: { testid: 'procedure-edit' }, onclick: () => void bridge.procedureLoad(row.id, 'edit') }, C.actionEdit),
+              el('button', { type: 'button', class: 'egd-proc-btn', data: { testid: 'procedure-delete' }, onclick: () => { bridge.procedureSet({ ...ui, confirmDeleteId: row.id }); } }, C.actionDelete)))));
+    } else if (ui.mode === 'run') {
+      const form = ProcedureView.procedureRunForm(ui.procedure, ui.values);
+      const values = { ...(ui.values || {}) };
+      body = el('div', { class: 'egd-proc-body', data: { testid: 'procedure-run-form' } }, head(`${C.runTitle} · ${ProcedureView.procedureEditorModel(ui.procedure).name}`),
+        form.empty ? el('div', { class: 'egd-proc-note' }, form.emptyText) : null,
+        ...form.fields.map((f) => el('label', { class: 'egd-proc-field' }, el('span', { class: 'egd-proc-field-label' }, f.name),
+          f.sensitive ? el('span', { class: 'egd-proc-sensitive', data: { testid: 'procedure-sensitive' } }, f.placeholder)
+            : el('input', { type: 'text', class: 'egd-proc-input', value: f.value, data: { testid: 'procedure-param', param: f.name }, oninput: (ev) => { values[f.name] = ev.target.value; } }))),
+        error(ui.error),
+        el('div', { class: 'egd-proc-actions' },
+          el('button', { type: 'button', class: 'egd-proc-btn egd-proc-primary', data: { testid: 'procedure-run-go' }, onclick: () => void bridge.procedureRun(ui.procedure, values) }, form.runLabel),
+          el('button', { type: 'button', class: 'egd-proc-btn', onclick: () => void bridge.procedureOpenList() }, C.cancel)));
+    } else {
+      const model = ProcedureView.procedureEditorModel(ui.procedure);
+      const messages = el('div', { class: 'egd-proc-messages', role: 'status' }, ...model.messages.map((m) => el('div', {}, m)));
+      const saveButton = el('button', { type: 'button', class: 'egd-proc-btn egd-proc-primary', data: { testid: 'procedure-save' }, disabled: (!model.valid || ui.busy) ? 'true' : null,
+        onclick: () => void bridge.procedureSave() }, C.save);
+      const apply = (result, rerender) => {
+        bridge.procedureEdit(result.procedure, result.messages);
+        if (rerender) { bridge.procedureSet({ ...bridge.procedureUi(), procedure: result.procedure, messages: result.messages }); return; }
+        messages.replaceChildren(...result.messages.map((m) => el('div', {}, m)));
+        if (result.messages.length) saveButton.setAttribute('disabled', 'true'); else saveButton.removeAttribute('disabled');
+      };
+      let working = ui.procedure;
+      const step = (row) => el('li', { class: `egd-proc-step${row.person ? ' egd-proc-step-person' : ''}`, data: { testid: 'procedure-step', stepId: row.id, op: row.op } },
+        el('span', { class: 'egd-proc-step-num' }, String(row.number)),
+        el('span', { class: 'egd-proc-step-op' }, row.opLabel),
+        el('span', { class: 'egd-proc-step-target' }, row.targetLabel),
+        row.field ? (row.field.sensitive
+          ? el('span', { class: 'egd-proc-sensitive', data: { testid: 'procedure-sensitive' } }, row.field.placeholder)
+          : el('input', { type: 'text', class: 'egd-proc-input', value: row.field.value, 'aria-label': row.field.param, data: { testid: 'procedure-default', param: row.field.param },
+            oninput: (ev) => { const r = ProcedureView.setParamDefault(working, row.field.param, ev.target.value); working = r.procedure; apply(r, false); } })) : null,
+        row.canConfirm ? el('label', { class: 'egd-proc-confirm' }, el('input', { type: 'checkbox', checked: row.confirmOn ? 'true' : null, data: { testid: 'procedure-confirm' },
+          onchange: () => apply(ProcedureView.toggleStepConfirm(working, row.id, row.confirm || 'submit'), true) }), C.confirmToggle) : null,
+        el('span', { class: 'egd-proc-step-actions' },
+          el('button', { type: 'button', class: 'egd-proc-btn', disabled: row.canUp ? null : 'true', title: C.stepUp, 'aria-label': C.stepUp, data: { testid: 'procedure-up' }, onclick: () => apply(ProcedureView.moveStepUp(working, row.id), true) }, '↑'),
+          el('button', { type: 'button', class: 'egd-proc-btn', disabled: row.canDown ? null : 'true', title: C.stepDown, 'aria-label': C.stepDown, data: { testid: 'procedure-down' }, onclick: () => apply(ProcedureView.moveStepDown(working, row.id), true) }, '↓'),
+          el('button', { type: 'button', class: 'egd-proc-btn egd-proc-danger', data: { testid: 'procedure-step-delete' }, onclick: () => apply(ProcedureView.deleteStep(working, row.id), true) }, C.stepDelete)));
+      body = el('div', { class: 'egd-proc-body', data: { testid: 'procedure-editor' } }, head(ui.isNew ? C.editorTitleNew : C.editorTitleEdit),
+        el('label', { class: 'egd-proc-field' }, el('span', { class: 'egd-proc-field-label' }, C.nameLabel),
+          el('input', { type: 'text', class: 'egd-proc-input', value: model.name, data: { testid: 'procedure-name' }, oninput: (ev) => { const r = ProcedureView.renameProcedure(working, ev.target.value); working = r.procedure; apply(r, false); } })),
+        el('div', { class: 'egd-proc-field' }, el('span', { class: 'egd-proc-field-label' }, C.startLabel), el('span', { class: 'egd-proc-readonly', data: { testid: 'procedure-start' } }, model.startUrl)),
+        el('div', { class: 'egd-proc-field-label' }, C.stepsLabel),
+        el('ol', { class: 'egd-proc-steps' }, ...model.steps.map(step)),
+        messages, error(ui.error),
+        el('div', { class: 'egd-proc-actions' }, saveButton,
+          el('button', { type: 'button', class: 'egd-proc-btn', data: { testid: 'procedure-cancel' }, onclick: () => (ui.isNew ? close() : void bridge.procedureOpenList()) }, C.cancel)));
+    }
+    const panel = el('div', { id: 'egd-proc-panel', class: 'egd-proc-panel', role: 'dialog', 'aria-label': C.listTitle, data: { testid: 'procedure-panel', mode: ui.mode } }, body);
+    panel._mode = ui.mode; panel._ui = ui;
+    existing ? existing.replaceWith(panel) : (document.documentElement.appendChild(panel));
   }
 
   function renderCodexActivityPanel() {
@@ -12864,6 +12952,11 @@
     return { browserStepsUi: bridgeState?.capabilities?.browserSteps === true };
   }
 
+  // Round g (L61): the procedure controls show only while the bridge reports capabilities.browserProcedures (EGDESK_BROWSER_PROCEDURES=on).
+  function bridgeProceduresField(bridgeState) {
+    return { proceduresUi: bridgeState?.capabilities?.browserProcedures === true };
+  }
+
   // RT-05: the helper build this overlay was installed with. The launcher
   // writes the marker; an overlay installed without it sends nothing, and the
   // bridge then never reports a mismatch.
@@ -14739,12 +14832,19 @@
             for (const block of browserStepBlocks?.take(until) || []) {
               const view = BrowserStepsView.browserStepsBlockView(block, { engineId: activeEngine?.engineId || activeThread.engineId || null,
                 open: !!codex.expandedBrowserSteps?.[`${activeThread.id}/${block.key}`] });
+              // Round g (L61): a finished task block can be saved as a procedure (only with capabilities.browserProcedures).
+              const saveOffer = codex.proceduresUi === true ? ProcedureView.procedureSaveOffer(block, { busy: threadBusy(activeThread) }) : null;
               messages.appendChild(el('div', {
                 class: 'egd-codex-browser-steps', role: 'group', 'aria-label': view.summary,
                 data: { testid: 'chat-browser-steps', taskId: block.taskId, collapsed: String(view.collapsed) },
               }, el('div', { class: 'egd-codex-browser-steps-head' },
                 deskIcon('pointer', 'egd-codex-browser-steps-mark'),
                 el('span', { class: 'egd-codex-browser-steps-summary' }, view.summary),
+                saveOffer ? el('button', {
+                  type: 'button', class: 'egd-codex-browser-steps-toggle egd-proc-save', title: ProcedureView.COPY.saveButtonTitle,
+                  data: { testid: 'chat-procedure-save' },
+                  onclick: (ev) => { ev.stopPropagation(); void codexBridge.procedureCapture(saveOffer.clientThreadId, saveOffer.cardId); },
+                }, ProcedureView.COPY.saveButton) : null,
                 view.foldable ? el('button', {
                   type: 'button', class: 'egd-codex-browser-steps-toggle', 'aria-expanded': String(!view.collapsed),
                   data: { testid: 'chat-browser-steps-toggle', focusKey: `browser-steps-${block.key}` },
@@ -16145,6 +16245,7 @@
         try { listener(state.codex); } catch (error) { console.warn(TAG, 'codex listener failed', error); }
       }
       renderCodexActivityPanel();
+      renderProcedurePanel();
       if (typeof refreshFileCardAgentBadges === 'function') refreshFileCardAgentBadges();
       scheduleDeskSessionSave();
     };
@@ -16364,6 +16465,8 @@
       scheduleReconnect();
     };
 
+    let procedureUiState = null; // Round g (L61): the open procedure panel (list, editor, run), or null
+    let procedureToken = 0;
     const fetchJson = async (path, options = {}) => {
       if (!path.startsWith('/') || path.startsWith('//')) throw new Error('Invalid bridge path');
       const response = await fetch(`http://127.0.0.1:39218${path}`, {
@@ -17083,6 +17186,7 @@
           ...bridgeEngineFields(bridgeState),
           ...bridgeSessionFields(bridgeState),
           ...bridgeBrowserStepsField(bridgeState),
+          ...bridgeProceduresField(bridgeState),
         });
         portableBridgeObserved(bridgeState);
         void deskStoreBridgeObserved(bridgeState);
@@ -18061,6 +18165,102 @@
         const computerControl = ChatState.normalizeComputerControl(result);
         if (computerControl) update({ computerControl });
         return computerControl;
+      },
+      // Round g (L61): Browser procedures. The panel state lives here (this screen only); every call is flag-gated.
+      procedureUi() { return state.codex.proceduresUi === true ? procedureUiState : null; },
+      procedureSet(next) { procedureUiState = state.codex.proceduresUi === true ? next : null; procedureToken += 1; emit(); },
+      procedureClose() { this.procedureSet(null); },
+      async procedureOpenList() {
+        if (state.codex.proceduresUi !== true) return;
+        this.procedureSet({ mode: 'list', loading: true, rows: [], error: '', confirmDeleteId: '' });
+        const token = procedureToken;
+        try {
+          const response = await fetchJson('/v1/procedures', { method: 'GET' });
+          if (token !== procedureToken) return;
+          const list = Array.isArray(response) ? response : response?.procedures || response?.items || [];
+          procedureUiState = { mode: 'list', loading: false, rows: ProcedureView.procedureListRows(list, { now: Date.now() }), error: '', confirmDeleteId: '' };
+        } catch (error) {
+          if (token !== procedureToken) return;
+          procedureUiState = { mode: 'list', loading: false, rows: [], error: `${ProcedureView.COPY.loadFailed}: ${error?.message || error}`, confirmDeleteId: '' };
+        }
+        emit();
+      },
+      async procedureLoad(id, mode) {
+        if (state.codex.proceduresUi !== true || !id) return;
+        const token = procedureToken;
+        try {
+          const response = await fetchJson(`/v1/procedures/${encodeURIComponent(id)}`, { method: 'GET' });
+          if (token !== procedureToken) return;
+          const procedure = response?.procedure || response;
+          procedureUiState = mode === 'run'
+            ? { mode: 'run', procedure, values: {}, error: '' }
+            : { mode: 'editor', procedure, isNew: false, messages: ProcedureView.validateProcedure(procedure), error: '', busy: false };
+        } catch (error) {
+          if (token !== procedureToken) return;
+          procedureUiState = { ...(procedureUiState || { mode: 'list', rows: [] }), error: `${ProcedureView.COPY.loadFailed}: ${error?.message || error}` };
+        }
+        emit();
+      },
+      // "절차로 저장": the draft of the last Browser task on that card; the editor opens with it (nothing is saved yet).
+      async procedureCapture(clientThreadId, cardId) {
+        if (state.codex.proceduresUi !== true || !clientThreadId || !cardId) return;
+        this.procedureSet({ mode: 'capture', error: '' });
+        const token = procedureToken;
+        try {
+          const response = await fetchJson('/v1/procedures/capture', { method: 'POST', body: JSON.stringify({ clientThreadId, cardId }) });
+          if (token !== procedureToken) return;
+          const draft = response?.draft || response;
+          procedureUiState = { mode: 'editor', procedure: draft, isNew: true, messages: ProcedureView.validateProcedure(draft), error: '', busy: false };
+        } catch (error) {
+          if (token !== procedureToken) return;
+          procedureUiState = { mode: 'capture', error: `${ProcedureView.COPY.captureFailed}: ${error?.message || error}` };
+        }
+        emit();
+      },
+      procedureEdit(procedure, messages) {
+        if (!procedureUiState || procedureUiState.mode !== 'editor') return;
+        procedureUiState = { ...procedureUiState, procedure, messages, error: '' };
+      },
+      async procedureSave() {
+        const ui = procedureUiState;
+        if (state.codex.proceduresUi !== true || ui?.mode !== 'editor' || ui.busy) return;
+        if (ProcedureView.validateProcedure(ui.procedure).length) return;
+        const token = procedureToken;
+        procedureUiState = { ...ui, busy: true, error: '' }; emit();
+        try {
+          const own = ui.procedure;
+          if (ui.isNew) await fetchJson('/v1/procedures', { method: 'POST', body: JSON.stringify(own) });
+          else await fetchJson(`/v1/procedures/${encodeURIComponent(own.id)}`, { method: 'PUT', body: JSON.stringify(own) });
+          if (token !== procedureToken) return;
+          await this.procedureOpenList();
+        } catch (error) {
+          if (token !== procedureToken) return;
+          procedureUiState = { ...ui, busy: false, error: `${ProcedureView.COPY.saveFailed}: ${error?.message || error}` };
+          emit();
+        }
+      },
+      async procedureRemove(id) {
+        if (state.codex.proceduresUi !== true || !id) return;
+        try {
+          await fetchJson(`/v1/procedures/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          await this.procedureOpenList();
+        } catch (error) {
+          procedureUiState = { ...(procedureUiState || { mode: 'list', rows: [] }), confirmDeleteId: '', error: `${ProcedureView.COPY.deleteFailed}: ${error?.message || error}` };
+          emit();
+        }
+      },
+      // "실행": the message goes through the chat's normal send path (draft + sendMessage) in the active room.
+      async procedureRun(procedure, values) {
+        if (state.codex.proceduresUi !== true || !procedure) return;
+        const thread = getActiveCodexThread(state.codex);
+        const fail = (message) => { procedureUiState = { ...(procedureUiState || {}), error: message }; emit(); };
+        if (!thread) return fail(ProcedureView.COPY.runNoRoom);
+        if (threadBusy(thread)) return fail(ProcedureView.COPY.runBusy);
+        if (getCodexThreadDraft(state.codex, thread.id).trim()) return fail(ProcedureView.COPY.runDraftBusy);
+        this.setDraft(ProcedureView.procedureRunMessage(procedure, values || {}), thread.id);
+        this.procedureSet(null);
+        await this.sendMessage();
+        boardNotice(ProcedureView.COPY.runSent);
       },
       // a1 (L1): a folded Browser task's step lines opened in place, or folded again (this screen only).
       toggleBrowserSteps(threadId, blockKey) {
@@ -19426,6 +19626,7 @@
             ...bridgeEngineFields(bridgeState),
             ...bridgeSessionFields(bridgeState),
             ...bridgeBrowserStepsField(bridgeState),
+            ...bridgeProceduresField(bridgeState),
           });
           portableBridgeObserved(bridgeState);
         } catch (error) {
@@ -20399,6 +20600,18 @@
     // The name is the open conversation; on the room list it is the window's own.
     const syncChatFrameTitle = (codex) => {
       if (!codex) return;
+      // Round g (L61): the "절차" control exists only while the bridge reports capabilities.browserProcedures.
+      const actions = header.querySelector('.egd-chat-card-actions');
+      if (actions) {
+        const existing = actions.querySelector('[data-testid="chat-procedures"]');
+        if (codex.proceduresUi === true && !existing) {
+          actions.insertBefore(el('button', {
+            type: 'button', class: 'egd-chat-card-action egd-proc-toolbar', title: ProcedureView.COPY.toolbarTitle,
+            'aria-label': ProcedureView.COPY.toolbarTitle, data: { testid: 'chat-procedures' },
+            onclick: (ev) => { ev.stopPropagation(); void state.codexBridge?.procedureOpenList(); },
+          }, ProcedureView.COPY.toolbarButton), actions.firstChild);
+        } else if (codex.proceduresUi !== true && existing) existing.remove();
+      }
       const open = codex.activeThreadId ? getCodexThreadById(codex, codex.activeThreadId) : null;
       const name = ChatFrame.chatFrameTitle({ thread: open, view: normalizeHudView(codex.hudView) });
       if (titleLabel.textContent !== name.text) titleLabel.textContent = name.text;
