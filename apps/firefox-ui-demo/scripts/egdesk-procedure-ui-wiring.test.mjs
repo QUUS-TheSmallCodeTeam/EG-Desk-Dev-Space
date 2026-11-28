@@ -73,3 +73,11 @@ test('css: procedure styles sit next to the browser steps chat styles', () => {
   assert.ok(steps > 0 && proc > steps && proc - steps < 2000 && toggle > proc)
   for (const cls of ['.egd-proc-row', '.egd-proc-step', '.egd-proc-input', '.egd-proc-sensitive', '.egd-proc-toolbar', '.egd-proc-save']) assert.ok(css.includes(cls), cls)
 })
+
+test('round g integration: the chat save offer uses only names in the HUD scope (threadBusy lives in installCodexBridge; calling it here blanked the chat body)', () => {
+  const src = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
+  const line = src.split('\n').find(l => l.includes('ProcedureView.procedureSaveOffer(block'))
+  assert.ok(line, 'save offer line present')
+  assert.ok(!/threadBusy\(/.test(line.replace(/\/\*.*?\*\//g, '')), 'no threadBusy call in mountCodexHUD')
+  assert.ok(line.includes('codex.isSending === true'))
+})

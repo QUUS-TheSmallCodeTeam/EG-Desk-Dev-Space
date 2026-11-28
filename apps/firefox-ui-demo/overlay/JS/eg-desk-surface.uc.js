@@ -14833,7 +14833,7 @@
               const view = BrowserStepsView.browserStepsBlockView(block, { engineId: activeEngine?.engineId || activeThread.engineId || null,
                 open: !!codex.expandedBrowserSteps?.[`${activeThread.id}/${block.key}`] });
               // Round g (L61): a finished task block can be saved as a procedure (only with capabilities.browserProcedures).
-              const saveOffer = codex.proceduresUi === true ? ProcedureView.procedureSaveOffer(block, { busy: threadBusy(activeThread) }) : null;
+              const saveOffer = codex.proceduresUi === true ? ProcedureView.procedureSaveOffer(block, { busy: codex.isSending === true }) /* threadBusy lives in installCodexBridge, not in this HUD scope */ : null;
               messages.appendChild(el('div', {
                 class: 'egd-codex-browser-steps', role: 'group', 'aria-label': view.summary,
                 data: { testid: 'chat-browser-steps', taskId: block.taskId, collapsed: String(view.collapsed) },
