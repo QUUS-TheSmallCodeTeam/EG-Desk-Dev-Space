@@ -8,6 +8,7 @@ import { conversationAuthority } from './egdesk-browser-authority.mjs'
 import { authorizePostSubmit, buildReflexCandidates, decideReflexStep, withoutPageText, expectedTargetOf, navigationLanded, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { BROWSER_TASK_TOOL_NAME } from './egdesk-browser-task-tool.mjs'
+import { PROCEDURE_TOOL_NAME_LIST } from './egdesk-browser-procedure-tools.mjs'
 
 // L8 u1 ('위': up to the conversation): the browser as EG-Desk tools (the tools are named after the Card: egdesk_card_*; egdesk_page_* is the working-memory fixture's stand-in) the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
 // this provider's specs()). Four coarse tools on top of the Browser tool service, whose checks stay in force because EVERY action goes through that provider's own dispatch for the same run
@@ -63,7 +64,7 @@ function parse(response) {
  *   ledger:  the approval ledger of the command and file tools (check({ sessionId, turnId, cwd, command, floor, identity })); without it nothing that needs approval is done
  */
 // taskTool (L8 a1, optional): the browser task tool (egdesk-browser-task-tool.mjs) served beside these four (its flag EGDESK_BROWSER_TASK_TOOL); without it nothing changes.
-export function createPageToolsProvider({ mode = () => 'off', browser = null, ledger = null, env = process.env, limits = {}, taskTool = null, messageOf = () => null, scopeOf = null } = {}) {
+export function createPageToolsProvider({ mode = () => 'off', browser = null, ledger = null, env = process.env, limits = {}, taskTool = null, procedureTools = null, messageOf = () => null, scopeOf = null } = {}) {
   const L = { ...PAGE_LIMITS, ...limits }
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const last = new Map() // `${runId}/${cardId}` -> { observationId, snapshot, options }
@@ -348,7 +349,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
   return {
     providerId: PAGE_TOOLS_PROVIDER_ID,
     runtime: null,
-    specs() { return on() ? (taskTool?.spec ? [...PAGE_TOOL_SPECS, taskTool.spec] : PAGE_TOOL_SPECS) : [] },
+    specs() { return on() ? [...PAGE_TOOL_SPECS, ...(taskTool?.spec ? [taskTool.spec] : []), ...(procedureTools?.specs ?? [])] : [] }, // round g: the procedure tools (flag EGDESK_BROWSER_PROCEDURES + the service host), else none
     dispatch(run, event) {
       const key = `${run?.answerId ?? run?.runId ?? ''}/${event?.callId ?? ''}`
       if (event?.callId && calls.has(key)) return calls.get(key)
@@ -359,6 +360,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     async handle(run, event) {
       const name = event?.tool
       if (!event?.namespace && taskTool?.spec && name === taskTool.spec.name) return on() ? taskTool.handle(run, event) : refused('PAGE_TOOLS_OFF') // a1
+      if (!event?.namespace && procedureTools?.names?.includes(name)) return on() ? procedureTools.handle(run, event) : refused('PAGE_TOOLS_OFF') // round g
       if (event?.namespace || !Object.values(PAGE_TOOL_NAMES).includes(name)) return refused('PAGE_TOOL_UNKNOWN')
       if (!on()) return refused('PAGE_TOOLS_OFF')
       const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
@@ -374,7 +376,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
 // The runtime asks these functions instead of knowing the page tools; the Browser provider checks again for every action it is asked to do.
 export const PAGE_BROWSER_EQUIVALENT = Object.freeze({ [PAGE_TOOL_NAMES.read]: 'egdesk_browser_observe', [PAGE_TOOL_NAMES.press]: 'egdesk_browser_click', [PAGE_TOOL_NAMES.type]: 'egdesk_browser_fill', [PAGE_TOOL_NAMES.open]: 'egdesk_browser_open_card' })
 // a1: the browser task tool acts on its Card (opens links, types, runs read-only searches): it needs what egdesk_browser_navigate needs (an interact grant, an Agent ceiling that allows interaction)
-export const pageToolBrowserEquivalent = name => PAGE_BROWSER_EQUIVALENT[name] ?? (name === BROWSER_TASK_TOOL_NAME ? 'egdesk_browser_navigate' : null)
+export const pageToolBrowserEquivalent = name => PAGE_BROWSER_EQUIVALENT[name] ?? (name === BROWSER_TASK_TOOL_NAME || PROCEDURE_TOOL_NAME_LIST.includes(name) ? 'egdesk_browser_navigate' : null)
 /** { tool: <the Browser tool it needs>, cardId } for a page tool call (the Card it names, else the first interact Card, else the first Card), null for any other tool. */
 export function pageToolGate(run, event) {
   if (event?.namespace) return null

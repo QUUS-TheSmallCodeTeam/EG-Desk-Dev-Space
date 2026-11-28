@@ -1,5 +1,6 @@
 import { PAGE_TOOLS_FLAG, createPageToolsProvider, pageToolsEnabled } from './egdesk-page-tools.mjs'
 import { pageTextOn } from './egdesk-browser-reflex.mjs'
+import { createProcedureTools, procedureToolsEnabled } from './egdesk-browser-procedure-tools.mjs'
 import { BROWSER_TASK_TOOL_FLAG, browserTaskToolEnabled, createBrowserTaskTool } from './egdesk-browser-task-tool.mjs'
 
 // L8 u1: the bridge's wiring of the page tools (helper/egdesk-page-tools.mjs). Developer flag EGDESK_PAGE_TOOLS=on, default off: without it this returns null and the bridge
@@ -13,7 +14,7 @@ export { PAGE_TOOLS_FLAG, BROWSER_TASK_TOOL_FLAG }
  * createPageToolsWiring({ env, getChat, ledger? }) -> null | { toolProviders }
  *   getChat() -> the CodexChatRuntime (read lazily: the runtime is made after this wiring); its browserToolProvider() is the Browser provider
  */
-export function createPageToolsWiring({ env = process.env, getChat, ledger = null } = {}) {
+export function createPageToolsWiring({ env = process.env, getChat, ledger = null, procedures = null } = {}) {
   if (!pageToolsEnabled(env)) return null
   if (typeof getChat !== 'function') throw new TypeError('page tools need getChat')
   const browser = { dispatch: (run, event) => {
@@ -35,7 +36,19 @@ export function createPageToolsWiring({ env = process.env, getChat, ledger = nul
     storeOf: () => pageProvider?.runtime?.browserTasks?.() ?? null,
     pageText: pageTextOn(env),
   }) : null
-  pageProvider = createPageToolsProvider({ mode: () => 'on', browser, ledger, env, messageOf,
+  // round g: the browser procedure tools (EGDESK_BROWSER_PROCEDURES=on and the procedure service host injected as `procedures`, an object or a getter); none otherwise
+  // The host is read lazily (the bridge builds the service after this wiring): the tools exist once it is present.
+  let built = null, builtFor = null
+  const liveProcedureTools = () => {
+    try {
+      const host = typeof procedures === 'function' ? procedures() : procedures
+      if (host !== builtFor) { builtFor = host; built = createProcedureTools({ procedures: host, env, browser: { reflexScope: (run, event, cardId) => provider().reflexScope(run, event, cardId) },
+        onStep: (run, event) => { const hook = pageProvider?.runtime?.browserTaskStep; return typeof hook === 'function' ? hook(run, event, { taskId: event.taskId, cardId: event.cardId }) : getChat()?.browserTaskStep?.(run, event) } }) }
+      return built
+    } catch { return null }
+  }
+  const procedureTools = procedureToolsEnabled(env) && procedures ? { get names() { return liveProcedureTools()?.names ?? [] }, get specs() { return liveProcedureTools()?.specs ?? [] }, handle: (run, event) => liveProcedureTools().handle(run, event) } : null
+  pageProvider = createPageToolsProvider({ mode: () => 'on', browser, ledger, env, messageOf, ...(procedureTools ? { procedureTools } : {}),
     scopeOf: (run, event, cardId) => provider().reflexScope(run, event, cardId), ...(taskTool ? { taskTool } : {}) })
   return { toolProviders: [pageProvider] }
 }
