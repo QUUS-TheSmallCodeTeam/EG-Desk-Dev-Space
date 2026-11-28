@@ -68,7 +68,7 @@ test('sensitive params: no input is rendered for them', () => {
 })
 
 test('css: procedure styles sit next to the browser steps chat styles', () => {
-  const steps = css.indexOf('.egd-codex-browser-steps-head {'), proc = css.indexOf('.egd-proc-panel {'), toggle = css.indexOf('.egd-codex-browser-steps-toggle {')
+  const steps = css.indexOf('.egd-codex-browser-steps-head {'), proc = css.indexOf('.egd-proc-panel {'), toggle = css.indexOf('\n.egd-codex-browser-steps-toggle {')
   assert.ok(steps > 0 && proc > steps && proc - steps < 2000 && toggle > proc)
   for (const cls of ['.egd-proc-row', '.egd-proc-step', '.egd-proc-input', '.egd-proc-sensitive', '.egd-proc-toolbar', '.egd-proc-save']) assert.ok(css.includes(cls), cls)
 })
