@@ -31,7 +31,7 @@ function omitDispatchFields(receipt, ...fields) {
   for (const field of fields) delete dispatchReceipt[field]
   return { ...receipt, dispatchReceipt }
 }
-function fixture(permission = 'interact', { bindUrl = 'https://example.test/local' } = {}) {
+function fixture(permission = 'interact', { bindUrl = 'https://example.test/local', serviceOptions = {} } = {}) {
   let owner = 'engine-account-1'
   let current = snapshot()
   let actionCalls = 0
@@ -70,7 +70,7 @@ function fixture(permission = 'interact', { bindUrl = 'https://example.test/loca
     }
     throw new Error('unexpected UI request')
   }
-  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => owner })
+  const service = createBrowserToolService({ sendToUi, getOwnerKey: () => owner, ...serviceOptions })
   const nativeDispatch = service.dispatch
   let callSequence = 0
   service.dispatch = (boundRun, event) => nativeDispatch(boundRun,
@@ -2088,4 +2088,47 @@ test('L40: an unobservable wait/observe reply carries the parent top-level http(
     await assert.rejects(f.dispatch('egdesk_browser_wait', { cardId: 'browser-1', for: 'load', timeoutMs: 1000 }),
       error => error.code === 'BROWSER_WAIT_OUTCOME_UNKNOWN' && error.arrival === undefined)
   }
+})
+
+// Round g (L59): the act journal.
+async function journalAct(f, runValue, args, tool = 'egdesk_browser_click') {
+  const observed = await f.service.dispatch(runValue, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })
+  return f.service.dispatch(runValue, { tool, arguments: { cardId: 'browser-1', observationId: observed.observationId, expectedRevision: observed.snapshot.revision,
+    ref: 'el_1', expectedTarget: Object.fromEntries(['ref', 'role', 'label', 'href', 'value', 'tag'].map(k => [k, observed.snapshot.interactiveElements[0][k]])), ...args } })
+}
+test('act journal: off records nothing; on records OK acts with page facts, per run, bounded', async () => {
+  for (const on of [false, true]) {
+    const f = fixture('interact', { serviceOptions: { procedureFlag: () => on } })
+    await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+    await journalAct(f, run, { postcondition: { kind: 'visible-text', value: 'Count: 1' } })
+    const entries = f.service.procedureJournal.lastRun('thread-a', 'browser-1')
+    if (!on) { assert.deepEqual(entries, []); continue }
+    assert.equal(entries.length, 1)
+    const [entry] = entries
+    assert.deepEqual([entry.tool, entry.runId, entry.pageUrl, entry.pageTitle, entry.expectedTarget.label, entry.postcondition],
+      ['egdesk_browser_click', 'run-1', 'https://example.test/local', 'Fixture', 'Increment', { kind: 'visible-text', value: 'Count: 1' }])
+    // A failed act (stale observation) is not recorded; a second run is a new boundary.
+    await assert.rejects(f.service.dispatch(run, { tool: 'egdesk_browser_click', arguments: { cardId: 'browser-1', observationId: 'old', expectedRevision: 3, ref: 'el_1',
+      expectedTarget: entry.expectedTarget, postcondition: { kind: 'visible-text', value: 'x' } } }))
+    assert.equal(f.service.procedureJournal.lastRun('thread-a', 'browser-1').length, 1)
+  }
+})
+test('act journal: element facts, text only when display-safe, run boundary and bounds', async () => {
+  const f = fixture('interact', { serviceOptions: { procedureFlag: () => true } })
+  await f.service.bind(run, f.service.prepare({ selectedSources: [source()] }))
+  f.setSnapshot(snapshot(3, { interactiveElements: [{ ref: 'el_1', role: 'textbox', label: '이름', href: '', value: '', tag: 'input', disabled: false,
+    bounds: { x: 1, y: 1, width: 5, height: 5 }, displayValueSafe: true }] }))
+  await journalAct(f, run, { text: '하늘', postcondition: { kind: 'target-value', value: '하늘' } }, 'egdesk_browser_fill')
+  f.setSnapshot(snapshot(5, { interactiveElements: [{ ref: 'el_1', role: 'button', label: '보내기', href: '', value: '', tag: 'button', disabled: false,
+    bounds: { x: 1, y: 1, width: 5, height: 5 }, nav: { type: 'submit', sensitiveRegion: false, regionLabel: '주문', form: { method: 'post' } } }] }))
+  await journalAct(f, run, { postcondition: { kind: 'visible-text', value: 'Count: 1' } })
+  const [fill, click] = f.service.procedureJournal.lastRun('thread-a', 'browser-1')
+  assert.deepEqual([fill.text, fill.displaySafe], ['하늘', true])
+  assert.deepEqual(click.facts, { type: 'submit', formMethod: 'post', regionLabel: '주문', sensitiveRegion: false })
+  assert.equal('text' in click, false)
+  const next = { ...run, answerId: 'answer-2', runId: 'run-2' }
+  await f.service.bind(next, f.service.prepare({ selectedSources: [source()] }))
+  f.setSnapshot(snapshot(9, { text: ['Count: 0'] }))
+  await journalAct(f, next, { postcondition: { kind: 'visible-text', value: 'Count: 1' } })
+  assert.deepEqual(f.service.procedureJournal.lastRun('thread-a', 'browser-1').map(e => e.runId), ['run-2'])
 })

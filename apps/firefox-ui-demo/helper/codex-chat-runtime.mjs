@@ -800,7 +800,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 export const STOP_RECORD_WAIT_MS = 2500 // c27: how long the next send waits for a stopped command's record (the runner's kill grace is 2 s)
 const INTERNAL_WORD = /^[A-Za-z][A-Za-z0-9._:-]{0,63}$/ // an effort or a model name a caller may pick for an internal turn (the engine rejects what it does not know)
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null, engineStall = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null, engineStall = null, procedures = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -1009,7 +1009,9 @@ export class CodexChatRuntime {
     // a1 (교대): browserTaskStep(run, event) puts one step of a Decision loop a tool runs (the browser task tool, L8's step contract) on the screen through lane L1's channel, like
     // the entry's steps; browserTasks() is the entry's task store (the entry and the tool continue the same task), null while the entry is off.
     const providerRuntime = Object.freeze({ emit: (...args) => this.emit(...args), browserRegisteredThreads: this.browserRegisteredThreads, currentEpoch: () => this.epoch,
-      browserTaskStep: (run, event) => this.browserTaskStep(run, event), browserTasks: () => this.browserTasks() })
+      browserTaskStep: (run, event) => this.browserTaskStep(run, event), browserTasks: () => this.browserTasks(),
+      // Round g: the procedure service, or null (flag off / storage unavailable). Tools call it at use time, never cache it.
+      procedures: () => { try { return typeof procedures === 'function' ? procedures() ?? null : null } catch { return null } } })
     for (const provider of this.toolProviders) provider.runtime = provider === contexts ? this : providerRuntime
     this.providerRuntime = providerRuntime // u1: for registerToolProvider
     this.ownedRuns = new WeakSet()

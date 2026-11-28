@@ -144,3 +144,25 @@ test('an unreadable or foreign database is reported and left byte for byte', asy
   const check = new DatabaseSync(path.join(foreign, WORKFLOW_STORE_FILE), { readOnly: true })
   try { assert.equal(check.prepare('SELECT body FROM notes').get().body, 'keep me') } finally { check.close() }
 })
+
+test('browser_procedure records: own table made on first use, same list/insert/replace/remove API, other kinds untouched', async t => {
+  const f = await folder(t)
+  const store = f.open()
+  const tables = () => { const db = new DatabaseSync(store.filename); try { return db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name) } finally { db.close() } }
+  assert.equal(tables().includes('procedure_records'), false)
+  assert.equal(store.records.count('browser_procedure'), 0)
+  store.records.insert('browser_procedure', 'proc-a', '{"n":1}')
+  store.records.insert('browser_procedure', 'proc-b', '{"n":2}')
+  store.records.insert('plan', 'proc-a', '{"p":1}')
+  store.records.replace('browser_procedure', 'proc-a', '{"n":3}')
+  assert.deepEqual(store.records.list('browser_procedure'), [{ key: 'proc-a', json: '{"n":3}' }, { key: 'proc-b', json: '{"n":2}' }])
+  assert.deepEqual(store.records.list('plan'), [{ key: 'proc-a', json: '{"p":1}' }])
+  assert.throws(() => store.records.insert('browser_procedure', 'proc-a', '{}'), /UNIQUE/)
+  assert.throws(() => store.records.replace('browser_procedure', 'proc-x', '{}'), { code: 'WORKFLOW_STORE_CONFLICT' })
+  assert.equal(store.records.remove('browser_procedure', 'proc-a'), true)
+  assert.equal(store.records.remove('browser_procedure', 'proc-a'), false)
+  assert.deepEqual(store.records.list('browser_procedure').map(r => r.key), ['proc-b'])
+  store.close()
+  const again = f.open()
+  assert.equal(again.records.count('browser_procedure'), 1, 'it survives a reopen')
+})

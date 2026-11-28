@@ -869,6 +869,9 @@ export const STEP_TARGET_CHARS = 40
 export const EVIDENCE_VALUE_CHARS = 1000
 export const optionTarget = option => compactText(String((option?.item?.kind === 'choice' && option.item.element.tag === 'select' ? option.item.element.options.find(o => o.value === option.item.desired)?.label : null) ?? option?.item?.element?.label ?? option?.value ?? '').replace(/^\[[A-Z]\d+\]\s*/, ''), STEP_TARGET_CHARS) || null
 export const optionOp = option => (option?.item?.kind === 'fill' ? 'fill' : option?.item?.kind === 'navigate' ? 'open' : option?.item?.readOnly?.kind === 'get_form' ? 'submit' : 'press')
+// g (procedures): the one test for a field whose value may be shown or saved; optionStepDisplay and the procedure draft share it.
+export const isSensitiveLabel = label => SENSITIVE_LABEL.test(label) || /(?:인증\s*코드|verification\s*code|security\s*code)/i.test(label) || label === 'Sensitive field'
+export const fieldDisplaySafe = element => element?.displayValueSafe === true && typeof element.label === 'string' && element.label.trim() !== '' && !isSensitiveLabel(element.label)
 // The actor positively identifies displayable fields. Old snapshots and redacted controls fail closed.
 export function optionStepDisplay(option, text) {
   const { kind, element, desired } = option?.item ?? {}
@@ -877,7 +880,7 @@ export function optionStepDisplay(option, text) {
   const list = choice && element?.tag === 'select'
   // radio/checkbox: the shown value is the control's own name (not the internal checked/unchecked state); an unnamed field never previews
   const value = choice ? (list ? element.options?.find(o => o.value === desired)?.label : element?.label) : text
-  const safe = element?.displayValueSafe === true && typeof element.label === 'string' && element.label.trim() !== '' && !SENSITIVE_LABEL.test(element.label) && !/(?:인증\s*코드|verification\s*code|security\s*code)/i.test(element.label) && element.label !== 'Sensitive field'
+  const safe = fieldDisplaySafe(element)
   const chars = [...String(value ?? '').replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim()]
   return { ...(choice ? { op: 'select', target: list ? compactText(element?.label, 40) : null } : {}),
     displayValue: safe ? chars.length > 40 ? chars.slice(0, 39).join('') + '…' : chars.join('') : '●●●',

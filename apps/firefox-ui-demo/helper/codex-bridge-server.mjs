@@ -48,6 +48,10 @@ import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } fro
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { applyUpperBundle, describeUpperBundle, hudRoutingCapability, modeGatedClient } from './egdesk-upper-bundle.mjs'
 import { createScreenRecordingService } from './egdesk-screen-recording.mjs'
+import { createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { procedureFlagOn } from './egdesk-browser-procedure.mjs'
+import { createProcedureService } from './egdesk-browser-procedure-service.mjs'
+import { createProcedureHttp } from './egdesk-browser-procedure-http.mjs'
 import { PERSONAL_FLAGS_FILE, applyPersonalFlags, describePersonalFlags } from './egdesk-personal-flags.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
@@ -395,7 +399,12 @@ let browserDecisionGeneration = 0
 // OWN binary's probe and ITS OWN server (ready and signed in), so neither server being down affects the other's rooms.
 const slotReadiness = createSlotReadiness({ shared: () => ({ schemaMatch: nativeCapabilities.schemaMatch, qaReadOnly: nativeCapabilities.qaReadOnly, ready: appServerReady }),
   profiles: { capabilities: id => codexProfileServers.capabilities(id) } })
-const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: browserSchemaReady({ claudeLive: () => { try { return chat.claudeBrowserLive() === true } catch { return false } }, claudeReady: () => claudeEngine.isReady() && claudeEngine.capabilities().has('boundedQa'), codexReady: route => slotReadiness.qaReady(route?.engineProfileId) }), fixtureQa: fixtureBrowserQaFromEnv(process.env),
+// Round g (EGDESK_BROWSER_PROCEDURES, default off): the same service the provider built by default, made here so the procedure service can read its act journal.
+const browserToolService = createBrowserToolService({ sendToUi: request => browserTransport.sendToUi(request), getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor })
+let procedureService = null // set once the workflow store is open, and only with the flag on
+const procedures = () => (procedureFlagOn() ? procedureService : null)
+const procedureHttp = createProcedureHttp({ service: procedures, port: BRIDGE_PORT })
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: browserSchemaReady({ claudeLive: () => { try { return chat.claudeBrowserLive() === true } catch { return false } }, claudeReady: () => claudeEngine.isReady() && claudeEngine.capabilities().has('boundedQa'), codexReady: route => slotReadiness.qaReady(route?.engineProfileId) }), fixtureQa: fixtureBrowserQaFromEnv(process.env), service: browserToolService,
   watchPopupLoad: (cardId, url) => workflow?.watchPopupLoad(cardId, url),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
   decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
@@ -562,6 +571,7 @@ const chat = new CodexChatRuntime({
   contexts,
   resolveProjectWorkspace: request => localFiles.resolveProjectWorkspace(request),
   resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
+  procedures,
   toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),
   ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
   // developer flag, default off (L7 c27): an Agent-profile turn on a loaded thread skips the per-turn detach + resume while its resume parameters are unchanged
@@ -787,6 +797,7 @@ workflow = await openWorkflowRuntime({
     return isProfileSlot(slot) ? slot : undefined
   },
 })
+if (procedureFlagOn() && workflow.workflowStore) procedureService = createProcedureService({ store: workflow.workflowStore, journal: browserToolService.procedureJournal })
 const detachContextServices = contexts.attachServices({ bus: workflow.bus, settings: bridgeSettings.contextSuggest, boards: deskStore })
 for (const root of pendingFileRoots.values()) workflow.watchRoot(root)
 pendingFileRoots.clear()
@@ -1316,6 +1327,7 @@ const bridgeServer = createServer(async (req, res) => {
         boardPresentation: true,
         channelContext: true,
         ...(browserSteps.enabled() ? { browserSteps: true } : {}),
+        ...(procedureFlagOn() ? { browserProcedures: true } : {}),
         desk: deskStore ? ['local-store', 'generations', 'restore', 'board-revisions', 'board-revert', 'prefs-import'] : ['local-store-unavailable'],
         portable: [
           ...(deskStore ? ['export', 'inspect', 'import-as-new', 'passphrase', 'exports-list', 'attachments', 'file-drafts'] : ['local-store-unavailable']),
@@ -1472,6 +1484,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleUserGuidanceHttp(req, res, url)) return
   if (await handlePresenceMirrorHttp(req, res, url)) return
   if (await screenRecording.handle(req, res, url)) return
+  if (await procedureHttp.handle(req, res, url)) return
   if (await handleRunRequesterReadHttp(req, res, url)) return
   if (await handleRunRequesterHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return

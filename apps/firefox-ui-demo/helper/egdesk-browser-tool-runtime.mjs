@@ -2,6 +2,8 @@ import { requestedSiteEvidence } from './egdesk-browser-authority.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { CURRENT_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
+import { createActJournal } from './egdesk-browser-procedure-journal.mjs'
+import { procedureFlagOn } from './egdesk-browser-procedure.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, formResultLanded, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
 
 // Lane A/native adapter: chrome /chat/send includes selectedSources from the
@@ -497,7 +499,7 @@ function cardSummary(binding) {
 }
 
 export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = () => getOwnerKey(), timeoutMs = 15000, now = Date.now, clock = sameClock,
-  actionGatePolicy = CURRENT_ACTION_GATE_POLICY } = {}) {
+  actionGatePolicy = CURRENT_ACTION_GATE_POLICY, procedureJournal = createActJournal(), procedureFlag = () => procedureFlagOn() } = {}) {
   if (typeof sendToUi !== 'function' || typeof getOwnerKey !== 'function' || typeof clock !== 'function' ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
     throw new TypeError('Browser tool service requires UI transport, current account provider and bounded timeout')
@@ -829,7 +831,40 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
       ? answer.reason : 'unproven')
   }
 
+  // Round g: with EGDESK_BROWSER_PROCEDURES on, a successful act is noted in the act journal (page, the element's own facts, the request's args). Off: this is the plain call.
+  const JOURNAL_ACTS = { egdesk_browser_navigate: 1, egdesk_browser_click: 1, egdesk_browser_pointer_click: 1, egdesk_browser_fill: 1, egdesk_browser_select: 1,
+    egdesk_browser_press: 1, egdesk_browser_scroll: 1, egdesk_browser_history: 1 }
+  const JOURNAL_OK = new Set(['ok', 'postcondition-observed', 'history-dispatched', 'key-dispatched'])
   async function executeDispatch(run, event) {
+    if (!JOURNAL_ACTS[event?.tool] || !procedureFlag()) return executeDispatchInner(run, event)
+    let before = null
+    try {
+      const args = event.arguments
+      const card = bindings.get(run?.answerId)?.cards.get(args?.cardId)
+      const snap = card?.observation?.snapshot
+      if (snap) {
+        const el = args.ref ? snap.interactiveElements?.find(item => item?.ref === args.ref) : null
+        before = { pageUrl: String(snap.url ?? ''), pageTitle: typeof snap.title === 'string' ? snap.title : undefined,
+          ...(el && el.displayValueSafe === true ? { displaySafe: true } : el ? { displaySafe: false } : {}),
+          ...(el?.nav ? { facts: { type: el.nav.type, formMethod: el.nav.form?.method, regionLabel: el.nav.regionLabel, sensitiveRegion: el.nav.sensitiveRegion === true } } : {}) }
+      }
+    } catch { before = null }
+    const result = await executeDispatchInner(run, event)
+    try {
+      if (before && JOURNAL_OK.has(result?.status)) {
+        const args = event.arguments
+        const hasText = ['egdesk_browser_fill', 'egdesk_browser_select'].includes(event.tool) && typeof args.text === 'string' && before.displaySafe === true
+        procedureJournal.record(run.clientThreadId, args.cardId, { at: now(), runId: run.runId ?? run.answerId, tool: event.tool, expectedTarget: args.expectedTarget ?? null,
+          ...(hasText ? { text: args.text } : {}), ...(args.url ? { url: args.url } : {}), ...(args.key ? { key: args.key } : {}),
+          ...(args.direction ? { direction: args.direction } : {}), ...(args.amount ? { amount: args.amount } : {}), ...(args.action ? { action: args.action } : {}),
+          ...(args.postcondition && args.postcondition.kind ? { postcondition: { kind: args.postcondition.kind, ...(typeof args.postcondition.value === 'string' ? { value: args.postcondition.value } : {}) } } : {}),
+          ...(typeof result.after?.url === 'string' ? { afterUrl: result.after.url } : {}), ...before })
+      }
+    } catch { /* The journal never changes an act's outcome. */ }
+    return result
+  }
+
+  async function executeDispatchInner(run, event) {
     const args = event?.arguments
     const tool = event?.tool
     validateArgs(tool, args)
@@ -1368,5 +1403,5 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     pendingBindings.clear()
     return Promise.allSettled(pending)
   }
-  return { prepare, specs, bind, adopt, dispatch, cancelRun, reset }
+  return { prepare, specs, bind, adopt, dispatch, cancelRun, reset, procedureJournal }
 }
