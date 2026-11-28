@@ -105,7 +105,7 @@ test('c27 entry plan: seven entry requests, no step request, under 4k; the open 
     assert.equal(body.questions[0].instructions, ENTRY_WEB_ASK)
   }
   const ms = seen.find(b => b.input[1].content.startsWith('User message: 다음 결제일이 언제야?'))
-  assert.match(ms.input[1].content, /- "멤버십 관리 \| 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" \/ "이용 중인 요금제: 프리미엄" \/ "다음 결제일: 2026-12-14"( has the controls .*)?$/) // L51: the card also lists its controls
+  assert.match(ms.input[1].content, /- "멤버십 관리 \| 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" \/ "이용 중인 요금제: 프리미엄" \/ "다음 결제일: 2026-12-14"( \/ "[^"]*")*( has the controls .*)?$/) // L51: the card also lists its controls; L57: one card quotes up to 8 lines (was 3), so further lines of the page may follow
   const phase = id => out.phases.find(p => p.id === id)
   assert.deepEqual(['en-ctrl-a', 'en-ctrl-b'].map(id => phase(id).first.handled), [false, false], 'general-knowledge questions stay answers')
   assert.deepEqual(['en-ms', 'en-hc', 'en-se', 'en-ig', 'en-st'].map(id => phase(id).first.handled), [true, true, true, true, true])
