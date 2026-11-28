@@ -79,7 +79,8 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration', 'nunchi', 'browserSteps'], // nunchi (u1, flag EGDESK_NUNCHI): its guidance record and route live in the bridge; the check's own scripts do not exercise it
     // a1 (L1): browserSteps (flag EGDESK_BROWSER_STEPS_UI, read in egdesk-browser-steps-channel.mjs) only sends step lines to the screen; nothing in a turn changes
-    runtimeKeys: ['localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
+    // round g: procedures (flag EGDESK_BROWSER_PROCEDURES, default off) needs the workflow store and the act journal of the bridge's own browser tool service
+    runtimeKeys: ['procedures', 'localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
     flags: ['EGDESK_BROWSER_ENTRY', 'EGDESK_BROWSER_OPEN_ITEMS', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
            'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_TERMINAL_OPEN_URL', // c34: the terminal's opener and the sign-in-card rule need a window and a Terminal card (not part of this check's composition)
             'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE', 'EGDESK_BROWSER_STEPS_UI',

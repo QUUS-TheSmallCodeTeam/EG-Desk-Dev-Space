@@ -31,7 +31,7 @@ test('with the flag: one provider that offers the four tools; the Browser provid
 test('the bridge passes the provider only through the wiring: the registration is one extra concat, the ledger comes from the own tools (when on), and the flag is not read in the bridge', () => {
   const bridge = fs.readFileSync(path.join(here, 'codex-bridge-server.mjs'), 'utf8')
   assert.ok(bridge.includes("import { createPageToolsWiring } from './egdesk-page-tools-wiring.mjs'"))
-  assert.ok(bridge.includes('createPageToolsWiring({ env: process.env, getChat: () => chat, ledger: ownToolsWiring?.ledger ?? null })'))
+  assert.ok(bridge.includes('createPageToolsWiring({ env: process.env, getChat: () => chat, ledger: ownToolsWiring?.ledger ?? null, procedures })'), 'round g: the procedure service getter is the one added argument')
   assert.ok(bridge.includes('toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),'), 'the existing provider list is untouched')
   assert.ok(bridge.includes('for (const provider of pageToolsWiring ? pageToolsWiring.toolProviders : []) chat.registerToolProvider(provider)'))
   assert.ok(!bridge.includes('EGDESK_PAGE_TOOLS'))
