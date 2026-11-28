@@ -1249,29 +1249,39 @@ export async function runBrowserReflex({ cardId, goal, authority, namedButtonReq
           const allowed = await authorizePostSubmit(authority, label, { client, authorizeDispatch, isDecisionCurrent }, timeoutMs, { signal })
           if (allowed === null) return finish('aborted')
           if (!allowed) return finish('escalated', { reason: 'human_step', controls: [label] })
-          const to = option.item.postUrl, result = await act(entry, 'egdesk_browser_click', { cardId, observationId, expectedRevision: snapshot.revision, ref: option.item.element.ref, expectedTarget: expectedTargetOf(option.item.element), postcondition: { kind: 'url', value: to } }, { op: 'submit', target: label })
+          const to = option.item.postUrl
+          // L50: navigation facts decide the submit, before the step line is told. The click can throw (reply lost while the document is replaced by the JSON viewer, UI timeout)
+          // although the POST went out: look at the top-level address (observe; the unobservable document reports it with the error), wait for the load once, look again.
+          // 'arrived' | 'unobserved' | 'no' (never repeats the press; the same check serves the click that returned normally)
+          let settled = null
+          const settle = async () => {
+            if (settled) return settled
+            const seenAt = async () => {
+              try {
+                const seen = await callTool('egdesk_browser_observe', { cardId })
+                return seen?.snapshot?.url === to && seen.snapshot.documentId && seen.snapshot.documentId !== snapshot.documentId ? 'arrived' : null
+              } catch (err) {
+                if (isBrowserUserHold(err)) throw err
+                return postArrived(err?.arrival?.url ?? null, to, snapshot.url) ? 'unobserved' : null
+              }
+            }
+            let kind = await seenAt()
+            if (!kind) {
+              try { await callTool('egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 5000 }) } catch (err) { if (isBrowserUserHold(err)) throw err; if (postArrived(err?.arrival?.url ?? null, to, snapshot.url)) kind = 'unobserved' }
+              kind = kind ?? await seenAt()
+            }
+            if (signal?.aborted || (isDecisionCurrent && !isDecisionCurrent())) return 'no'
+            return (settled = kind ?? 'no')
+          }
+          const result = await act(entry, 'egdesk_browser_click', { cardId, observationId, expectedRevision: snapshot.revision, ref: option.item.element.ref, expectedTarget: expectedTargetOf(option.item.element), postcondition: { kind: 'url', value: to } },
+            { op: 'submit', target: label, landed: async () => (await settle()) !== 'no', landedStatus: 'form-result-observed' })
           if (result.held) return heldResult()
           if (result.ok && result.result?.status === 'postcondition-observed') return finish('done', { url: to })
-          let unobserved = null // 임시 이름: top-level address the parent reported when the arrived document could not be observed (e.g. the JSON viewer)
-          // L43: look at the arrived document first. When the parent reports the top-level address because the document cannot be observed (JSON viewer, privileged
-          // page), that settles the submit at once instead of after a 5 s load wait; a document that is observable but still the form (or mid-load) falls through to the wait.
           try {
-            const first = await callTool('egdesk_browser_observe', { cardId })
-            if (!signal?.aborted && isDecisionCurrent() && first.snapshot?.url === to && first.snapshot.documentId && first.snapshot.documentId !== snapshot.documentId) return finish('done', { url: to })
-          } catch (err) {
-            if (isBrowserUserHold(err)) return heldResult()
-            unobserved = err?.arrival?.url ?? null
-            if (!signal?.aborted && isDecisionCurrent?.() && postArrived(unobserved, to, snapshot.url)) return finish('done', { url: to, arrivalUnobserved: true })
-            unobserved = null
-          }
-          try {
-            await callTool('egdesk_browser_wait', { cardId, for:'load', timeoutMs:5000 })
-            const landed = await callTool('egdesk_browser_observe', { cardId })
-            if (!signal?.aborted && isDecisionCurrent() && landed.snapshot?.url === to && landed.snapshot.documentId && landed.snapshot.documentId !== snapshot.documentId) return finish('done', { url: to })
-          } catch (err) { if (isBrowserUserHold(err)) return heldResult(); unobserved = err?.arrival?.url ?? null }
-          // The person's one POST went out and the top-level document is now at the form's own origin and path (a new address, not the form page): done,
-          // with the unobserved arrival kept as a fact. A different address or no move stays a failure.
-          if (!signal?.aborted && isDecisionCurrent?.() && postArrived(unobserved, to, snapshot.url)) return finish('done', { url: to, arrivalUnobserved: true })
+            const kind = await settle()
+            if (kind === 'arrived') return finish('done', { url: to })
+            if (kind === 'unobserved') return finish('done', { url: to, arrivalUnobserved: true })
+          } catch (err) { if (isBrowserUserHold(err)) return heldResult() }
           return finish('escalated', { reason: 'tool_failed', code: result.code || 'BROWSER_OUTCOME_UNKNOWN' })
         }
         if (option.item.askSite) {
