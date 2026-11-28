@@ -34,4 +34,5 @@ test('inline scripts and check expressions parse', () => {
 test('no real-looking personal data', () => {
   for (const [id, c] of Object.entries(CASES)) { const t = JSON.stringify(c) + urls(c).map(decode).join(''); assert.ok(!/@[a-z0-9-]+\.(com|co\.kr|net)/i.test(t), id); assert.ok(!/\d{6}-\d{7}/.test(t), id); assert.ok(!/010-(?!0000-1234)\d{4}-\d{4}/.test(t), id) }
 })
+test('rws-13 is a plain two-turn chat case; rws-15 uses a positive-claim regex', () => { assert.ok(CASES['rws-13'].follow && !CASES['rws-13'].person); assert.ok(CASES['rws-15'].answerNotRe.includes('승인')) })
 test('pattern coverage', () => { const all = ids.flatMap(i => CASES[i].patterns).join(' '); for (const p of ['save-vs-submit', 'modal', 'new window', 'event-driven wait', 'rich-text', 'upload', 'session expiry', 'changing page', 'identity', 'person-only']) assert.ok(all.includes(p), p) })

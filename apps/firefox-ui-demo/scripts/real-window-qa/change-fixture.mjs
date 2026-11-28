@@ -17,8 +17,8 @@ export const CHANGE_HTML = `<!doctype html><html lang="ko"><head><meta charset="
 <script>
 window.__ticks = 0;
 const clock = document.getElementById('clock'), banner = document.getElementById('banner');
-setInterval(() => { clock.textContent = new Date().toISOString().slice(11, 23); window.__ticks++; }, 100);
-let n = 1; setInterval(() => { n = n % 5 + 1; banner.textContent = '이벤트 ' + n; window.__ticks++; }, 700);
+setInterval(() => { clock.textContent = new Date().toISOString().slice(11, 23); window.__ticks++; document.documentElement.dataset.ticks = window.__ticks; }, 100);
+let n = 1; setInterval(() => { n = n % 5 + 1; banner.textContent = '이벤트 ' + n; window.__ticks++; document.documentElement.dataset.ticks = window.__ticks; }, 700);
 document.getElementById('more').addEventListener('click', e => { const d = document.getElementById('detail'); d.hidden = false; e.target.setAttribute('aria-expanded', 'true'); });
 </script></body></html>`
 export const CHANGE_URL = 'data:text/html;charset=utf-8,' + encodeURIComponent(CHANGE_HTML)
@@ -27,5 +27,5 @@ export const CASES_CHANGE = {
   21: { name: '계속 바뀌는 페이지에서 폼 조작 (L55)', card: 'egd-browser-card-13', url: CHANGE_URL, title: '변화 폼',
     msg: '이 카드에서 이름 칸에 차민수 쓰고, 빠른배송 고르고, 상세 보기 버튼 눌러줘',
     checks: [`${el('name')}.value === "차민수"`, 'document.querySelector("input[value=fast]").checked === true', '!document.querySelector("input[value=normal]").checked',
-      `${el('detail')}.hidden === false`, 'window.__ticks > 30'] },
+      `${el('detail')}.hidden === false`, '+document.documentElement.dataset.ticks > 30'] },
 }
