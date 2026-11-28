@@ -26,7 +26,7 @@ test('holdout2-v2: the membership request, entry then step, under 3k; its entry 
   assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
   const seen = []
   const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
-  assert.deepEqual(out.requests.map(r => [r.stage, r.sha256.slice(0, 8)]), [['entry', '05c37bf2'], ['step', '6f728e9e']], 'the entry is byte-identical to c36\'s measured one')
+  assert.deepEqual(out.requests.map(r => [r.stage, r.sha256.slice(0, 8)]), [['entry', '0ebd5b23'], ['step', '6f728e9e']], 'the entry is byte-identical to c36\'s measured one')
   for (const body of seen) assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
   const phase = out.phases[0]
   assert.deepEqual([phase.first.status, phase.acts.length], ['done', 0])
@@ -45,7 +45,7 @@ test('regression-v1: the five families\' entry requests (the new bytes) under 4k
   assert.ok(out.requests.length === 5 && out.requests.every(r => r.stage === 'entry'), 'entry only: no step request')
   for (const body of seen) {
     assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
-    assert.deepEqual(body.questions.slice(0, 2).map(q => [q.name, q.instructions]), [['browser_entry', body.input[1].content.split('\n').filter(line => line.startsWith('- ')).length === 1 && body.input[1].content.includes(' has the controls ') ? ENTRY_OPERATION_ASK : ENTRY_WEB_ASK], ['browser_entry_answer', ENTRY_ANSWER_ASK]])
+    assert.deepEqual(body.questions.slice(0, 2).map(q => [q.name, q.instructions]), [['browser_entry', body.input[1].content.split('\n').filter(line => line.startsWith('- ')).length === 1 && body.input[1].content.includes(' has the controls ') && !body.input[1].content.includes(' shows ') ? ENTRY_OPERATION_ASK : ENTRY_WEB_ASK], ['browser_entry_answer', ENTRY_ANSWER_ASK]])
   }
   assert.deepEqual(out.phases.map(p => [p.id, p.first.handled]), [['rg-st', true], ['rg-dv', true], ['rg-se', true], ['rg-inv', true], ['rg-ig', true]])
 })

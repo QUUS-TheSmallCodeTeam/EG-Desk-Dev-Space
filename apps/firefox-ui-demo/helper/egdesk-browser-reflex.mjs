@@ -533,6 +533,7 @@ const REFLEX_RULES = [
 // request (step_link, step_press). Code combines: a kind option is taken only when next_step decided it AND its target question decided one target (each on the same bar).
 // A page with at most CROWDED_STEP_OPTIONS element options is asked exactly as before (one choice over all of them).
 export const CROWDED_STEP_OPTIONS = 20
+export const MAX_BOX_QUESTIONS = 12
 export const STEP_GROUPS = Object.freeze({
   open_link: Object.freeze({ question: 'step_link', description: 'Open one of the other links on this page (which one is asked separately).', ask: 'If the next step opens one of the other links on this page, which link?' }),
   press_other: Object.freeze({ question: 'step_press', description: 'Press one of the other buttons or tabs on this page (which one is asked separately).', ask: 'If the next step presses one of the other buttons or tabs on this page, which one?' }),
@@ -572,6 +573,12 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   const links = resultOnly ? options.filter(o => o.item.kind === 'navigate').slice(0, 32) : []
   const selectOptions = directEntry && !arrived && !motion && !resultOnly ? options.filter(o => o.item.kind === 'choice' && o.item.element.tag === 'select') : []
   const lists = selectOptions.length <= 32 ? selectOptions : [] // larger inventories retain the original next-step path
+  // L51 (real window, round d: 토핑은 베이컨이랑 양파로 체크해줘 -> after Bacon the next_step top for "check Onion" was 0.61-0.63, under the 0.75 bar, 4 of 4 on the real model, so the
+  // chat model finished the request): the checkable boxes and radios of the page are judged one by one, each against the person's words (like the lists above), instead of one ranking whose
+  // probability is spread over the page's other options. A box is the step only when EVERY box is decided (yes at the bar, no at its complement) and at least one is a yes: all yes boxes
+  // are named by the person, so the first in page order is a safe next step (it never lowers the next_step bar and never reaches a box the person did not name).
+  const boxOptions = !lists.length && !motion && !resultOnly && !arrived ? options.filter(o => o.item.kind === 'choice' && o.item.element.tag === 'input') : []
+  const boxes = boxOptions.length > 0 && boxOptions.length <= MAX_BOX_QUESTIONS ? boxOptions : []
   const fan = !motion && !resultOnly && crowdedStep(options, entrySiteLinks)
   // L46 (real, Main D4: 이름 채우고 주문 제출해줘 -> after the name, next_step top 0.65-0.69 for 'Submit order', under the bar, so the step ended 'uncertain'): the one write-submit
   // of the page is judged by the SAME predicate the press itself needs (postSubmitQuestion, over the person's words), asked in this request with the form's current field values
@@ -599,6 +606,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
         ? 'Which option moves toward the goal next? For an ordinal search result use the result destinations in page order, not the search page navigation controls. Selecting a link marked as requiring Card site permission asks the user on the Card; select the intended link rather than asking for its permission in chat.'
         : 'Which option moves toward the goal next?', choices)]),
       ...lists.map((o, i) => predicateQuestion('select_' + i, 'Person said: ' + JSON.stringify(goal) + '. Does the person explicitly ask to set the observed list ' + JSON.stringify(compactText(o.item.element.label, 100) || 'list') + ' to ' + JSON.stringify(compactText(o.item.element.options.find(p => p.value === o.item.desired)?.label, 100)) + ' as the next browser action? Equivalent wording counts. Mention, negation, a condition, or a different option does not.')),
+      ...boxes.map((o, i) => predicateQuestion('box_' + i, 'Person said: ' + JSON.stringify(compactText(goal, 600)) + '. Does the person explicitly ask for exactly this change as a browser action: ' + JSON.stringify(compactText(String(o.value).replace(/^\[[A-Z]\d+\]\s*/, ''), 100)) + (o.item.element.choice?.regionLabels?.length ? ' (in the group ' + JSON.stringify(compactText(o.item.element.choice.regionLabels.at(-1), 60)) + ')' : '') + '? The same meaning in another language or other words counts (e.g. 양파 = Onion). Mention, negation, a condition, or a different option does not.')),
       ...(post ? [predicateQuestion('post_requested', 'Person said: ' + JSON.stringify(compactText(goal, 600)) + '. Form fields now: ' + (postFields || 'none') + '. ' + postSubmitQuestion(post.item.element.label) + ' No if a field the person asked to fill is still empty, or if they said not to send.')] : []),
       ...(fan ? Object.entries(fan.groups).map(([name, members]) => choiceQuestion(STEP_GROUPS[name].question, STEP_GROUPS[name].ask, members.map(optionChoice))) : []),
       ...(options.some(o => o.item.kind === 'choice' && !lists.includes(o)) ? [predicateQuestion('choice_requested', 'In the person’s request ' + JSON.stringify(goal) + ', does the person ask for this very option and state (check, uncheck or pick) of the selected action? The same meaning in another language or other words counts (e.g. 중간 = Medium, 양파 = Onion). No if the person did not say which option, or left the choice to us.')] : []),
@@ -635,12 +643,20 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
       certainty = Math.min(...scores.map(n => high(n) ? n : 1 - n))
     }
   }
+  let boxHits = null
+  if (!resolved && boxes.length) {
+    const scores = boxes.map((_, i) => p('box_', i)), hits = scores.flatMap((n, i) => (high(n) ? [i] : []))
+    if (hits.length && scores.every(n => high(n) || low(n))) {
+      resolved = boxes[hits[0]]; boxHits = new Set(hits.map(i => boxes[i].value))
+      certainty = Math.min(...scores.map(n => high(n) ? n : 1 - n))
+    }
+  }
   if (!resolved && post && !resultOnly && !lists.length) {
     const n = p('post_requested', '')
     if (high(n)) { resolved = post; certainty = n }
   }
   const resolvedMargin = 2 * certainty - 1
-  const disagrees = resolved && !resultOnly && asked.state === 'accepted' && asked.value !== resolved.value
+  const disagrees = resolved && !resultOnly && asked.state === 'accepted' && asked.value !== resolved.value && !boxHits?.has(asked.value)
   if (resolvedMargin < thresholds.margin || disagrees) resolved = null
   const next = resolved ? { state: 'accepted', value: resolved.value, confidence: certainty, margin: resolvedMargin, ranked: [{ value: resolved.value, probability: certainty }] } : fan ? fannedChoice(asked, result.answers, fan, thresholds) : asked
   const out = { pageState: pageState.state, pageChecks: pageState.p,
@@ -677,7 +693,7 @@ export async function decideReflexStep({ chatTask = false, goal, snapshot, optio
   if (next.value === 'blocked') return { kind: 'blocked', ...out }
   if (next.value === 'goal_met') return { kind: 'uncertain', ...out } // chosen, but goal_met stayed below the done threshold
   const option = options.find(item => item.value === next.value)
-  if (option?.item.kind === 'choice' && (lists.includes(option) ? option !== resolved : readPredicate(result.answers, 'choice_requested', thresholds.done).state !== 'yes')) return { kind: 'user_context', ...out }
+  if (option?.item.kind === 'choice' && (lists.includes(option) ? option !== resolved : (!boxHits || option !== resolved) && readPredicate(result.answers, 'choice_requested', thresholds.done).state !== 'yes')) return { kind: 'user_context', ...out }
   // History conflicts with this page (the earlier choice is gone): the person decides, whatever the model picked.
   if (option && historyConflict) return { kind: 'user_context', ...out }
   // R2-d (R4): on a crowded step (the fan-out above) a chosen LINK is opened only when the request itself names or describes it. The step's choice among many alike links is a ranking (measured: Context Menu picked for

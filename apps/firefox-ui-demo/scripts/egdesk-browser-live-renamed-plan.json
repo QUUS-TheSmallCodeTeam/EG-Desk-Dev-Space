@@ -2,7 +2,7 @@
  "set": "browser-live-renamed-v3",
  "description": "LIVE re-measure (c17, <= 6k input tokens): (1) renamed: the c16 failure. The month-1 record is written by code (same layout and write path); both businesses carry new trade names with unchanged registration numbers; code matches 987-65-43210 on exactly one candidate and takes /biz/2 with no which-question and no same-thing predicate; the harness caps the phase at 2 steps (the step after /biz/2 picks the download; the rest was measured in c16). (2) sso: a sign-in page whose only way in is single sign-on (카카오로 로그인, 네이버로 로그인) plus a help link about signing in; the sign-in buttons are person-only by code (never offered), the help link is offered; the page-state predicates must hand the page to the person (login_required). Only browser judgments go to the Decision model; memory write/fetch are local.",
  "maxRequests": 6,
- "tokenCeiling": 6000,
+ "tokenCeiling": 6400,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
   {

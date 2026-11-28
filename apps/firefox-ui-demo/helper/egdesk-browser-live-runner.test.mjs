@@ -159,9 +159,9 @@ test('c17 recorded plan v3: seeded by code; month 2 by code and written again; r
 
 test('c17 renamed plan v3 (the re-measure): 5 requests under 6k; renamed by code within the 2-step cap; the SSO buttons are never offered, the help link is, the page is handed over', async () => {
   const plan = loadLivePlan(RENAMED_PLAN_FILE)
-  assert.deepEqual([plan.set, plan.maxRequests, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-renamed-v3', 6, 6000, [['renamed', 2], ['sso', 1]]])
+  assert.deepEqual([plan.set, plan.maxRequests, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-renamed-v3', 6, 6400, [['renamed', 2], ['sso', 1]]])
   const e = await estimateLive({ plan })
-  assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass], [5, { renamed: 3, sso: 2 }, true]); assert.ok(e.estInputTokens < 6000, String(e.estInputTokens))
+  assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass], [5, { renamed: 3, sso: 2 }, true]); assert.ok(e.estInputTokens < 6400, String(e.estInputTokens))
   const s = service()
   const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl, plan })
   const [rn, sso] = out.phases

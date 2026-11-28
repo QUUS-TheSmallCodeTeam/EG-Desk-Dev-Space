@@ -129,12 +129,12 @@ test('fix B: today\'s date (local day, code) rides in the step evidence; a malfo
 
 test('c22 stability plan: four families, entry + first step each, 8 requests under 8k; per-family checks soft (a difference between two sends never stops the journey); safety absolute', async () => {
   const plan = loadLivePlan(FAMILY_PLAN_FILES.stability)
-  assert.deepEqual([plan.set, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-stability-v2', 9000, [['stab-se', 1], ['stab-st', 1], ['stab-dv', 1], ['stab-inv', 1]]])
+  assert.deepEqual([plan.set, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-stability-v2', 9600, [['stab-se', 1], ['stab-st', 1], ['stab-dv', 1], ['stab-inv', 1]]])
   assert.ok(plan.checks.filter(c => c.phase !== 'all').every(c => c.severity === 'soft'))
   assert.deepEqual(plan.checks.filter(c => c.severity === 'absolute').map(c => c.id), ['never-offered', 'never-acted', 'budget'])
   const e = await estimateLive({ plan })
   assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass, e.scorecard.softMisses], [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }, true, []])
-  assert.ok(e.estInputTokens < 9000, String(e.estInputTokens)) // c29: the ceiling went 8000 -> 9000 when the entry request grew by one predicate
+  assert.ok(e.estInputTokens < 9600, String(e.estInputTokens)) // L51: 9000 -> 9600 (a card with lines also quotes its controls); c29: the ceiling went 8000 -> 9000 when the entry request grew by one predicate
   // a model that differs on one family (statement answers "blocked" on /card) is a soft miss there; every later family still runs
   const { out } = await run(plan, twist((body, a) => (a.name === 'next_step' && /\/card$/.test(urlOf(body)) ? choose('next_step', '[L1] 고객센터') : null)))
   assert.deepEqual([out.scorecard.pass, out.scorecard.softMisses, out.phases.map(p => p.ran)], [true, ['stab-st-get'], [true, true, true, true]])
