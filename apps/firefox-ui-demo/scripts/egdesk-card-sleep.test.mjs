@@ -101,3 +101,94 @@ test('overlay wiring: flag read once, default off, tools wake first, focus and A
   assert.match(js, /control\.inFlight > 0 \|\| control\.held/)
   assert.match(js, /screenRecorder\?\.active\?\.\(\)/)
 })
+
+const flush = () => new Promise(r => setImmediate(r))
+const verdict = (rect, asleep, scale) => Sleep.sleepVerdict({ rect, viewport: VP, asleep, scale })
+
+test('L48 rules: the c12 trap (1070x398 asleep) wakes by area; tiny and unreadable cards sleep', () => {
+  assert.equal(verdict(rectAt(100, 100, 1070, 398), true, 1.148), 'wake', '33% of the viewport')
+  assert.equal(verdict(rectAt(100, 100, 1070, 398), false, 1.148), 'keep', 'awake stays awake')
+  assert.equal(verdict(rectAt(0, 0, 900, 300), true), 'keep', '21%: hysteresis band, below WAKE_AREA_AT, short height')
+  assert.equal(verdict(rectAt(0, 0, 700, 330), false), 'sleep', 'small side and under 20%')
+  assert.equal(verdict(rectAt(0, 0, 1100, 340), false), 'keep', '29% area dominates even with a short side')
+  assert.equal(verdict(rectAt(100, 100, 547, 342), false, 0.376), 'sleep', 'overview thumbnail')
+  assert.equal(verdict(rectAt(0, 0, 1300, 850), false, 0.4), 'sleep', 'unreadable zoom sleeps even when large')
+  assert.equal(verdict(rectAt(0, 0, 1300, 850), true, 0.5), 'keep', 'zoom hysteresis 0.45/0.55')
+  assert.equal(verdict(rectAt(0, 0, 1300, 850), true, 0.6), 'wake')
+  assert.equal(verdict(rectAt(1400, 0, 1200, 800), true, 1), 'keep', 'mostly off-screen stays asleep')
+  assert.equal(verdict(null, false), 'sleep')
+})
+
+function fakeBrowser({ drawSnapshot, cw = 1200, ch = 800, onScreenW = 600 } = {}) {
+  const parent = { children: [], appendChild(c) { this.children.push(c); c.parent = this } }
+  const mkCanvas = () => ({ width: 0, height: 0, style: {}, attrs: {}, removed: false,
+    getContext() { return { drawImage: (b) => { this.drew = b } } }, setAttribute(k) { this.attrs[k] = true },
+    remove() { this.removed = true; const i = parent.children.indexOf(this); if (i >= 0) parent.children.splice(i, 1) } })
+  return { parentNode: parent, offsetLeft: 0, offsetTop: 0, offsetWidth: cw, offsetHeight: ch, clientWidth: cw, clientHeight: ch,
+    ownerDocument: { createElementNS: () => mkCanvas() },
+    getBoundingClientRect: () => ({ width: onScreenW, height: onScreenW * ch / cw }),
+    browsingContext: { currentWindowGlobal: drawSnapshot ? { drawSnapshot } : null } }
+}
+
+test('snapshot: scaled to the on-screen size, shown over the page, removed after wake, memory freed', async () => {
+  const calls = []; const bitmap = { closed: false, close() { this.closed = true } }
+  const b = fakeBrowser({ drawSnapshot: async (rect, scale, bg) => { calls.push({ rect, scale, bg }); return bitmap } })
+  const r = await Sleep.sleepBrowserWithFrame(b, { dpr: 2 })
+  assert.equal(r.framed, true)
+  assert.deepEqual(calls[0].rect, { x: 0, y: 0, w: 1200, h: 800 })
+  assert.equal(calls[0].scale, 1, 'on-screen 600 css px at dpr 2 = 1200 device px = scale 1 (capped at 1)')
+  assert.equal(b._egdSleepFrame.width, 1200)
+  assert.equal(bitmap.closed, true, 'ImageBitmap released right after drawing')
+  assert.equal(b.parentNode.children.length, 1)
+  let timer; Sleep.wakeBrowserWithFrame(b, { setTimer: (fn) => { timer = fn } })
+  assert.equal(b.parentNode.children.length, 1, 'frame kept until the page repainted')
+  const canvas = b._egdSleepFrame; timer()
+  assert.equal(b._egdSleepFrame, null); assert.equal(canvas.removed, true); assert.equal(canvas.width, 0)
+})
+
+test('snapshot: small card gets a small bitmap; huge card is capped by the pixel budget', async () => {
+  const calls = []
+  const small = fakeBrowser({ drawSnapshot: async (r, s) => { calls.push(s); return { close() {} } }, onScreenW: 450 })
+  await Sleep.captureSleepFrame(small, { dpr: 1 })
+  assert.equal(calls[0], 450 / 1200)
+  const huge = fakeBrowser({ drawSnapshot: async (r, s) => { calls.push(s); return { close() {} } }, cw: 6000, ch: 4000, onScreenW: 6000 })
+  await Sleep.captureSleepFrame(huge, { dpr: 1 })
+  assert.ok(calls[1] * calls[1] * 6000 * 4000 <= Sleep.FRAME_MAX_PIXELS + 1)
+})
+
+test('snapshot failure keeps v1 behaviour: no frame, card still sleeps', async () => {
+  for (const b of [fakeBrowser(), fakeBrowser({ drawSnapshot: async () => { throw new Error('boom') } }), fakeBrowser({ drawSnapshot: async () => null })]) {
+    assert.deepEqual(await Sleep.sleepBrowserWithFrame(b), { framed: false })
+    assert.equal(b._egdSleepFrame, undefined)
+  }
+  const h = harness({ f: rectAt(3000, 0, 1200, 800) })
+  const c = h.cards.get('f'); c.entry.prepareSleep = async () => { throw new Error('x') }
+  h.advance(2500); await flush()
+  assert.equal(c.awake, false)
+})
+
+test('sleep waits for the snapshot; woken or closed meanwhile cancels it; onForget releases a closed sleeper', async () => {
+  let release; const forgotten = []
+  let t = 1000; const list = new Map()
+  const mk = (id) => { const c = { id, r: rectAt(3000, 0, 1200, 800), awake: true, ex: false }; c.entry = { id, rect: () => c.r, excluded: () => c.ex, setAwake: (a) => { c.awake = a }, prepareSleep: () => new Promise(res => { release = res }) }; list.set(id, c); return c }
+  const sleeper = Sleep.createCardSleeper({ cards: () => [...list.values()].map(c => c.entry), viewport: () => VP, now: () => t, onForget: (id) => forgotten.push(id) })
+  const adv = (ms) => { for (let i = 0; i < ms; i += Sleep.TICK_MS) { t += Sleep.TICK_MS; sleeper.tick() } }
+  const a = mk('a'); adv(2500)
+  assert.equal(a.awake, true, 'still awake while capturing'); assert.equal(sleeper.states()[0].preparing, true)
+  a.ex = true; adv(500); release(); await flush()
+  assert.equal(a.awake, true, 'tool arrived during capture: stays awake'); assert.equal(sleeper.isAsleep('a'), false)
+  a.ex = false; adv(2500); release(); await flush()
+  assert.equal(sleeper.isAsleep('a'), true); assert.equal(a.awake, false)
+  list.delete('a'); adv(500)
+  assert.deepEqual(forgotten, ['a'])
+  const b = mk('b'); adv(2500); list.delete('b'); adv(500); release(); await flush()
+  assert.equal(b.awake, true, 'closed during capture: never put to sleep')
+})
+
+test('L48 wiring: frame helpers, effective zoom, frame release on close, diagnostics hook', () => {
+  assert.match(js, /prepareSleep: \(\) => CardSleep\.sleepBrowserWithFrame/)
+  assert.match(js, /wakeBrowserWithFrame\(browser\)/)
+  assert.match(js, /onForget: \(id\)/)
+  assert.match(js, /cardSleepReport: \(\) => cardSleepReport\(\)/)
+  assert.match(js, /scale: \(\) =>/)
+})
