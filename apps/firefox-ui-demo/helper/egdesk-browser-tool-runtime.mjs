@@ -38,6 +38,7 @@ const WAIT_RESPONSE_MARGIN_MS = 2000
 // egdesk_browser_wait_text: a short visible text to appear or disappear.
 const MAX_WAIT_TEXT = 200
 const OBSERVE_TEXT_LIMIT = 60
+export const OBSERVE_READ_TEXT_LIMIT = 120 // L57: the plain observe (what the decision loop and the read tools see); waits keep OBSERVE_TEXT_LIMIT
 // BRW-09 egdesk_browser_screenshot: an observe request that also carries a
 // masked capture. The image never replaces the Card's fresh observation.
 const SCREENSHOT_BUDGET_CHARS = 150000
@@ -841,7 +842,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     if (!READ_TOOLS.has(tool) && card.permission !== 'interact') reject('BROWSER_INTERACTION_NOT_GRANTED', 'Read-only Browser context does not authorize interaction')
     if (tool === 'egdesk_browser_observe') {
       const trace = {}
-      const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 }, trace)
+      // L57: 120 text segments (was 60). A page of more than 60 lines lost its tail at the source for every reader; the readers still cut by their own budgets (the decision loop's TEXT_BUDGET, card_read's PAGE_LIMITS)
+      const response = await observeRequest(run, binding, card, { textLimit: OBSERVE_READ_TEXT_LIMIT, elementLimit: 80 }, trace)
       if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
       adoptNavigationPolicy(binding, response)

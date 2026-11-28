@@ -29,12 +29,12 @@ test('where the run may not receive page text, the note is as before: nothing of
   assert.deepEqual([note.page, note.found, note.status], [undefined, undefined, 'done'])
 })
 
-test('lines are bounded: at most MAX_PAGE_LINES, MAX_PAGE_CHARS in all, each at most 120 characters, blanks and non-text skipped', () => {
+test('lines are bounded: at most MAX_PAGE_LINES, MAX_PAGE_CHARS in all, each at most 160 characters (L57: was 8 lines, 480 chars, 120 per line), blanks and non-text skipped', () => {
   const many = Array.from({ length: 30 }, (_, i) => `줄 ${i}`)
   assert.equal(pageLines(many).length, MAX_PAGE_LINES)
   const long = ['가'.repeat(300), '', null, 7, '나'.repeat(200), '다'.repeat(200), '라'.repeat(200)]
   const out = pageLines(long)
-  assert.ok(out.every(line => line.length <= 120) && out.join('').length <= MAX_PAGE_CHARS, JSON.stringify(out.map(l => l.length)))
+  assert.ok(out.every(line => line.length <= 160) && out.join('').length <= MAX_PAGE_CHARS, JSON.stringify(out.map(l => l.length)))
   assert.deepEqual(pageLines(undefined), [])
   assert.deepEqual(pageLines(['', '  ']), [])
 })

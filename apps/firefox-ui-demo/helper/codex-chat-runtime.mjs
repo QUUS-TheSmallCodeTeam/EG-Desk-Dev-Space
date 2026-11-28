@@ -5673,7 +5673,7 @@ export class CodexChatRuntime {
         const lines = (run.decisionSteps ??= [])
         if (lines.length < 8) {
           // L52: a filled/selected value is evidence the answer may state; displayValue is already classified at the observed field (a masked or sensitive field is '●●●', never the text)
-          const shown = ['fill', 'select'].includes(event.op) && event.ok && typeof event.displayValue === 'string' && event.displayValue.trim() ? ` = "${[...event.displayValue.replace(/\s+/g, ' ').trim()].slice(0, 40).join('')}"` : ''
+          const shown = ['fill', 'select'].includes(event.op) && event.ok && typeof event.displayValue === 'string' && event.displayValue.trim() ? ` = "${[...(typeof event.evidenceValue === 'string' && event.evidenceValue.trim() ? event.evidenceValue : event.displayValue).replace(/\s+/g, ' ').trim()].slice(0, 1100).join('')}"` : ''
           lines.push(`${event.op}${target ? ` "${target}"` : ''}${shown}: ${event.ok ? 'went through' : 'did not go through'}`)
         }
       }

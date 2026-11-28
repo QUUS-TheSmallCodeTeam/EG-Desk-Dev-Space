@@ -29,7 +29,7 @@ export const PAGE_TOOLS_PROVIDER_ID = 'egdesk-page' // provisional
 export const PAGE_TOOLS_FLAG = 'EGDESK_PAGE_TOOLS'
 export const pageToolsEnabled = env => env?.[PAGE_TOOLS_FLAG] === 'on'
 export const PAGE_TOOL_NAMES = Object.freeze({ open: 'egdesk_card_open', read: 'egdesk_card_read', press: 'egdesk_card_press', type: 'egdesk_card_type' }) // model-facing, provisional
-export const PAGE_LIMITS = Object.freeze({ lines: 60, lineChars: 240, textChars: 8000, elements: 60, labelChars: 100, typeChars: 500, urlChars: 2000, observations: 16 })
+export const PAGE_LIMITS = Object.freeze({ lines: 120, lineChars: 240, textChars: 12000, elements: 80, labelChars: 100, typeChars: 500, urlChars: 2000, observations: 16 })
 
 // u8 (D23): the markings of a page tool result are EG-Desk's own words; this note rides in the results that carry them so a commentary line before the answer never repeats them to the person.
 export const INTERNAL_NOTE = 'Not for the person: act, why, status, via and codes in this result are EG-Desk\'s own markings. Say what happened in everyday words.'
@@ -159,7 +159,8 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     if (obs.error) return respond(true, { status: 'refused', code: obs.error })
     const { snapshot } = obs
     const { lines, truncated } = condense(snapshot)
-    const body = { status: 'read', cardId: picked.card.cardId, host: hostOf(snapshot.url), path: pathOf(snapshot.url), title: short(snapshot.title ?? snapshot.text?.[0] ?? '', 160), lines, truncated }
+    // L57: a read the source cut at its own limit (the snapshot holds as many segments as it was asked for) is as truncated as one cut here
+    const body = { status: 'read', cardId: picked.card.cardId, host: hostOf(snapshot.url), path: pathOf(snapshot.url), title: short(snapshot.title ?? snapshot.text?.[0] ?? '', 160), lines, truncated: truncated || (Array.isArray(snapshot.text) && snapshot.text.length >= 120) }
     if (args.mode === 'structure') {
       const granted = picked.card.permission === 'interact' && await requested(run, event, picked.card.cardId, obs)
       const elements = []
@@ -170,6 +171,8 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
         elements.push({ ref: element.ref, role: String(element.role ?? ''), label: short(element.label, L.labelChars), ...(element.href ? { href: pathOf(element.href) ?? undefined } : {}), ...(element.value ? { value: short(element.value, 60) } : {}), ...(verdict.option?.item.kind === 'choice' && element.tag === 'select' ? { options: [verdict.option.item.desired] } : {}), act: verdict.act })
       }
       body.elements = elements
+      // L57: the controls were cut (here or at the source's 80): the model is told, it did not see them all
+      if (elements.length >= L.elements && (snapshot.interactiveElements?.length ?? 0) >= L.elements) body.elementsTruncated = true
       body.forYouOnly = INTERNAL_NOTE
     }
     return respond(true, body)

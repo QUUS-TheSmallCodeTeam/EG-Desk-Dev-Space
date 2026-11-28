@@ -173,3 +173,15 @@ test('the runtime gate treats a page tool as the Browser tool it needs: its Card
   assert.deepEqual([pageToolGate(run, { tool: T.type, arguments: {} }).tool, pageToolGate(run, { tool: T.open, arguments: {} }).tool], ['egdesk_browser_fill', 'egdesk_browser_open_card'])
   assert.equal(pageToolGate(run, { tool: 'egdesk_browser_click', arguments: {} }), null); assert.equal(pageToolGate(run, { namespace: 'x', tool: T.read }), null); assert.equal(pageToolBrowserEquivalent('nope'), null)
 })
+
+test('L57: read shows up to 120 lines and 80 controls, and says when either was cut (it was 60 lines / 60 controls, the controls cut silently)', async () => {
+  const lines = n => Array.from({ length: n }, (_, i) => `줄 ${i} 상품 설명`)
+  const many = (n, m) => () => ({ '/home': { text: lines(n), elements: Array.from({ length: m }, (_, i) => el(`e${i}`, 'button', `버튼 ${i}`)) } })
+  const mid = await rig({ pages: many(100, 70) })
+  const a = await mid.call(T.read, { mode: 'structure' })
+  assert.equal(a.lines.length, 100); assert.equal(a.truncated, false); assert.equal(a.elements.length, 70); assert.equal(a.elementsTruncated, undefined)
+  const big = await rig({ pages: many(200, 120) })
+  const b = await big.call(T.read, { mode: 'structure' })
+  assert.ok(b.lines.length <= 120 && b.lines.length > 60); assert.equal(b.truncated, true)
+  assert.equal(b.elements.length, 80); assert.equal(b.elementsTruncated, true)
+})

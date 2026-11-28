@@ -102,7 +102,7 @@ const provider = page => ({ reflexScope: () => ({ callTool: async () => ({ obser
 test('entry card with the page text on keeps its title and control labels beside the first lines; the measured request wording stays', async () => {
   const page = formPage({ rev: 1, checked: {} })
   const [card] = await observeCardLines({ provider: provider(page), run: {}, message: GOAL, cards: [{ cardId: 'c13', host: 'httpbin.org' }], enabled: true })
-  assert.deepEqual(card.shows, ['Customer name:', 'Telephone:', 'E-mail address:'])
+  assert.deepEqual(card.shows, ['Customer name:', 'Telephone:', 'E-mail address:', 'Pizza Size', 'Small', 'Medium', 'Large', 'Pizza Toppings']) // L57: ONE card shows up to eight lines (was three)
   assert.equal(card.pageTitle, 'Order form')
   assert.ok(card.controls.some(line => line.includes('Bacon')) && card.controls.some(line => /delivery time/i.test(line)), 'the toppings and the time field are named')
   const question = entryQuestions([card]).find(q => q.name === ENTRY_WEB)

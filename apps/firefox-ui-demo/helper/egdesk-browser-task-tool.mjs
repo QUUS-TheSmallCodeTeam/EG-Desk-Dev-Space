@@ -159,7 +159,7 @@ export function createBrowserTaskTool({ browser, store = createBrowserTaskStore(
       const event = taskStepEvent(task, info, { seq: (task.eventSeq ?? 0) + 1, by, status })
       if (!event) return
       task.eventSeq = event.seq
-      if (event.op !== 'end') { const { displayValue, ...closed } = event; sink.push(closed) }
+      if (event.op !== 'end') { const { displayValue, evidenceValue, ...closed } = event; sink.push(closed) }
       if (typeof onStep === 'function') { try { onStep(run, event) } catch { /* an observer never affects the task */ } }
     }
   }

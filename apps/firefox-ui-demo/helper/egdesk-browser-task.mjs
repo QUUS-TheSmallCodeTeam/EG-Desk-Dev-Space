@@ -44,7 +44,7 @@ const ASKED_CODES = new Set(['choice_needed', 'detail_needed'])
 const MAX_BRIEF_GOAL = 160
 const MAX_GOAL_CHANGES = 3, MAX_CHANGE_CHARS = 160, MAX_GOAL_BASE_CHARS = 200
 const MAX_FOUND_SEGMENTS = 3, MAX_FOUND_CHARS = 240
-export const MAX_PAGE_LINES = 8, MAX_PAGE_CHARS = 480 // c30: the lines of the page a finished task ends on (bounded), where nothing was located by an identifier
+export const MAX_PAGE_LINES = 16, MAX_PAGE_CHARS = 1600 // L57: was 8 / 480 // c30: the lines of the page a finished task ends on (bounded), where nothing was located by an identifier
 // The last page action of a running task, as a closed word (the brief's `last`); a paused task's `last` is its pause code.
 const LAST_KIND_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'opened_link', egdesk_browser_scroll: 'scrolled', egdesk_browser_fill: 'filled_field' })
 const MAX_ENTRY_ASKS = 2 // "which card?" at most twice; then the request goes back to the ordinary turn
@@ -95,10 +95,13 @@ const q = text => `"${String(text).replace(/"/g, "'")}"`
 // c21 (real, browser-live-settings-v2): "마케팅 알림 꺼줘" against a card quoted only as "알림 설정 | 계정" at its host: the card predicate answered
 // 0.19 (decided no), so the entry, as designed, did not enter. Nothing said what the page shows. R1: the card's predicate also quotes the
 // first lines the card shows now (its heading and the next lines, each quoted on its own), where the run may receive page text.
-const shownLines = card => (Array.isArray(card.shows) ? card.shows : []).map(line => compactText(String(line ?? ''), ENTRY_LINE_CHARS)).filter(Boolean).slice(0, ENTRY_LINES)
+// L57: ONE open card is quoted wider (the only page the request can be about, and one quote in the request): ENTRY_SINGLE_LINES lines of ENTRY_SINGLE_LINE_CHARS, ENTRY_SINGLE_CONTROLS controls
+// (card.quoteWide, set by observeCardLines). Several cards keep the narrow quote, which repeats once per card in every card predicate.
+export const ENTRY_SINGLE_LINES = 8, ENTRY_SINGLE_LINE_CHARS = 100, ENTRY_SINGLE_CONTROLS = 40
+const shownLines = card => (Array.isArray(card.shows) ? card.shows : []).map(line => compactText(String(line ?? ''), card.quoteWide ? ENTRY_SINGLE_LINE_CHARS : ENTRY_LINE_CHARS)).filter(Boolean).slice(0, card.quoteWide ? ENTRY_SINGLE_LINES : ENTRY_LINES)
 // a1: with the page's own text withheld (PAGE_TEXT_FLAG explicitly off) a card is quoted by its controls instead of its first lines (bounded control descriptions, not body lines)
 export const ENTRY_CARD_CONTROLS = 16, ENTRY_CARD_CONTROL_CHARS = 40
-const shownControls = card => (Array.isArray(card.controls) ? card.controls : []).map(line => compactText(String(line ?? ''), ENTRY_CARD_CONTROL_CHARS + 16)).filter(Boolean).slice(0, ENTRY_CARD_CONTROLS)
+const shownControls = card => (Array.isArray(card.controls) ? card.controls : []).map(line => compactText(String(line ?? ''), ENTRY_CARD_CONTROL_CHARS + 16)).filter(Boolean).slice(0, card.quoteWide ? ENTRY_SINGLE_CONTROLS : ENTRY_CARD_CONTROLS)
 const quoteIdentity = card => ((card.pageTitle || card.title) ? `${q(compactText(card.pageTitle || card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`)
 const quotePage = card => {
   const page = quoteIdentity(card)
@@ -257,9 +260,9 @@ export async function observeCardLines({ provider, run, message, cards, replyTo 
       // (they are what the text-off path always quoted, from the same observation and under the same Card grant): a single card keeps its title, and every observed card its controls,
       // next to the lines. A single card with a title or controls is asked the operation predicate (entryQuestions).
       const pageTitle = single && typeof snapshot.title === 'string' ? compactText(snapshot.title, 80) : ''
-      const controls = controlLines(snapshot, { limit: ENTRY_CARD_CONTROLS }).map(item => compactText(item, ENTRY_CARD_CONTROL_CHARS + 16))
-      const shows = withText && Array.isArray(snapshot.text) ? snapshot.text.slice(0, ENTRY_LINES) : []
-      return { ...card, ...(motion && { observedForMotion: true }), ...(pageTitle && { pageTitle }), ...(controls.length && { controls }), ...(shows.length && { shows, entryExtra: true }) }
+      const controls = controlLines(snapshot, { limit: single ? ENTRY_SINGLE_CONTROLS : ENTRY_CARD_CONTROLS }).map(item => compactText(item, ENTRY_CARD_CONTROL_CHARS + 16))
+      const shows = withText && Array.isArray(snapshot.text) ? snapshot.text.slice(0, single ? ENTRY_SINGLE_LINES : ENTRY_LINES) : []
+      return { ...card, ...(motion && { observedForMotion: true }), ...(single && { quoteWide: true }), ...(pageTitle && { pageTitle }), ...(controls.length && { controls }), ...(shows.length && { shows, entryExtra: true }) }
     } catch { return card }
   }))
   return [...seen, ...cards.slice(MAX_ENTRY_CARDS)]
@@ -440,6 +443,7 @@ export function taskStepEvent(task, info, { seq, cardId = null, by = 'decision',
     target: typeof info.target === 'string' && info.target ? compactText(info.target, 40) : null,
     valueName: typeof info.valueName === 'string' && info.valueName ? compactText(info.valueName.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) || null : null, // a field's own option value as the name ('[F1] 검색') reads as its label
     ...(['fill', 'select'].includes(info.op) && typeof info.displayValue === 'string' ? { displayValue: info.ok === true ? info.displayValue : '●●●' } : {}),
+    ...(['fill', 'select'].includes(info.op) && typeof info.evidenceValue === 'string' ? { evidenceValue: info.ok === true ? info.evidenceValue : '●●●' } : {}), // L57: the answer's evidence only (never the screen, never entry.actions)
     ok: info.ok === true, ms: ms === null ? null : Math.max(0, Math.round(ms)), by: by === 'model' ? 'model' : 'decision',
     ...(typeof info.code === 'string' && EVENT_CODE.test(info.code) ? { code: info.code } : {}),
     ...(typeof status === 'string' && EVENT_CODE.test(status) ? { status } : {}) })
@@ -512,7 +516,7 @@ export function pageLines(segments) {
   const out = []
   let used = 0
   for (const raw of Array.isArray(segments) ? segments : []) {
-    const text = compactText(String(raw ?? ''), 120)
+    const text = compactText(String(raw ?? ''), 160)
     if (!text) continue
     if (out.length >= MAX_PAGE_LINES || used + text.length > MAX_PAGE_CHARS) break
     out.push(text); used += text.length
