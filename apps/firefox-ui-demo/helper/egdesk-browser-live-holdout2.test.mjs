@@ -82,7 +82,7 @@ test('c26 stuck plan: the c24 form page and the settings error page send the req
   // sha256 of the real requests: c24 ig-form (entry, step, person-target follow-up) and c28/c29 settings-error-v2 (entry, wall follow-up, step)
   // c27/c28: the two ENTRY requests changed (c24 22478e6b, settings-error-v2 6c01471c; c27 -> 804d7b9b / 21d0d454, c28 -> e619677c / ffcb8665: the request predicate's evidence lists the open pages and its question says what counts);
   // the step and the follow-ups are the real runs' bytes unchanged (3cf1fc2f, 784e4b64, fe1d1885, ed93fe0d)
-  assert.deepEqual(out.requests.map(r => r.sha256.slice(0, 8)), ['ec8d5f85', '3cf1fc2f', 'b55056a0', '253ef151', 'fe1d1885', 'ed93fe0d']) // c36: the person-target follow-up now also asks about the withheld buttons (c24's 784e4b64 -> b55056a0))
+  assert.deepEqual(out.requests.map(r => r.sha256.slice(0, 8)), ['b4dc99e0', '3cf1fc2f', 'b55056a0', '3407161a', 'fe1d1885', 'ed93fe0d']) // c36: the person-target follow-up now also asks about the withheld buttons (c24's 784e4b64 -> b55056a0))
   const phase = id => out.phases.find(p => p.id === id)
   assert.deepEqual([phase('sk-form').firstNote.code, phase('sk-form').firstNote.candidates, phase('sk-form').acts.length], ['human_step', ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기'], 0])
   assert.deepEqual([phase('sk-error').firstNote.code, phase('sk-error').acts.length], ['error_page', 0])
@@ -91,9 +91,9 @@ test('c26 stuck plan: the c24 form page and the settings error page send the req
 
 test('c27 entry plan: seven entry requests, no step request, under 4k; the open pages are in each request predicate\'s evidence; the controls stay answers with the stand-in', async () => {
   const plan = loadLivePlan(FAMILY_PLAN_FILES.entry)
-  assert.ok(plan.tokenCeiling <= 4700) // c29: 4000 -> 4700 when the entry request grew by one predicate
+  assert.ok(plan.tokenCeiling <= 5200) // c29: 4000 -> 4700 when the entry request grew by one predicate; L51: -> 5200 (a card with lines also quotes its title and controls)
   const est = await estimateLive({ plan })
-  assert.ok(est.estInputTokens <= 4700 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
+  assert.ok(est.estInputTokens <= 5200 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
   assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
   const seen = []
   const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
@@ -105,7 +105,7 @@ test('c27 entry plan: seven entry requests, no step request, under 4k; the open 
     assert.equal(body.questions[0].instructions, ENTRY_WEB_ASK)
   }
   const ms = seen.find(b => b.input[1].content.startsWith('User message: 다음 결제일이 언제야?'))
-  assert.match(ms.input[1].content, /- "멤버십 관리 \| 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" \/ "이용 중인 요금제: 프리미엄" \/ "다음 결제일: 2026-12-14"$/)
+  assert.match(ms.input[1].content, /- "멤버십 관리 \| 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" \/ "이용 중인 요금제: 프리미엄" \/ "다음 결제일: 2026-12-14"( has the controls .*)?$/) // L51: the card also lists its controls
   const phase = id => out.phases.find(p => p.id === id)
   assert.deepEqual(['en-ctrl-a', 'en-ctrl-b'].map(id => phase(id).first.handled), [false, false], 'general-knowledge questions stay answers')
   assert.deepEqual(['en-ms', 'en-hc', 'en-se', 'en-ig', 'en-st'].map(id => phase(id).first.handled), [true, true, true, true, true])
@@ -130,9 +130,9 @@ test('c28 entry plan v2: four entry requests under 2k; the membership request sh
 
 test('c29 entry plan v3: the same four entry requests under the two-predicate entry; estimate under 2.5k, ceiling 2.7k; both predicates in every request; controls stay answers, membership and hospital enter with the stand-in', async () => {
   const plan = loadLivePlan(FAMILY_PLAN_FILES.entry3)
-  assert.equal(plan.tokenCeiling, 2700)
+  assert.equal(plan.tokenCeiling, 3200) // L51: 2700 -> 3200 (controls beside the lines)
   const est = await estimateLive({ plan })
-  assert.ok(est.estInputTokens < 2500 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
+  assert.ok(est.estInputTokens < 2800 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
   assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
   const seen = []
   const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })

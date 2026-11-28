@@ -142,7 +142,8 @@ export function entryEvidence(cards) {
 }
 /** The entry questions: the request predicate, then (unless code chose the card) one predicate per card, that page alone. */
 export function entryQuestions(cards, { codeCard = null } = {}) {
-  const operations = cards.length === 1 && (shownControls(cards[0]).length || cards[0].pageTitle)
+  // L51: a card observed with its lines (page text on) carries its title and controls as extra evidence (entryExtra): it keeps the request wording measured for a card with lines (c27-c29); the operation wording is the text-off path's
+  const operations = cards.length === 1 && !cards[0].entryExtra && (shownControls(cards[0]).length || cards[0].pageTitle)
   const out = [predicateQuestion(ENTRY_WEB, cards.length === 1 && cards[0].observedForMotion ? ENTRY_MOTION_ASK : operations ? ENTRY_OPERATION_ASK : ENTRY_WEB_ASK), predicateQuestion(ENTRY_ANSWER, ENTRY_ANSWER_ASK)]
   if (codeCard) return out
   cards.slice(0, MAX_ENTRY_CARDS).forEach((card, index) => out.push(predicateQuestion(entryCardName(index), cards.length > 1 ? `Does the request specifically match the identity or known contents of ${quotePage(card)}?` : `Does this request need to be done on this open page: ${quotePage(card)}?`)))
@@ -250,10 +251,15 @@ export async function observeCardLines({ provider, run, message, cards, replyTo 
       const observed = await scope.callTool('egdesk_browser_observe', { cardId: card.cardId })
       const snapshot = observed?.snapshot
       if (!snapshot) return card
-      const pageTitle = single && !withText && typeof snapshot.title === 'string' ? compactText(snapshot.title, 80) : ''
-      const controls = !withText ? controlLines(snapshot, { limit: ENTRY_CARD_CONTROLS }).map(item => compactText(item, ENTRY_CARD_CONTROL_CHARS + 16)) : []
+      // L51 (real window, round d: 토핑은 베이컨이랑 양파로 체크해줘 / 배달 시간 저녁 7시 반으로 넣어줘 on the open order form): with the page text on, the card was quoted by its first three text lines
+      // alone ("Customer name:", "Telephone:", "E-mail address:"), the toppings and the time field were not among them, and the request predicate read the operation as not about this page
+      // (browser_entry 0.00, card 0.00 on the real model, 2 of 2), so the entry never took the first step. The title and the bounded control labels do not depend on the page text
+      // (they are what the text-off path always quoted, from the same observation and under the same Card grant): a single card keeps its title, and every observed card its controls,
+      // next to the lines. A single card with a title or controls is asked the operation predicate (entryQuestions).
+      const pageTitle = single && typeof snapshot.title === 'string' ? compactText(snapshot.title, 80) : ''
+      const controls = controlLines(snapshot, { limit: ENTRY_CARD_CONTROLS }).map(item => compactText(item, ENTRY_CARD_CONTROL_CHARS + 16))
       const shows = withText && Array.isArray(snapshot.text) ? snapshot.text.slice(0, ENTRY_LINES) : []
-      return { ...card, ...(motion && { observedForMotion: true }), ...(pageTitle && { pageTitle }), ...(controls.length && { controls }), ...(shows.length && { shows }) }
+      return { ...card, ...(motion && { observedForMotion: true }), ...(pageTitle && { pageTitle }), ...(controls.length && { controls }), ...(shows.length && { shows, entryExtra: true }) }
     } catch { return card }
   }))
   return [...seen, ...cards.slice(MAX_ENTRY_CARDS)]

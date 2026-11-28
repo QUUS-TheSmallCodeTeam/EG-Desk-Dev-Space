@@ -2,7 +2,7 @@
  "set": "browser-live-entry-v3",
  "description": "LIVE, c29: entry only. \"다음 결제일이 언제야?\" was browser_entry .02 (c31, no pages in the evidence), .01 (c34, pages and the billing line listed, a definition added) and .01 (c35, the account-data wording) while its card predicate was .93-.98. One question carried two conditions (\"a web task\" against \"an answer\"), and a listed line that answers it made \"answer\" the easy reading, whatever the wording. Owner decision (c28): TWO single-condition predicates combined by code. browser_entry: is the request about something that one of the open pages holds or shows, so that doing it means reading from or working in that page? browser_entry_answer: can it be answered from general knowledge or the conversation alone, with no open page? Code: a decided yes on browser_entry_answer is an answer and nothing is entered; otherwise browser_entry decides as before and the card rules are untouched. The bar is unchanged. The same four requests as entry-v2 (the membership request, the two general-knowledge controls that must stay answers, the hospital request); the three earlier entries (settings, issuance, statement) do not fit 2.5k. Predictions are in each check's note. Sent once.",
  "maxRequests": 5,
- "tokenCeiling": 2700,
+ "tokenCeiling": 3200,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
   {
