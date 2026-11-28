@@ -44,6 +44,7 @@ function harness(override = {}) {
     resolveProjectWorkspace: override.resolveProjectWorkspace,
     resolveRunProjectOrigin: override.resolveRunProjectOrigin,
     store: override.store,
+    procedures: override.procedures,
   })
   chat.setConnection(true)
   const notify = (method, params) => chat.handleNotification({ method, params })
@@ -4544,4 +4545,20 @@ test('Board peer: a delayed acknowledgement never blocks either turn or emits ac
   await h.finish(b); await h.finish(a); const count = h.events.length
   ack.resolve({ turnId:b.runId }); await h.tick()
   assert.equal(h.events.length,count); assert.equal(h.chat.snapshot(b.conversationId).runs[0].status,'completed')
+})
+
+test('round g: providers reach the procedure service through runtime.procedures() at use time; absent or throwing means null', () => {
+  const seen = { providerId: 'p-seen' }
+  let service = null
+  const a = harness({ toolProviders: [seen], procedures: () => service })
+  assert.equal(seen.runtime.procedures(), null)
+  service = { list: () => [] }
+  assert.equal(seen.runtime.procedures(), service)
+  assert.ok(a.chat)
+  const plain = { providerId: 'p-plain' }
+  harness({ toolProviders: [plain] })
+  assert.equal(plain.runtime.procedures(), null)
+  const broken = { providerId: 'p-broken' }
+  harness({ toolProviders: [broken], procedures: () => { throw new Error('x') } })
+  assert.equal(broken.runtime.procedures(), null)
 })

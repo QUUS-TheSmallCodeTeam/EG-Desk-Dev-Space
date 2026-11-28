@@ -247,6 +247,8 @@ export async function openWorkflowRuntime({
     get adapter() { return adapter },
     // The plan service egdesk_propose_plan proposes through; null while task storage is unavailable.
     get plans() { return plans },
+    // The one workflow store (records of kind browser_procedure); null in tests that open their own stores.
+    get workflowStore() { return stores?.workflowStore ?? null },
     handle,
     observeAuth,
     watchRoot: root => files.watchRoot(root),
@@ -294,6 +296,7 @@ async function openDurableStores(dataDir) {
       ledger: await openNativeTaskLedger({ store: workflowStore, legacyDirectory: path.join(dataDir, 'task-native') }),
       sourceOptions: { store: workflowStore, legacyDirectory: path.join(dataDir, 'task-sources') },
       planOptions: { store: workflowStore, legacyDirectory: path.join(dataDir, 'task-plans') },
+      workflowStore, // g: the procedure service stores its records here (egdesk-browser-procedure-service.mjs)
       close: () => workflowStore.close(),
     }
   } catch (error) {
