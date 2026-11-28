@@ -16245,7 +16245,6 @@
         try { listener(state.codex); } catch (error) { console.warn(TAG, 'codex listener failed', error); }
       }
       renderCodexActivityPanel();
-      renderProcedurePanel();
       if (typeof refreshFileCardAgentBadges === 'function') refreshFileCardAgentBadges();
       scheduleDeskSessionSave();
     };
@@ -33806,6 +33805,8 @@
       installBrowserShortcuts();
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);
+      // Round g (L61): the procedure panel follows the chat state (it draws nothing unless capabilities.browserProcedures).
+      try { state.codexBridge.subscribe(() => renderProcedurePanel()); } catch { /* optional: procedures are default off */ }
       try { installDeskPresence(); } catch { /* optional: the Desk works the same without presence */ }
       try { installCardSleep(); } catch { /* L42 optional: default off */ }
       try { if (readSurfacePref('egdesk.perf.flatFrost') === 'on') document.documentElement.setAttribute('egd-perf-flat-frost', ''); } catch { /* L38 optional: default off */ }
