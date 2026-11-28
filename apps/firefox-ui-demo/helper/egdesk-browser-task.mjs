@@ -530,10 +530,11 @@ export function finishedPageFacts(segments, ids = []) {
   return { found, page: found.length ? [] : pageLines(segments) }
 }
 
+const submittedTo = url => { try { const u = new URL(url); return compactText(u.host + u.pathname, 120) } catch { return null } }
 const askName = field => compactText(field.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)
 
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], searchedFor = null, field = null, staleBy = null, arrivalUnobserved = false }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [], searchedFor = null, field = null, staleBy = null, arrivalUnobserved = false, postedTo = null }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(task.goalChanges > 0 ? { goalChanges: Math.min(task.goalChanges, 9) } : {}), // c23: how many times the person changed the request while it ran
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
@@ -546,6 +547,8 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
     ...(Array.isArray(page) && page.length && !(Array.isArray(found) && found.length) ? { page: page.slice(0, MAX_PAGE_LINES) } : {}),
     ...(status === 'done' && searchedFor ? { searchedFor } : {}),
     ...(status === 'done' && arrivalUnobserved === true ? { arrivalUnobserved: true } : {}), // 임시 이름: the form went out and the arrived document could not be observed
+    // L52: where the submitted form's answer landed (host and path of the form's action, no query), proven by the top-level address, even when that document cannot be read
+    ...(status === 'done' && typeof postedTo === 'string' && postedTo ? { submittedTo: submittedTo(postedTo) } : {}),
     ...(staleBy === 'user-hold' ? { staleBy } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
@@ -714,7 +717,7 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
         remember(task, { status: 'done' })
         const allowPage = pageTextInNote() === true
         const { found, page } = allowPage ? finishedPageFacts(result.text, taskIdentifiers(task)) : { found: [], page: [] }
-        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page, searchedFor: allowPage ? result.searchedFor : null, arrivalUnobserved: result.arrivalUnobserved === true }) }
+        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page, searchedFor: allowPage ? result.searchedFor : null, arrivalUnobserved: result.arrivalUnobserved === true, postedTo: result.postedTo ?? null }) }
       }
       case 'needs_user_context': {
         const candidates = result.candidates || []
