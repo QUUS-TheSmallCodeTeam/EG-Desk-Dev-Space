@@ -556,7 +556,7 @@ const handleRunRequesterReadHttp = createRunRequesterReadHttpHandler({ requester
 // EG-Desk's own command and file tools, Codex as a pure model engine: developer flag EGDESK_OWN_TOOLS=on, default off (null: nothing changes).
 const ownToolsWiring = createOwnToolsWiring({ env: process.env, dataDir, spawn, getChat: () => chat, inspect: createGitTargetInspector() })
 // u1: the browser as EG-Desk tools for the conversation (a developer flag, default off: see egdesk-page-tools-wiring.mjs); approvals go through the own tools' ledger when that is on
-const pageToolsWiring = createPageToolsWiring({ env: process.env, getChat: () => chat, ledger: ownToolsWiring?.ledger ?? null })
+const pageToolsWiring = createPageToolsWiring({ env: process.env, getChat: () => chat, ledger: ownToolsWiring?.ledger ?? null, procedures }) // round g: the procedure tools get the service (null while the flag is off)
 const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
   // EGDESK_TERMINAL_GATE_METHOD=score selects the old 0-4 score question, only to compare; content predicates are the default.
   method: process.env.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
