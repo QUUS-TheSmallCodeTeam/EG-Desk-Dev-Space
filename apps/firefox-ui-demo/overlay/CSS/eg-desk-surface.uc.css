@@ -121,7 +121,7 @@
 :root {
   --egd-card-selection: var(--egd-primary);
   --egd-card-active-border: color-mix(in srgb, var(--egd-primary) 50%, var(--egd-surface-elevated));
-  --egd-card-active-ring: color-mix(in srgb, var(--egd-primary) 14%, transparent);
+  --egd-card-active-ring: color-mix(in srgb, var(--egd-primary) 30%, transparent);
 }
 
 /* DSN-01: the dark half of each light-dark() pair in
@@ -1820,18 +1820,18 @@
   outline-offset: 0;
 }
 
-/* The one active window: sage-grey edge, faint 2px ring, deeper shadow. */
+/* The one active window: accent edge, a 3px accent ring and a soft accent halo,
+   both kept at constant on-screen thickness whatever the camera zoom (the
+   canvas is scaled, so a fixed px ring would shrink to a hairline at overview
+   zoom). Other selected windows keep the thinner 2px ring and no halo. */
 .egd-canvas-card.egd-entity-active {
-  border-color: var(--egd-card-active-border);
-  outline: calc(2px / var(--egd-camera-zoom, 1)) solid var(--egd-card-active-ring);
+  border-color: var(--egd-card-selection);
+  outline: calc(3px / var(--egd-camera-zoom, 1)) solid var(--egd-card-selection);
   outline-offset: 0;
   box-shadow: var(--egd-card-shadow-active);
 }
-
-/* Among several selected windows the active one keeps the same accent edge. */
-#egd-canvas-layer:has(> .egd-entity-selected:not(.egd-entity-active)) > .egd-canvas-card.egd-entity-active {
-  border-color: var(--egd-card-selection);
-  outline-color: var(--egd-card-selection);
+.egd-canvas-card.egd-entity-active:not(.egd-card-fullscreen) {
+  box-shadow: 0 0 0 calc(8px / var(--egd-camera-zoom, 1)) var(--egd-card-active-ring), var(--egd-card-shadow-active);
 }
 
 .egd-chat-card.egd-entity-active .egd-chat-card-header {
@@ -2477,7 +2477,7 @@
 }
 
 .egd-browser-card.egd-entity-active {
-  border-color: var(--egd-card-active-border);
+  border-color: var(--egd-card-selection);
   box-shadow: var(--egd-card-shadow-active);
 }
 
@@ -2888,6 +2888,12 @@
     content: attr(data-compact-label);
     font: 600 calc(11px * var(--egd-browser-ui-scale, 1))/1 var(--egd-font);
   }
+  /* A label too long for the bar (the task-working text) leaves only the dot; the full text stays in the button title and aria-label. */
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-badge[data-compact-label=""] {
+    padding-inline: calc(7px * var(--egd-browser-ui-scale, 1));
+  }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-badge[data-compact-label=""]::before { display: block; }
+  .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-badge[data-compact-label=""]::after { content: none; }
   .egd-browser-card:is([data-egd-agent-control="operating"], [data-egd-agent-control="user"]) .egd-browser-agent-hand {
     width: calc(24px * var(--egd-browser-ui-scale, 1));
     padding: 0;
@@ -9277,7 +9283,7 @@ button.egd-codex-message-activity:focus-visible { outline: var(--egd-focus-outli
   box-shadow: var(--egd-card-shadow);
 }
 .egd-chat-card { border-radius: 9px; }
-.egd-chat-card.egd-entity-active { border-color: var(--egd-card-active-border); box-shadow: var(--egd-card-shadow-active); }
+.egd-chat-card.egd-entity-active { border-color: var(--egd-card-selection); box-shadow: var(--egd-card-shadow-active); }
 .egd-chat-card-header,
 .egd-chat-card.egd-entity-active .egd-chat-card-header {
   min-height: 32px;
