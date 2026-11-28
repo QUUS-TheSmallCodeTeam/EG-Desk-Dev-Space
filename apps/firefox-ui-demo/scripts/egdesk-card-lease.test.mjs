@@ -254,3 +254,24 @@ test('IME bypass: focus entering the page while blocked is blurred at once; not 
   assert.equal(L.leaseShouldBlurFocus(L.leaseStart(L.createLease(), 'a', 1), { inPageArea: true }), true)
   assert.equal(L.leaseShouldBlurFocus(L.leaseStart(L.createLease(), 'a', 1), { inPageArea: false }), false)
 })
+
+test('board: a locked active card hands the wheel to the board (no dead wheel), released card scrolls its page again', () => {
+  const m = js.match(/const shouldAllowActiveEntityScroll = \(target\) => \{[\s\S]*?\n    \};/)
+  assert.ok(m, 'shouldAllowActiveEntityScroll found')
+  class El {
+    constructor(cls, parent = null) { this.cls = cls; this.parent = parent; this.dataset = {}; this.offsetParent = {} }
+    contains(t) { for (let n = t; n; n = n.parent) if (n === this) return true; return false }
+    closest(sel) { const names = sel.split(',').map(s => s.trim().replace(/^\./, '')); for (let n = this; n; n = n.parent) if (names.includes(n.cls)) return n; return null }
+  }
+  const card = new El('egd-browser-card'), body = new El('egd-card-body', card), capture = new El('egd-card-body-capture', body), page = new El('browser', body)
+  capture.offsetParent = null
+  card.querySelector = sel => ({ '.egd-chat-card-body': null, '.egd-card-body': body, '.egd-card-body-capture': capture })[sel] ?? null
+  const state = { activeEntityId: 'c13' }, document = { getElementById: id => (id === 'c13' ? card : null) }
+  const allow = new Function('state', 'document', 'Element', `${m[0]}; return shouldAllowActiveEntityScroll`)(state, document, El)
+  assert.equal(allow(page), true, 'unlocked active card: its page scrolls')
+  card.dataset.egdCardLease = 'agent'
+  assert.equal(allow(page), false, 'locked: the wheel goes to the board')
+  card.dataset.egdCardLease = 'person'
+  assert.equal(allow(page), true, 'released: its page scrolls again')
+  assert.ok(js.includes("const allowCardScroll = state.activeEntityId === card.id && card.dataset.egdCardLease !== 'agent'"), 'Browser card wheel routing pans the board while the card is locked')
+})

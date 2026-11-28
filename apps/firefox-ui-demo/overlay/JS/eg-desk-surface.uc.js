@@ -29116,7 +29116,8 @@
     };
     const routeWheelToCanvas = (ev) => {
       if (ev.ctrlKey || ev.metaKey) return;
-      const allowCardScroll = state.activeEntityId === card.id
+      // L54 (round f): a locked card (lease 'agent') scrolls nothing for the person, so its wheel pans the board.
+      const allowCardScroll = state.activeEntityId === card.id && card.dataset.egdCardLease !== 'agent'
         && (ev.target === xulBrowser || ev.target === wrap || ev.target === body || body.contains(ev.target));
       if (allowCardScroll) return;
       if (typeof state.panCanvasByWheel !== 'function') return;
@@ -30794,6 +30795,8 @@
       if (!state.activeEntityId) return false;
       const activeEntity = document.getElementById(state.activeEntityId);
       if (!activeEntity || !activeEntity.contains(target)) return false;
+      // L54 (round f): while the Agent holds this card (card lease 'agent') its page takes no scroll from the person, so the wheel moves the board instead of doing nothing.
+      if (activeEntity.dataset?.egdCardLease === 'agent') return false;
       const chatBody = activeEntity.querySelector('.egd-chat-card-body');
       if (chatBody && chatBody.contains(target)) return true;
       const body = activeEntity.querySelector('.egd-card-body');
