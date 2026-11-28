@@ -720,7 +720,7 @@ test('C5 c22 ride-along through the runtime quotes what the card shows, exactly 
   const alone = world(t); await alone.send(MSG)
   const card = d => d.instructions.find(text => /^Does this request need to be done on this open page: /.test(text)) ?? null
   const rideCard = card(ride.decisions[0]), aloneCard = card(alone.decisions[0])
-  assert.match(rideCard, /which now shows "합성 포털"\?/)
+  assert.match(rideCard, /which now shows "합성 포털", whose controls include "link: 사업자 123-45-67890"/) // L51: the card also quotes its controls beside the lines
   assert.equal(rideCard, aloneCard, 'the same quoting on both paths')
   assert.deepEqual(ride.decisions[0].names.slice(-3), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'])
 })
