@@ -4,7 +4,7 @@ const Q = path.dirname(fileURLToPath(import.meta.url)), D = process.env.EGDESK_A
 const [, , id, engine = "Codex", rep = "1"] = process.argv
 const { CASES } = await import(`${Q}/${String(id).startsWith('rws-') ? 'cases-rws' : 'cases'}.mjs`); if (!CASES[id]) throw new Error('no case ' + id)
 // data: URL fixtures are rejected by the EG-Desk fixture-QA policy (QA_POLICY_UNVERIFIED): write them to $EGDESK_QA_OUT/fixtures and serve them as http://127.0.0.1:<port>/<file> (default 8770, EGDESK_QA_FIXTURE_PORT). Cases without data: urls are untouched.
-const { rewriteFixtureUrls, spawnFixtureServer } = await import(`${Q}/fixture-server.mjs`); const FX = `${OUT}/fixtures`; const fx = rewriteFixtureUrls(CASES[id], id, { dir: FX }); const c = fx.c
+const { claimsPositively } = await import(`${Q}/answer-check.mjs`); const { rewriteFixtureUrls, spawnFixtureServer } = await import(`${Q}/fixture-server.mjs`); const FX = `${OUT}/fixtures`; const fx = rewriteFixtureUrls(CASES[id], id, { dir: FX }); const c = fx.c
 const fxServer = fx.files.length ? await spawnFixtureServer({ dir: FX, node: N }) : null; const stopFx = async () => { try { await fxServer?.stop() } catch {} }; process.on('exit', () => { try { fxServer?.stop() } catch {} })
 const sh = (cmd, args, opts = {}) => { try { return execFileSync(cmd, args, { cwd: (cmd === N && args[0] === "scripts/egdesk-turn-timeline.mjs") ? D : Q, encoding: 'utf8', timeout: opts.timeout ?? 200000 }).trim() } catch (e) { return String(e.stdout || '') + ' ERR ' + String(e.message).slice(0, 120) } }
 const evalIn = (card, expr) => { const out = sh(N, ['page-eval.mjs', card, expr]); try { return JSON.parse(out) } catch { return { error: out.slice(0, 160) } } }
@@ -32,10 +32,12 @@ const sub = expr => expr.replace(/EXPECT\.(\w+)/g, (_, k) => JSON.stringify(EXPE
 for (const expr of c.checks || []) { const r = evalIn(c.card, sub(expr)); rec.checks.push({ expr: expr.slice(0, 60), ok: r.value === true, got: r.error ? r.error.slice(0, 60) : r.value }) }
 for (const expr of c.alsoChecks || []) { const r = evalIn(c.also.card, sub(expr)); rec.checks.push({ expr: 'also:' + expr.slice(0, 55), ok: r.value === true, got: r.error ? r.error.slice(0, 60) : r.value }) }
 if (c.anyCard) { const uris = sh(N, ['mn.mjs', 'exec', 'return [...document.querySelectorAll(".egd-browser-card")].map(c=>{ try { return c.id+" "+c._browserControls.toolBrowser().currentURI.spec } catch { return c.id+" ?" } })', '3000']); rec.checks.push({ expr: 'anyCard ' + c.anyCard, ok: uris.includes(c.anyCard), got: (uris.match(new RegExp('egd-browser-card-\\d+ [^"]*' + c.anyCard.replace(/\//g, '\\/'))) || [''])[0] }) }
-const chat = sh(N, ['read-chat.mjs', '2500']); const lastMsg = chat.slice(Math.max(0, chat.lastIndexOf(c.follow || c.msg)))
+const chat = sh(N, ['read-chat.mjs', '2500']); const sentText = c.follow || c.msg; const sentAt = chat.lastIndexOf(sentText); const visible = sentAt >= 0 || chat.lastIndexOf(sentText.slice(0, 12)) >= 0
+const lastMsg = visible ? chat.slice(sentAt >= 0 ? sentAt : chat.lastIndexOf(sentText.slice(0, 12))) : ''
+if (c.follow || c.answerRe || c.answerNotRe || c.answerHas) rec.checks.push({ expr: 'last sent message visible in chat', ok: visible, got: visible ? '' : (c.follow ? rec.send2 : '') })
 if (c.answerHas) { const want = String(EXPECT[c.answerHas.replace('EXPECT.', '')] ?? ''); rec.checks.push({ expr: 'answer has ' + want.slice(0, 40), ok: !!want && lastMsg.includes(want.slice(0, 20)), got: '' }) }
 if (c.answerRe) rec.checks.push({ expr: 'answer ~ ' + c.answerRe, ok: new RegExp(c.answerRe).test(lastMsg), got: '' })
-if (c.answerNotRe) rec.checks.push({ expr: 'answer !~ ' + c.answerNotRe.slice(0, 40), ok: !new RegExp(c.answerNotRe).test(lastMsg.replace(/\s+/g, ' ').replace(/.*?(Codex|Claude) /, '')), got: '' })
+if (c.answerNotRe) rec.checks.push({ expr: 'no positive claim ~ ' + c.answerNotRe.slice(0, 40), ok: !claimsPositively(lastMsg.replace(/\s+/g, ' ').replace(/.*?(Codex|Claude) /, ''), c.answerNotRe), got: '' })
 rec.steps = (lastMsg.match(/브라우저 작업[^]*?(?=[A-Z] (Codex|Claude) |$)/) || [''])[0].replace(/\s+/g, ' ').slice(0, 300)
 rec.answer = lastMsg.replace(/\s+/g, ' ').replace(/.*?(Codex|Claude) /, '').slice(0, 220)
 rec.falseFail = /실패/.test(rec.steps)
