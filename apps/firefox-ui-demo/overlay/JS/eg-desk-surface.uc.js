@@ -28631,16 +28631,18 @@
       // chrome-document fallbacks do not enforce document/target revisions.
       let result;
       try {
+        // L52: a click that navigates the top document away (a POST submit) can lose the actor's reply; reject promptly once the document is gone.
+        // The module is resolved BEFORE the request is sent and any failure to load it only turns the race off: the act itself must never depend on it.
+        let gone = null;
+        try { gone = typeof actDocumentGoneModule === 'function' ? actDocumentGoneModule() : null; } catch { gone = null; }
+        const watched = gone && typeof gone.actCanLeaveDocument === 'function' && typeof gone.raceActWithDocumentGone === 'function' && gone.actCanLeaveDocument(action);
         const actRequest = browserAgentActorRequest('act', {
           action, options: { guard,
             lease: { leaseId: lease.leaseId, requestId: lease.requestId, deadlineMs: lease.deadlineMs },
             ...(lease.callId ? { callId: lease.callId } : {}), budgetMs,
             snapshot: { textLimit: 60, elementLimit: 80 } },
         });
-        // L52: a click that navigates the top document away (a POST submit) can lose the actor's reply; reject promptly once the document is gone.
-        // See EGDeskActDocumentGone.sys.mjs.
-        const gone = typeof actDocumentGoneModule === 'function' ? actDocumentGoneModule() : null;
-        result = gone?.actCanLeaveDocument(action)
+        result = watched
           ? await gone.raceActWithDocumentGone(actRequest, { isReplaced: () =>
               xulBrowser.browsingContext !== context || xulBrowser.browsingContext.currentWindowGlobal !== windowGlobal })
           : await actRequest;
